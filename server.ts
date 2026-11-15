@@ -16,11 +16,14 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '5mb' }));
 
 // Security headers (iframe-compatible for preview while enforcing XSS/MIME protections)
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Permissions-Policy', 'geolocation=(self)');
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  }
   next();
 });
 
@@ -1117,6 +1120,7 @@ app.put('/api/admin/config', (req, res) => {
 app.get('/api/shop', (_req, res) => {
   return res.json({
     ok: true,
+    storagePersistent: true,
     menuItems: db.menuItems,
     toppings: db.toppings,
     shopSettings: db.shopSettings,
@@ -1131,7 +1135,7 @@ app.put('/api/shop', (req, res) => {
     db.shopSettings = req.body.shopSettings;
   }
   flushDb();
-  return res.json({ ok: true });
+  return res.json({ ok: true, storagePersistent: true });
 });
 
 app.get('/api/orders', (_req, res) => {

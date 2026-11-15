@@ -120,8 +120,15 @@ export function AdminPinModal({ isOpen, onClose, onSuccess }: PinModalProps) {
   );
 }
 
+interface SyncResult {
+  ok: boolean;
+  persistent: boolean;
+  reauth?: boolean;
+}
+
 interface AdminDashboardProps {
   adminToken: string | null;
+  serverPersistent?: boolean;
   menuItems: MenuItem[];
   toppings: Topping[];
   orders: Order[];
@@ -129,9 +136,9 @@ interface AdminDashboardProps {
   shopSettings: ShopSettings;
   onExit: () => void;
   onRequireReauth: () => void;
-  onUpdateShopSettings: (next: ShopSettings) => Promise<void> | void;
-  onUpdateMenu: (next: MenuItem[]) => void;
-  onUpdateToppings: (next: Topping[]) => void;
+  onUpdateShopSettings: (next: ShopSettings) => Promise<SyncResult | void> | void;
+  onUpdateMenu: (next: MenuItem[]) => Promise<SyncResult | void> | void;
+  onUpdateToppings: (next: Topping[]) => Promise<SyncResult | void> | void;
   onUpdateOrderStatus: (orderId: string, status: OrderStatus) => void;
   onClearCompletedOrders: () => void;
   onOpenDriverConsole: (orderId: string) => void;
@@ -156,6 +163,7 @@ const EMPTY_SECRETS: AdminSecretsConfig = {
 
 export function AdminDashboard({
   adminToken,
+  serverPersistent = true,
   menuItems,
   toppings,
   orders,
@@ -361,14 +369,15 @@ export function AdminDashboard({
     img.src = dataUrl;
   };
 
-  const handleSaveMenuItem = (e: React.FormEvent) => {
+  const handleSaveMenuItem = async (e: React.FormEvent) => {
     e.preventDefault();
     const price = parseFloat(itemPrice) || 0;
     const discount = parseInt(itemDiscount, 10) || 0;
     const category = itemCat.trim() || 'Coffee';
 
+    let nextMenu: MenuItem[];
     if (editId) {
-      const next = menuItems.map((m) =>
+      nextMenu = menuItems.map((m) =>
         String(m.id) === editId
           ? {
               ...m,
@@ -382,7 +391,6 @@ export function AdminDashboard({
             }
           : m
       );
-      onUpdateMenu(next);
     } else {
       const newItem: MenuItem = {
         id: Date.now(),
@@ -395,10 +403,17 @@ export function AdminDashboard({
         desc: itemDesc.trim(),
         available: true,
       };
-      onUpdateMenu([newItem, ...menuItems]);
+      nextMenu = [newItem, ...menuItems];
     }
     resetMenuForm();
-    onToast('បានរក្សាទុកទំនិញជោគជ័យ!');
+    const res = await onUpdateMenu(nextMenu);
+    if (res && res.reauth) return;
+    if (res && !res.ok) return;
+    if (res && !res.persistent) {
+      onToast('បានរក្សាទុក! ប៉ុន្តែត្រូវភ្ជាប់ CAFE_KV ឬ Firebase ទើបអ្នកផ្សេងឃើញ');
+    } else {
+      onToast('✓ បានរក្សាទុកទំនិញ និងចែករំលែកគ្រប់ឧបករណ៍!');
+    }
   };
 
   const resetMenuForm = () => {
@@ -423,15 +438,16 @@ export function AdminDashboard({
     setItemDesc(item.desc || '');
   };
 
-  const handleAddTopping = (e: React.FormEvent) => {
+  const handleAddTopping = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTopName.trim()) return;
-    onUpdateToppings([
+    const res = await onUpdateToppings([
       ...toppings,
       { id: Date.now(), name: newTopName.trim(), price: parseFloat(newTopPrice) || 0, available: true },
     ]);
     setNewTopName('');
     setNewTopPrice('');
+    if (res && !res.ok) return;
     onToast('បានបន្ថែម Topping!');
   };
 
@@ -457,8 +473,14 @@ export function AdminDashboard({
           return;
         }
       }
-      await onUpdateShopSettings(draft);
-      onToast('បានរក្សាទុកការកំណត់ហាង និងសោសុវត្ថិភាពជោគជ័យ!');
+      const shopRes = await onUpdateShopSettings(draft);
+      if (shopRes && shopRes.reauth) return;
+      if (shopRes && !shopRes.ok) return;
+      if (shopRes && !shopRes.persistent) {
+        onToast('បានរក្សាទុក! (ត្រូវភ្ជាប់ CAFE_KV ឬ Firebase ទើបអ្នកផ្សេងឃើញរូបថ្មី)');
+      } else {
+        onToast('✓ បានរក្សាទុកការកំណត់ហាង និងរូបភាពជោគជ័យ!');
+      }
     } catch {
       onToast('មានបញ្ហាក្នុងការរក្សាទុកការកំណត់');
     } finally {
@@ -515,14 +537,14 @@ export function AdminDashboard({
   })();
 
   return (
-    <div className="max-w-6xl mx-auto p-4 md:p-6 pb-20 space-y-5">
-      <div className="no-print bg-slate-900 text-white p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <span className="font-bold text-sm">🛡️ ផ្ទាំងគ្រប់គ្រងម្ចាស់ហាង</span>
+    <div className="max-w-6xl mx-auto p-3 sm:p-4 md:p-6 pb-24 space-y-4 sm:space-y-5 overflow-x-clip">
+      <div className="no-print bg-slate-900 text-white p-3 sm:p-4 rounded-2xl flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <span className="font-bold text-xs sm:text-sm truncate">🛡️ គ្រប់គ្រងហាង</span>
           <button
             type="button"
             onClick={() => onUpdateShopSettings({ ...shopSettings, isOpen: shopSettings.isOpen === false })}
-            className={`px-3 py-1.5 rounded-xl text-xs font-bold ${
+            className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold shrink-0 ${
               shopSettings.isOpen !== false ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
             }`}
           >
@@ -532,45 +554,70 @@ export function AdminDashboard({
         <button
           type="button"
           onClick={onExit}
-          className="bg-red-500 hover:bg-red-600 text-white px-4 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5"
+          className="bg-red-500 hover:bg-red-600 text-white px-3 sm:px-4 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold flex items-center gap-1 shrink-0"
         >
           <X className="w-3.5 h-3.5" />
           <span>ចេញទៅមើលហាង</span>
         </button>
       </div>
 
+      {!serverPersistent && !getFirebaseBase(shopSettings.firebaseUrl) && (
+        <div className="no-print bg-amber-50 border border-amber-300 text-amber-950 p-3.5 rounded-2xl text-xs space-y-1.5">
+          <p className="font-bold">
+            ⚠️ មិនទាន់បានភ្ជាប់ Database ផ្ទុកទិន្នន័យអចិន្ត្រៃយ៍ (Cloudflare KV ឬ Firebase) ទេ!
+          </p>
+          <p className="text-[11px] leading-relaxed">
+            បើមិនទាន់ភ្ជាប់ទេ រូបភាព និងម៉ឺនុយដែលអ្នកកែប្រែអាចមិនបង្ហាញលើទូរស័ព្ទអ្នកផ្សេងឡើយ។ សូមភ្ជាប់តាមវិធីមួយណាក៏បាន៖
+          </p>
+          <ul className="text-[11px] list-disc pl-4 space-y-0.5">
+            <li>
+              <strong>វិធីទី ១៖</strong> ក្នុង Cloudflare Workers → Settings → Bindings → បន្ថែម KV Namespace ឈ្មោះ{' '}
+              <code className="font-mono-num bg-amber-100 px-1 rounded">CAFE_KV</code>
+            </li>
+            <li>
+              <strong>វិធីទី ២៖</strong> ចូលផ្ទាំង <strong>«កំណត់ហាង»</strong> ហើយបិទភ្ជាប់{' '}
+              <strong>Firebase Realtime DB URL</strong> រួចចុច រក្សាទុក (ដំណើរការភ្លាម ១០០%)។
+            </li>
+          </ul>
+        </div>
+      )}
+
       {/* KPIs */}
-      <div className="no-print grid grid-cols-3 gap-3">
-        <div className="bg-white p-4 rounded-2xl border border-slate-200">
-          <p className="text-xs text-slate-500">ចំណូលសរុប</p>
-          <p className="text-xl font-bold font-mono-num text-[#0D4A3E] mt-0.5">${totalRevenue.toFixed(2)}</p>
+      <div className="no-print grid grid-cols-3 gap-2 sm:gap-3">
+        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200">
+          <p className="text-[11px] sm:text-xs text-slate-500 truncate">ចំណូលសរុប</p>
+          <p className="text-base sm:text-xl font-bold font-mono-num text-[#0D4A3E] mt-0.5 truncate">
+            ${totalRevenue.toFixed(2)}
+          </p>
         </div>
-        <div className="bg-white p-4 rounded-2xl border border-slate-200">
-          <p className="text-xs text-slate-500">ការកម្ម៉ង់សរុប</p>
-          <p className="text-xl font-bold font-mono-num text-slate-900 mt-0.5">{orders.length}</p>
+        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200">
+          <p className="text-[11px] sm:text-xs text-slate-500 truncate">ការកម្ម៉ង់</p>
+          <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5">{orders.length}</p>
         </div>
-        <div className="bg-white p-4 rounded-2xl border border-slate-200">
-          <p className="text-xs text-slate-500">សមាជិកចុះឈ្មោះ</p>
-          <p className="text-xl font-bold font-mono-num text-slate-900 mt-0.5">{displayedMembers.length}</p>
+        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200">
+          <p className="text-[11px] sm:text-xs text-slate-500 truncate">សមាជិក</p>
+          <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5">
+            {displayedMembers.length}
+          </p>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="no-print flex gap-2 overflow-x-auto pb-2 border-b border-slate-200">
+      <div className="no-print flex gap-1.5 sm:gap-2 overflow-x-auto hide-scrollbar pb-2 border-b border-slate-200">
         {(
           [
             ['orders', `ការកម្ម៉ង់${pendingCount > 0 ? ` (${pendingCount})` : ''}`],
             ['menu', 'ម៉ឺនុយ & Topping'],
             ['qr', 'QR បិទតាមតុ'],
             ['members', 'សមាជិក'],
-            ['settings', 'កំណត់ហាង, KHQR & API ផ្លូវការ'],
+            ['settings', 'កំណត់ហាង, KHQR & API'],
           ] as Array<[AdminTab, string]>
         ).map(([id, label]) => (
           <button
             key={id}
             type="button"
             onClick={() => setActiveTab(id)}
-            className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors ${
+            className={`px-3 sm:px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors shrink-0 ${
               activeTab === id ? 'bg-[#0D4A3E] text-white' : 'bg-white border border-slate-200 text-slate-600'
             }`}
           >
@@ -800,13 +847,19 @@ export function AdminDashboard({
                 />
                 <div className="flex items-center gap-2">
                   {itemImg && (
-                    <img src={itemImg} alt="Preview" className="w-11 h-11 rounded-xl object-cover border shrink-0" />
+                    <img
+                      src={resolveAssetUrl(itemImg, CAFE_ASSETS.icedLatte)}
+                      alt="Preview"
+                      onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
+                      className="w-11 h-11 rounded-xl object-cover border shrink-0"
+                    />
                   )}
                   <input
                     type="file"
                     accept="image/*"
                     onChange={(e) => {
                       const f = e.target.files?.[0];
+                      e.currentTarget.value = '';
                       if (f) compressImageFile(f, 400, (b) => setItemImg(b), onToast);
                     }}
                     className="text-xs w-full"
@@ -1173,8 +1226,17 @@ export function AdminDashboard({
                   accept="image/*"
                   onChange={(e) => {
                     const f = e.target.files?.[0];
-                    if (f) compressImageFile(f, 250, (b) => setDraft((p) => ({ ...p, logoImg: b })), onToast);
                     e.currentTarget.value = '';
+                    if (f)
+                      compressImageFile(
+                        f,
+                        250,
+                        (b) => {
+                          setDraft((p) => ({ ...p, logoImg: b }));
+                          onToast('✓ បានដាក់ Logo ថ្មី! សូមចុច «រក្សាទុក» ខាងក្រោម');
+                        },
+                        onToast
+                      );
                   }}
                   className="text-xs w-full"
                 />
@@ -1194,8 +1256,17 @@ export function AdminDashboard({
                 accept="image/*"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) compressImageFile(f, 650, (b) => setDraft((p) => ({ ...p, bannerImg: b })), onToast);
                   e.currentTarget.value = '';
+                  if (f)
+                    compressImageFile(
+                      f,
+                      650,
+                      (b) => {
+                        setDraft((p) => ({ ...p, bannerImg: b }));
+                        onToast('✓ បានដាក់ Banner ថ្មី! សូមចុច «រក្សាទុក» ខាងក្រោម');
+                      },
+                      onToast
+                    );
                 }}
                 className="text-xs w-full"
               />
@@ -1625,14 +1696,16 @@ export function AdminDashboard({
             </div>
           </div>
 
-          <button
-            type="button"
-            disabled={savingSettings}
-            onClick={handleSaveAllSettings}
-            className="w-full bg-[#0D4A3E] hover:bg-[#09352C] text-white py-3 rounded-2xl text-sm font-bold"
-          >
-            {savingSettings ? 'កំពុងរក្សាទុក...' : '💾 រក្សាទុកការកំណត់ផ្លូវការ'}
-          </button>
+          <div className="sticky bottom-3 z-20 pt-2">
+            <button
+              type="button"
+              disabled={savingSettings}
+              onClick={handleSaveAllSettings}
+              className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-70 text-white py-3.5 rounded-2xl text-sm font-bold shadow-xl border border-white/15"
+            >
+              {savingSettings ? 'កំពុងរក្សាទុក & បង្ហោះ...' : '💾 រក្សាទុកការកំណត់ផ្លូវការ (ចែករំលែកគ្រប់គ្នា)'}
+            </button>
+          </div>
         </div>
       )}
     </div>

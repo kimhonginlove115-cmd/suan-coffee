@@ -113,12 +113,17 @@ export default function App() {
     tgUrl: '',
   });
 
+  const [lastOrderCountState] = useState(0);
+  void lastOrderCountState;
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [serverPersistent, setServerPersistent] = useState(true);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastOrderCountRef = useRef(orders.length);
   const isFetchingOrdersRef = useRef(false);
+  const isFetchingShopRef = useRef(false);
   const clearingOrdersRef = useRef(false);
   const lastOrdersSigRef = useRef('');
+  const lastShopSigRef = useRef('');
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -158,11 +163,27 @@ export default function App() {
     safeSet('cafe_current_member_v15', currentMember);
   }, [currentMember]);
 
+  const handleRequireAdminReauth = useCallback(() => {
+    setAdminToken(null);
+    safeSessionDel('cafe_admin_token');
+    setViewMode('customer');
+    setIsPinOpen(true);
+    showToast('សម័យប្រើប្រាស់ម្ចាស់ហាងផុតកំណត់ សូមបញ្ចូល PIN ម្តងទៀត');
+  }, [showToast]);
+
   const syncShopEverywhere = useCallback(
-    async (nextMenu: MenuItem[], nextToppings: Topping[], nextSettings: ShopSettings) => {
+    async (
+      nextMenu: MenuItem[],
+      nextToppings: Topping[],
+      nextSettings: ShopSettings
+    ): Promise<{ ok: boolean; persistent: boolean; reauth?: boolean }> => {
+      let serverOk = false;
+      let serverPersisted = false;
+      let firebaseOk = false;
+
       if (adminToken) {
         try {
-          await fetchWithTimeout(
+          const res = await fetchWithTimeout(
             '/api/shop',
             {
               method: 'PUT',
@@ -176,16 +197,30 @@ export default function App() {
                 shopSettings: nextSettings,
               }),
             },
-            10000
+            12000
           );
+          if (res.status === 401) {
+            handleRequireAdminReauth();
+            return { ok: false, persistent: false, reauth: true };
+          }
+          if (res.ok) {
+            const data = (await res.json().catch(() => ({}))) as {
+              ok?: boolean;
+              storagePersistent?: boolean;
+            };
+            serverOk = Boolean(data.ok ?? true);
+            serverPersisted = data.storagePersistent !== false;
+            setServerPersistent(serverPersisted);
+          }
         } catch {
-          // ignore
+          // ignore and try Firebase fallback
         }
       }
+
       const b = getFirebaseBase(nextSettings.firebaseUrl);
       if (b) {
         try {
-          await fetchWithTimeout(
+          const fbRes = await fetchWithTimeout(
             `${b}/shop.json`,
             {
               method: 'PUT',
@@ -196,14 +231,20 @@ export default function App() {
                 shopSettings: nextSettings,
               }),
             },
-            8000
+            9000
           );
+          if (fbRes.ok) firebaseOk = true;
         } catch {
           // ignore
         }
       }
+
+      return {
+        ok: serverOk || firebaseOk,
+        persistent: serverPersisted || firebaseOk,
+      };
     },
-    [adminToken]
+    [adminToken, handleRequireAdminReauth]
   );
 
   const syncOrderEverywhere = useCallback(
@@ -325,6 +366,88 @@ export default function App() {
     });
   }, []);
 
+  const applyFetchedShop = useCallback(
+    (payload: { menuItems?: unknown; toppings?: unknown; shopSettings?: unknown }) => {
+      const nextMenu = Array.isArray(payload.menuItems) ? normalizeMenuItems(payload.menuItems) : null;
+      const nextToppings = Array.isArray(payload.toppings)
+        ? normalizeToppings(payload.toppings)
+        : null;
+      const hasSettings = Boolean(payload.shopSettings && typeof payload.shopSettings === 'object');
+
+      const sig = JSON.stringify({
+        m: nextMenu,
+        t: nextToppings,
+        s: hasSettings ? payload.shopSettings : null,
+      });
+      if (sig === lastShopSigRef.current) return;
+      lastShopSigRef.current = sig;
+
+      if (nextMenu) setMenuItems(nextMenu);
+      if (nextToppings) setToppings(nextToppings);
+      if (hasSettings) {
+        setShopSettings((prev) =>
+          normalizeShopSettings(payload.shopSettings as Partial<ShopSettings>, prev)
+        );
+      }
+    },
+    []
+  );
+
+  const fetchShopFromSources = useCallback(async () => {
+    if (isFetchingShopRef.current) return;
+    isFetchingShopRef.current = true;
+    try {
+      let serverData: {
+        ok?: boolean;
+        storagePersistent?: boolean;
+        menuItems?: unknown;
+        toppings?: unknown;
+        shopSettings?: Record<string, unknown> | null;
+      } | null = null;
+
+      try {
+        const r = await fetchWithTimeout('/api/shop', { cache: 'no-store' }, 9000);
+        if (r.ok) {
+          serverData = await r.json();
+          if (serverData?.ok) {
+            setServerPersistent(serverData.storagePersistent !== false);
+          }
+        }
+      } catch {
+        // ignore network hiccup
+      }
+
+      const candidateFbUrl =
+        (serverData?.shopSettings && typeof serverData.shopSettings.firebaseUrl === 'string'
+          ? serverData.shopSettings.firebaseUrl
+          : '') || shopSettings.firebaseUrl;
+      const b = getFirebaseBase(candidateFbUrl);
+
+      let fbData: { menuItems?: unknown; toppings?: unknown; shopSettings?: unknown } | null = null;
+      if (b && (!serverData?.storagePersistent || !serverData?.shopSettings)) {
+        try {
+          const fbRes = await fetchWithTimeout(`${b}/shop.json`, { cache: 'no-store' }, 7000);
+          if (fbRes.ok) {
+            const parsed = await fbRes.json();
+            if (parsed && typeof parsed === 'object') {
+              fbData = parsed as { menuItems?: unknown; toppings?: unknown; shopSettings?: unknown };
+            }
+          }
+        } catch {
+          // ignore Firebase fetch hiccup
+        }
+      }
+
+      if (fbData && (!serverData?.storagePersistent || !serverData?.shopSettings)) {
+        applyFetchedShop(fbData);
+      } else if (serverData?.ok) {
+        applyFetchedShop(serverData);
+      }
+    } finally {
+      isFetchingShopRef.current = false;
+    }
+  }, [applyFetchedShop, shopSettings.firebaseUrl]);
+
   // Load persisted shop data, check active session, and auto-verify Telegram Mini App
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -342,18 +465,7 @@ export default function App() {
       setIsPinOpen(true);
     }
 
-    // Load shop menu/settings from persistent server DB
-    fetchWithTimeout('/api/shop', {}, 9000)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (!data?.ok) return;
-        if (Array.isArray(data.menuItems)) setMenuItems(normalizeMenuItems(data.menuItems));
-        if (Array.isArray(data.toppings)) setToppings(normalizeToppings(data.toppings));
-        if (data.shopSettings) {
-          setShopSettings((prev) => normalizeShopSettings(data.shopSettings, prev));
-        }
-      })
-      .catch(() => {});
+    fetchShopFromSources();
 
     if (authToken) {
       fetchWithTimeout('/api/auth/me', { headers: { Authorization: `Bearer ${authToken}` } }, 8000)
@@ -400,6 +512,16 @@ export default function App() {
     }, 3500);
     return () => clearInterval(timer);
   }, [isAdminUnlocked, liveTrackOrderId, viewMode, fetchOrdersFromSources]);
+
+  useEffect(() => {
+    if (viewMode !== 'customer') return;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'hidden') {
+        fetchShopFromSources();
+      }
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [viewMode, fetchShopFromSources]);
 
   const handleLogout = async () => {
     if (authToken) {
@@ -604,7 +726,7 @@ export default function App() {
         : 'សេវាដឹកជញ្ជូនរហ័សទាន់ចិត្ត';
 
   return (
-    <div className="min-h-screen bg-[#F6F8F7] text-slate-800">
+    <div className="min-h-screen bg-[#F6F8F7] text-slate-800 overflow-x-clip">
       <AnimatePresence>
         {toastMsg && (
           <motion.div
@@ -661,6 +783,7 @@ export default function App() {
       {viewMode === 'admin' && (
         <AdminDashboard
           adminToken={adminToken}
+          serverPersistent={serverPersistent}
           menuItems={menuItems}
           toppings={toppings}
           orders={orders}
@@ -671,24 +794,26 @@ export default function App() {
             safeSessionDel('cafe_admin_token');
             setViewMode('customer');
           }}
-          onRequireReauth={() => {
-            setAdminToken(null);
-            safeSessionDel('cafe_admin_token');
-            setViewMode('customer');
-            setIsPinOpen(true);
-            showToast('សម័យប្រើប្រាស់ម្ចាស់ហាងផុតកំណត់ សូមបញ្ចូល PIN ម្តងទៀត');
-          }}
+          onRequireReauth={handleRequireAdminReauth}
           onUpdateShopSettings={async (next) => {
             setShopSettings(next);
-            await syncShopEverywhere(menuItems, toppings, next);
+            const res = await syncShopEverywhere(menuItems, toppings, next);
+            if (!res.ok && !res.reauth) {
+              showToast('⚠️ មិនអាចផ្ទុកទិន្នន័យទៅ Server បានទេ (រក្សាទុកតែក្នុងទូរស័ព្ទនេះ)');
+            }
+            return res;
           }}
-          onUpdateMenu={(next) => {
+          onUpdateMenu={async (next) => {
             setMenuItems(next);
-            syncShopEverywhere(next, toppings, shopSettings);
+            const res = await syncShopEverywhere(next, toppings, shopSettings);
+            if (!res.ok && !res.reauth) {
+              showToast('⚠️ មិនអាចផ្ទុកម៉ឺនុយទៅ Server បានទេ (សូមពិនិត្យការតភ្ជាប់)');
+            }
+            return res;
           }}
-          onUpdateToppings={(next) => {
+          onUpdateToppings={async (next) => {
             setToppings(next);
-            syncShopEverywhere(menuItems, next, shopSettings);
+            return syncShopEverywhere(menuItems, next, shopSettings);
           }}
           onUpdateOrderStatus={handleUpdateOrderStatus}
           onClearCompletedOrders={async () => {
@@ -733,20 +858,20 @@ export default function App() {
       {viewMode === 'customer' && (
         <div className="min-h-screen flex flex-col justify-between pb-24">
           <div>
-            <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-md border-b border-slate-200/80">
-              <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4 sm:gap-8">
+            <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80">
+              <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-6">
                 <a
                   href="#top"
-                  className="flex items-center gap-2.5 text-base sm:text-lg font-bold tracking-tight text-[#0D4A3E] whitespace-nowrap shrink-0"
+                  className="flex items-center gap-2 sm:gap-2.5 text-sm sm:text-lg font-bold tracking-tight text-[#0D4A3E] min-w-0 flex-1 sm:flex-initial"
                 >
                   <img
                     src={resolveAssetUrl(shopSettings.logoImg, CAFE_ASSETS.logoEmblem)}
                     alt={shopSettings.brandTitle}
                     referrerPolicy="no-referrer"
                     onError={(e) => handleImgFallback(e, CAFE_ASSETS.logoEmblem)}
-                    className="w-9 h-9 rounded-full object-cover border border-amber-400/70 bg-[#0D4A3E]"
+                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-full object-cover border border-amber-400/70 bg-[#0D4A3E] shrink-0"
                   />
-                  <span>{shopSettings.brandTitle}</span>
+                  <span className="truncate">{shopSettings.brandTitle}</span>
                 </a>
 
                 <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
@@ -782,12 +907,12 @@ export default function App() {
                   </button>
                 </nav>
 
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                   <button
                     type="button"
                     onClick={() => setIsTrackerOpen(true)}
                     aria-label="តាមដានកម្ម៉ង់"
-                    className="md:hidden min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 text-slate-700"
+                    className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-700 bg-white active:scale-95 transition-transform"
                   >
                     <Receipt className="w-4 h-4" />
                   </button>
@@ -798,17 +923,20 @@ export default function App() {
                       else setIsPinOpen(true);
                     }}
                     aria-label="សម្រាប់ម្ចាស់ហាង"
-                    className="md:hidden min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 text-slate-700"
+                    className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-700 bg-white active:scale-95 transition-transform"
                   >
                     <Lock className="w-4 h-4" />
                   </button>
                   <button
                     type="button"
                     onClick={() => setIsAuthOpen(true)}
-                    className="min-h-[40px] px-4 py-2 bg-[#0D4A3E] hover:bg-[#09352C] text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                    className="h-9 sm:min-h-[40px] px-2.5 sm:px-4 bg-[#0D4A3E] hover:bg-[#09352C] text-white text-[11px] sm:text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 active:scale-95"
                   >
-                    <User className="w-3.5 h-3.5 text-amber-300" />
-                    <span>
+                    <User className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                    <span className="sm:hidden">
+                      {currentMember ? currentMember.name.split(' ')[0] : 'គណនី'}
+                    </span>
+                    <span className="hidden sm:inline">
                       {currentMember
                         ? `${currentMember.name.split(' ')[0]} · ★${currentMember.points || 0}`
                         : 'គណនី / ភ្ជាប់ Telegram'}
@@ -818,7 +946,7 @@ export default function App() {
               </div>
             </header>
 
-            <main id="top" className="max-w-7xl mx-auto px-4 sm:px-6 pt-5 space-y-6">
+            <main id="top" className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 sm:pt-5 space-y-4 sm:space-y-6">
               {shopSettings.isOpen === false && (
                 <div className="bg-red-600 text-white px-4 py-3 rounded-2xl text-xs font-bold text-center">
                   សូមអភ័យទោស! ហាងកំពុងបិទបណ្តោះអាសន្ន
@@ -826,7 +954,7 @@ export default function App() {
               )}
 
               {tableNumberFromQR !== null && (
-                <div className="bg-amber-400 text-slate-900 px-4 py-2.5 rounded-2xl text-xs flex items-center justify-between font-bold">
+                <div className="bg-amber-400 text-slate-900 px-3.5 py-2.5 rounded-2xl text-xs flex items-center justify-between gap-2 font-bold">
                   <span>🪑 ញ៉ាំក្នុងហាង · តុលេខ {tableNumberFromQR}</span>
                   <button
                     type="button"
@@ -834,7 +962,7 @@ export default function App() {
                       setTableNumberFromQR(null);
                       setOrderType('delivery');
                     }}
-                    className="bg-slate-900 text-white px-3 py-1 rounded-lg text-[11px]"
+                    className="bg-slate-900 text-white px-3 py-1 rounded-lg text-[11px] shrink-0"
                   >
                     ប្តូរទៅដឹកជញ្ជូន
                   </button>
@@ -847,55 +975,55 @@ export default function App() {
                   initial={{ opacity: 0, y: -6 }}
                   animate={{ opacity: 1, y: 0 }}
                   onClick={() => setLiveTrackOrderId(activeLiveOrder.id)}
-                  className="w-full bg-amber-400 hover:bg-amber-500 text-slate-900 px-4 py-2.5 rounded-2xl text-xs flex items-center justify-between font-bold shadow-sm transition-colors"
+                  className="w-full bg-amber-400 hover:bg-amber-500 text-slate-900 px-3.5 py-2.5 rounded-2xl text-xs flex items-center justify-between gap-2 font-bold shadow-sm transition-colors"
                 >
-                  <span className="flex items-center gap-2.5">
+                  <span className="flex items-center gap-2 min-w-0">
                     <DeliveryRiderIllustration />
-                    <span>អ្នកដឹកកំពុងធ្វើដំណើរ! ចុចមើល Live Map ({activeLiveOrder.id})</span>
+                    <span className="truncate">អ្នកដឹកកំពុងធ្វើដំណើរ! ចុចមើល Live Map ({activeLiveOrder.id})</span>
                   </span>
                   <ChevronRight className="w-4 h-4 shrink-0" />
                 </motion.button>
               )}
 
-              <section className="grid lg:grid-cols-12 gap-5 items-stretch">
+              <section className="grid lg:grid-cols-12 gap-3.5 sm:gap-5 items-stretch">
                 <motion.div
                   initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.35 }}
-                  className="lg:col-span-7 bg-[#0D4A3E] text-white rounded-3xl p-6 sm:p-8 flex flex-col justify-between gap-5 relative overflow-hidden"
+                  className="lg:col-span-7 bg-[#0D4A3E] text-white rounded-2xl sm:rounded-3xl p-4 sm:p-8 flex flex-col justify-between gap-3.5 sm:gap-5 relative overflow-hidden"
                 >
-                  <div className="grid sm:grid-cols-12 gap-4 items-center">
-                    <div className="sm:col-span-8 space-y-3">
-                      <p className="text-xs font-medium text-emerald-200">
+                  <div className="flex items-center justify-between gap-3 sm:grid sm:grid-cols-12 sm:gap-4">
+                    <div className="sm:col-span-8 space-y-1.5 sm:space-y-3 min-w-0">
+                      <p className="text-[11px] sm:text-xs font-medium text-emerald-200 truncate">
                         {shopSettings.isOpen !== false ? 'កំពុងបើកលក់ · ដឹកជញ្ជូនរហ័ស' : 'បិទបណ្តោះអាសន្ន'}
                         {shopSettings.promoCode && shopSettings.promoPercent > 0
                           ? ` · កូដ ${shopSettings.promoCode} (-${shopSettings.promoPercent}%)`
                           : ''}
                       </p>
-                      <h1 className="text-2xl sm:text-4xl font-bold leading-tight text-balance">
+                      <h1 className="text-xl sm:text-4xl font-bold leading-tight text-balance">
                         {shopSettings.brandTitle}
                       </h1>
-                      <p className="text-sm text-emerald-100/90 max-w-xl">
+                      <p className="text-xs sm:text-sm text-emerald-100/90 max-w-xl line-clamp-2">
                         {shopSettings.shopName} · {promoSummaryText}
                       </p>
                     </div>
 
-                    <div className="sm:col-span-4 flex justify-center">
-                      <CoffeeCupSteamIllustration className="w-36 h-28 sm:w-44 sm:h-36" />
+                    <div className="sm:col-span-4 flex justify-center shrink-0">
+                      <CoffeeCupSteamIllustration className="w-20 h-16 sm:w-44 sm:h-36" />
                     </div>
                   </div>
 
-                  <div className="grid sm:grid-cols-2 gap-3 pt-2">
+                  <div className="grid sm:grid-cols-2 gap-2.5 sm:gap-3 pt-1">
                     <button
                       type="button"
                       onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
-                      className="text-left bg-white/12 hover:bg-white/20 px-3.5 py-2.5 rounded-2xl flex items-center gap-2.5 border border-white/15 transition-colors"
+                      className="text-left bg-white/12 hover:bg-white/20 px-3 py-2 sm:px-3.5 sm:py-2.5 rounded-xl sm:rounded-2xl flex items-center gap-2.5 border border-white/15 transition-colors"
                     >
-                      <div className="bg-amber-400 text-slate-900 p-2 rounded-xl shrink-0">
+                      <div className="bg-amber-400 text-slate-900 p-1.5 sm:p-2 rounded-lg sm:rounded-xl shrink-0">
                         <MapPin className="w-4 h-4" />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="text-[11px] text-emerald-200">
+                        <p className="text-[10px] sm:text-[11px] text-emerald-200">
                           {tableNumberFromQR ? 'ញ៉ាំក្នុងហាង' : 'ដឹកជញ្ជូនទៅ (ចុចបើកផែនទី)'}
                         </p>
                         <p className="text-xs font-bold truncate">
@@ -912,7 +1040,7 @@ export default function App() {
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         placeholder="ស្វែងរកកាហ្វេ មី នំ ឬភេសជ្ជៈ..."
-                        className="w-full h-full min-h-[48px] bg-white text-slate-900 placeholder-slate-400 text-sm pl-10 pr-4 py-2.5 rounded-2xl focus:outline-none"
+                        className="w-full h-full min-h-[44px] sm:min-h-[48px] bg-white text-slate-900 placeholder-slate-400 text-base sm:text-sm pl-10 pr-4 py-2 rounded-xl sm:rounded-2xl focus:outline-none"
                       />
                     </div>
                   </div>
@@ -922,7 +1050,7 @@ export default function App() {
                   initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.4, delay: 0.05 }}
-                  className="lg:col-span-5 relative rounded-3xl overflow-hidden min-h-[220px] lg:h-full bg-slate-900"
+                  className="lg:col-span-5 relative rounded-2xl sm:rounded-3xl overflow-hidden h-44 sm:h-60 lg:h-full lg:min-h-[280px] bg-slate-900"
                 >
                   <img
                     src={resolveAssetUrl(shopSettings.bannerImg, CAFE_ASSETS.heroBanner)}
@@ -931,19 +1059,21 @@ export default function App() {
                     onError={(e) => handleImgFallback(e, CAFE_ASSETS.heroBanner)}
                     className="w-full h-full object-cover"
                   />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/35 to-transparent p-6 flex flex-col justify-end">
-                    <p className="text-xs font-semibold text-amber-300">{promoSummaryText}</p>
-                    <p className="text-white font-bold text-lg mt-1">
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent p-4 sm:p-6 flex flex-col justify-end">
+                    <p className="text-[11px] sm:text-xs font-semibold text-amber-300 truncate">
+                      {promoSummaryText}
+                    </p>
+                    <p className="text-white font-bold text-sm sm:text-lg mt-0.5 sm:mt-1 leading-snug">
                       ឆុងថ្មីៗគ្រប់កែវ · ភ្ជាប់ Telegram ទទួលពិន្ទុបន្ថែម
                     </p>
                   </div>
                 </motion.div>
               </section>
 
-              <section id="menu-section" className="space-y-4 pt-2">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <h2 className="font-bold text-slate-900 text-lg sm:text-xl">ម៉ឺនុយ (Menu)</h2>
+              <section id="menu-section" className="space-y-3 sm:space-y-4 pt-1 sm:pt-2">
+                <div className="flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
+                  <div className="flex items-center gap-2.5 sm:gap-3">
+                    <h2 className="font-bold text-slate-900 text-base sm:text-xl">ម៉ឺនុយ (Menu)</h2>
                     <span className="text-xs text-slate-500 font-mono-num">{filteredMenu.length} មុខ</span>
                   </div>
 
@@ -955,7 +1085,7 @@ export default function App() {
                           key={cat}
                           type="button"
                           onClick={() => setSelectedCategory(cat)}
-                          className={`relative px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+                          className={`relative px-3.5 sm:px-4 py-1.5 sm:py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
                             active
                               ? 'text-white'
                               : 'bg-white text-slate-600 border border-slate-200 hover:border-slate-300'
@@ -980,7 +1110,7 @@ export default function App() {
                     មិនមានទំនិញត្រូវនឹងការស្វែងរកទេ
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-6">
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
                     {filteredMenu.map((item, idx) => {
                       const finalPrice = getDiscountedPrice(item);
                       const hasDisc = item.discount > 0;
@@ -991,12 +1121,12 @@ export default function App() {
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ duration: 0.25, delay: Math.min(idx * 0.04, 0.25) }}
                           whileHover={shouldReduceMotion ? undefined : { y: -3 }}
-                          className={`bg-white rounded-2xl p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-md ${
+                          className={`bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-md ${
                             !item.available ? 'opacity-60' : ''
                           }`}
                         >
                           <div>
-                            <div className="aspect-[4/3] w-full rounded-xl overflow-hidden bg-slate-100 mb-3 relative">
+                            <div className="aspect-[4/3] w-full rounded-xl overflow-hidden bg-slate-100 mb-2.5 sm:mb-3 relative">
                               <img
                                 src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
                                 alt={item.name}
@@ -1005,22 +1135,22 @@ export default function App() {
                                 className="w-full h-full object-cover"
                               />
                             </div>
-                            <p className="text-[11px] text-slate-500">
+                            <p className="text-[10px] sm:text-[11px] text-slate-500 truncate">
                               {item.type === 'food' ? 'អាហារ/នំ' : 'ភេសជ្ជៈ'} · {item.category}
                               {!item.available ? ' · អស់ស្តុក' : hasDisc ? ` · បញ្ចុះ ${item.discount}%` : ''}
                             </p>
-                            <h3 className="font-semibold text-sm sm:text-base text-slate-900 mt-0.5 line-clamp-1">
+                            <h3 className="font-semibold text-xs sm:text-base text-slate-900 mt-0.5 line-clamp-1">
                               {item.name}
                             </h3>
                           </div>
 
-                          <div className="flex items-center justify-between mt-3 pt-2 border-t border-slate-100">
+                          <div className="flex items-center justify-between mt-2.5 sm:mt-3 pt-2 border-t border-slate-100">
                             <div className="font-mono-num">
-                              <span className="font-bold text-base text-[#0D4A3E]">
+                              <span className="font-bold text-sm sm:text-base text-[#0D4A3E]">
                                 ${finalPrice.toFixed(2)}
                               </span>
                               {hasDisc && (
-                                <span className="text-xs text-slate-400 line-through ml-1.5">
+                                <span className="text-[11px] sm:text-xs text-slate-400 line-through ml-1">
                                   ${Number(item.price).toFixed(2)}
                                 </span>
                               )}
@@ -1031,7 +1161,7 @@ export default function App() {
                               disabled={!item.available}
                               onClick={() => setCustomizingItem(item)}
                               aria-label={`កម្ម៉ង់ ${item.name}`}
-                              className="min-w-[40px] min-h-[40px] rounded-xl bg-[#0D4A3E] hover:bg-[#09352C] text-white flex items-center justify-center disabled:bg-slate-300 transition-colors"
+                              className="min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl bg-[#0D4A3E] hover:bg-[#09352C] text-white flex items-center justify-center disabled:bg-slate-300 transition-colors"
                             >
                               <Plus className="w-4 h-4" />
                             </motion.button>
@@ -1059,7 +1189,7 @@ export default function App() {
                 exit={{ y: 24, opacity: 0 }}
                 transition={{ type: 'spring', damping: 24, stiffness: 320 }}
                 onClick={() => setIsCartOpen(true)}
-                className="fixed bottom-4 left-1/2 -translate-x-1/2 w-[92%] max-w-md bg-[#0D4A3E] hover:bg-[#09352C] text-white px-4 py-3 rounded-2xl shadow-xl flex items-center justify-between z-40 transition-colors"
+                className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 w-[92%] max-w-md bg-[#0D4A3E] hover:bg-[#09352C] text-white px-4 py-3 rounded-2xl shadow-xl flex items-center justify-between z-40 transition-colors"
               >
                 <div className="flex items-center gap-3">
                   <div className="bg-white/15 p-2 rounded-xl relative">

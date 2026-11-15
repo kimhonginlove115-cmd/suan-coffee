@@ -288,8 +288,12 @@ async function verifySessionToken(
 // ---- Database Load / Save ----
 async function loadDb(env: Env): Promise<PersistedDatabase> {
   const envSecret = env.SESSION_SECRET && env.SESSION_SECRET.length >= 16 ? env.SESSION_SECRET : '';
+  const fallbackEphemeralSecret =
+    !env.CAFE_KV && !envSecret
+      ? await sha256Hex(`${env.ADMIN_PIN || '1234'}:suan-coffee-ephemeral-session-v1`)
+      : '';
   const defaults: PersistedDatabase = {
-    sessionSecret: envSecret || randomHex(32),
+    sessionSecret: envSecret || fallbackEphemeralSecret || randomHex(32),
     members: [],
     orders: [],
     menuItems: null,
@@ -343,6 +347,7 @@ function jsonResponse(data: unknown, status = 200): Response {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
     },
@@ -1148,6 +1153,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
   if (path === '/api/shop' && method === 'GET') {
     return jsonResponse({
       ok: true,
+      storagePersistent: Boolean(env.CAFE_KV),
       menuItems: db.menuItems,
       toppings: db.toppings,
       shopSettings: db.shopSettings,
@@ -1165,7 +1171,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       db.shopSettings = body.shopSettings as Record<string, unknown>;
     }
     await saveDb(env, db);
-    return jsonResponse({ ok: true });
+    return jsonResponse({ ok: true, storagePersistent: Boolean(env.CAFE_KV) });
   }
 
   if (path === '/api/orders' && method === 'GET') {

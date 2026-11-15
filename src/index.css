@@ -9,10 +9,13 @@
     --cream-bg: #F6F8F7;
   }
 
+  html,
   body {
     font-family: 'Plus Jakarta Sans', 'Kantumruy Pro', sans-serif;
     background-color: var(--cream-bg);
     color: #1E293B;
+    overflow-x: clip;
+    -webkit-tap-highlight-color: transparent;
   }
 }
 
