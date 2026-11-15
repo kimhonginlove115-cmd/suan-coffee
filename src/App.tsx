@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion, useScroll, useSpring } from 'motion/react';
 import {
+  Armchair,
+  ArrowRight,
+  Bike,
   ChevronDown,
   ChevronRight,
+  Clock,
   Coffee,
   Croissant,
   CupSoda,
@@ -10,6 +14,7 @@ import {
   LayoutGrid,
   Leaf,
   MapPin,
+  Minus,
   Plus,
   ReceiptText,
   Search,
@@ -20,6 +25,7 @@ import {
   Tag,
   User,
   UtensilsCrossed,
+  X,
 } from 'lucide-react';
 import type {
   AppLang,
@@ -40,6 +46,7 @@ import {
   DEFAULT_MENU,
   DEFAULT_SETTINGS,
   DEFAULT_TOPPINGS,
+  computeDeliveryFee,
   fetchWithTimeout,
   getDiscountedPrice,
   getDistanceKm,
@@ -89,6 +96,12 @@ function getCategoryIcon(cat: string) {
 
 export default function App() {
   const shouldReduceMotion = useReducedMotion();
+  const { scrollYProgress } = useScroll();
+  const smoothScrollProgress = useSpring(scrollYProgress, {
+    stiffness: 240,
+    damping: 32,
+    restDelta: 0.001,
+  });
 
   const [lang, setLang] = useState<AppLang>(() => {
     if (typeof window !== 'undefined') {
@@ -622,6 +635,10 @@ export default function App() {
     () => getDistanceKm(shopSettings.lat, shopSettings.lng, selectedCoords.lat, selectedCoords.lng),
     [shopSettings.lat, shopSettings.lng, selectedCoords.lat, selectedCoords.lng]
   );
+  const estimatedDeliveryFee = useMemo(
+    () => (orderType === 'delivery' ? computeDeliveryFee(shopSettings, distanceKm, cartSubtotal) : 0),
+    [orderType, shopSettings, distanceKm, cartSubtotal]
+  );
 
   const activeLiveOrder = useMemo(
     () =>
@@ -1030,42 +1047,42 @@ export default function App() {
       )}
 
       {viewMode === 'customer' && (
-        <div className="min-h-screen flex flex-col justify-between pb-24">
+        <div className="min-h-screen flex flex-col justify-between pb-24 lg:pb-10">
           <div>
-            <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80">
-              <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-6">
+            <header className="sticky top-0 z-30 bg-white/92 backdrop-blur-md border-b border-slate-200/80 shadow-[0_1px_12px_rgba(15,23,42,0.04)]">
+              <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-8">
                 <a
                   href="#top"
-                  className="flex items-center gap-2 sm:gap-2.5 text-sm sm:text-lg font-bold tracking-tight text-[#0D4A3E] min-w-0 flex-1 sm:flex-initial"
+                  className="flex items-center gap-2 sm:gap-2.5 text-sm sm:text-lg font-bold tracking-tight text-[#0D4A3E] min-w-0 flex-1 sm:flex-initial group"
                 >
                   <img
                     src={resolveAssetUrl(shopSettings.logoImg, CAFE_ASSETS.logoEmblem)}
                     alt={shopSettings.brandTitle}
                     referrerPolicy="no-referrer"
                     onError={(e) => handleImgFallback(e, CAFE_ASSETS.logoEmblem)}
-                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-full object-cover border border-amber-400/70 bg-[#0D4A3E] shrink-0"
+                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-full object-cover border border-amber-400/70 bg-[#0D4A3E] shrink-0 transition-transform duration-300 group-hover:scale-105"
                   />
-                  <span className="truncate">{shopSettings.brandTitle}</span>
+                  <span className="truncate whitespace-nowrap">{shopSettings.brandTitle}</span>
                 </a>
 
-                <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
+                <nav className="hidden md:flex items-center gap-7 text-sm font-semibold text-slate-600">
                   <a
                     href="#menu-section"
-                    className="hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
+                    className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
                     {t.menuNav}
                   </a>
                   <button
                     type="button"
                     onClick={() => setIsTrackerOpen(true)}
-                    className="hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
+                    className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
                     {t.trackNav}
                   </button>
                   <button
                     type="button"
                     onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
-                    className="hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
+                    className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
                     {t.locationNav}
                   </button>
@@ -1075,7 +1092,7 @@ export default function App() {
                       if (isAdminUnlocked) setViewMode('admin');
                       else setIsPinOpen(true);
                     }}
-                    className="hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
+                    className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
                     {t.adminNav}
                   </button>
@@ -1131,9 +1148,15 @@ export default function App() {
                   </motion.button>
                 </div>
               </div>
+              {!shouldReduceMotion && (
+                <motion.div
+                  style={{ scaleX: smoothScrollProgress }}
+                  className="origin-left h-[2px] w-full bg-gradient-to-r from-[#0D4A3E] via-amber-400 to-[#0D4A3E]/80"
+                />
+              )}
             </header>
 
-            <main id="top" className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 sm:pt-5 space-y-4 sm:space-y-6">
+            <main id="top" className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 sm:pt-6 space-y-5 sm:space-y-8">
               {shopSettings.isOpen === false && (
                 <div className="bg-red-600 text-white px-4 py-3 rounded-2xl text-xs font-bold text-center">
                   {t.shopClosedBanner}
@@ -1180,45 +1203,65 @@ export default function App() {
                 </motion.button>
               )}
 
-              <section className="grid lg:grid-cols-12 gap-3.5 sm:gap-5 items-stretch">
+              <section className="grid lg:grid-cols-12 gap-4 sm:gap-6 items-stretch">
                 <motion.div
-                  initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
+                  initial={shouldReduceMotion ? false : { opacity: 0, y: 14 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.35 }}
-                  className="lg:col-span-7 bg-[#0D4A3E] text-white rounded-2xl sm:rounded-3xl p-4 sm:p-8 flex flex-col justify-between gap-3.5 sm:gap-5 relative overflow-hidden"
+                  transition={{ duration: 0.42, ease: [0.16, 1, 0.3, 1] }}
+                  className="lg:col-span-7 bg-[#0D4A3E] text-white rounded-2xl sm:rounded-3xl p-4 sm:p-8 flex flex-col justify-between gap-4 sm:gap-6 relative overflow-hidden shadow-md"
                 >
-                  <div className="flex items-center justify-between gap-3 sm:grid sm:grid-cols-12 sm:gap-4">
-                    <div className="sm:col-span-8 space-y-1.5 sm:space-y-3 min-w-0">
-                      <p className="text-[11px] sm:text-xs font-medium text-emerald-200 truncate flex items-center gap-1.5">
-                        <span
-                          className={`w-2 h-2 rounded-full shrink-0 ${
-                            shopSettings.isOpen !== false ? 'bg-emerald-300 animate-pulse' : 'bg-red-400'
-                          }`}
-                        />
+                  <div
+                    aria-hidden="true"
+                    className="hero-glow-drift pointer-events-none absolute -top-24 -right-24 w-72 h-72 rounded-full bg-amber-400/12 blur-2xl"
+                  />
+                  <div
+                    aria-hidden="true"
+                    className="hero-glow-drift pointer-events-none absolute -bottom-24 -left-16 w-64 h-64 rounded-full bg-emerald-300/10 blur-2xl"
+                  />
+
+                  <div className="relative z-10 flex items-center justify-between gap-3 sm:grid sm:grid-cols-12 sm:gap-6">
+                    <div className="sm:col-span-8 space-y-2 sm:space-y-3 min-w-0">
+                      <motion.p
+                        initial={shouldReduceMotion ? false : { opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ duration: 0.35, delay: 0.08 }}
+                        className="text-[11px] sm:text-xs font-medium text-emerald-200 truncate flex items-center gap-1.5"
+                      >
+                        <Clock className="w-3.5 h-3.5 text-amber-300 shrink-0" />
                         <span className="truncate">
                           {shopSettings.isOpen !== false ? t.openFastDelivery : t.closedTemp}
                           {shopSettings.promoCode && shopSettings.promoPercent > 0
                             ? ` · ${t.promoCodePrefix} ${shopSettings.promoCode} (-${shopSettings.promoPercent}%)`
                             : ''}
                         </span>
-                      </p>
-                      <h1 className="text-xl sm:text-4xl font-bold leading-tight text-balance">
+                      </motion.p>
+                      <motion.h1
+                        initial={shouldReduceMotion ? false : { opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.4, delay: 0.12 }}
+                        className="text-xl sm:text-4xl lg:text-[42px] font-bold leading-[1.15] text-balance"
+                      >
                         {shopSettings.brandTitle}
-                      </h1>
-                      <p className="text-xs sm:text-sm text-emerald-100/90 max-w-xl line-clamp-2">
+                      </motion.h1>
+                      <motion.p
+                        initial={shouldReduceMotion ? false : { opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: 0.4, delay: 0.18 }}
+                        className="text-xs sm:text-sm lg:text-base text-emerald-100/90 max-w-xl line-clamp-2"
+                      >
                         {shopSettings.shopName} · {promoSummaryText}
-                      </p>
-                      <SocialLinksBar lang={lang} shopSettings={shopSettings} variant="hero" />
+                      </motion.p>
                     </div>
 
                     <div className="sm:col-span-4 flex justify-center shrink-0">
-                      <CoffeeCupSteamIllustration className="w-20 h-16 sm:w-44 sm:h-36" />
+                      <CoffeeCupSteamIllustration className="w-20 h-16 sm:w-36 sm:h-32 lg:w-44 lg:h-36" />
                     </div>
                   </div>
 
-                  <div className="grid sm:grid-cols-2 gap-2.5 sm:gap-3 pt-1">
+                  <div className="relative z-10 grid sm:grid-cols-2 gap-2.5 sm:gap-3 pt-1">
                     <motion.button
                       type="button"
+                      whileHover={shouldReduceMotion ? undefined : { y: -2 }}
                       whileTap={shouldReduceMotion ? undefined : { scale: 0.97 }}
                       onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
                       className="text-left bg-white/12 hover:bg-white/20 px-3 py-2 sm:px-3.5 sm:py-2.5 rounded-xl sm:rounded-2xl flex items-center gap-2.5 border border-white/15 transition-colors"
@@ -1244,50 +1287,83 @@ export default function App() {
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         placeholder={t.searchPlaceholder}
-                        className="w-full h-full min-h-[44px] sm:min-h-[48px] bg-white text-slate-900 placeholder-slate-400 text-base sm:text-sm pl-10 pr-4 py-2 rounded-xl sm:rounded-2xl focus:outline-none"
+                        className="w-full h-full min-h-[44px] sm:min-h-[48px] bg-white text-slate-900 placeholder-slate-400 text-base sm:text-sm pl-10 pr-9 py-2 rounded-xl sm:rounded-2xl focus:outline-none focus:ring-2 focus:ring-amber-300"
                       />
+                      {searchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setSearchQuery('')}
+                          aria-label={t.clearSearch}
+                          className="absolute right-2.5 w-6 h-6 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </motion.div>
 
                 <motion.div
-                  initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
+                  initial={shouldReduceMotion ? false : { opacity: 0, y: 14 }}
                   animate={{ opacity: 1, y: 0 }}
-                  whileTap={shouldReduceMotion ? undefined : { scale: 0.985 }}
-                  transition={{ duration: 0.4, delay: 0.05 }}
-                  className="lg:col-span-5 relative rounded-2xl sm:rounded-3xl overflow-hidden h-44 sm:h-60 lg:h-full lg:min-h-[280px] bg-slate-900"
+                  transition={{ duration: 0.45, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
+                  className="lg:col-span-5 group card-sheen relative rounded-2xl sm:rounded-3xl overflow-hidden h-48 sm:h-64 lg:h-full lg:min-h-[300px] bg-slate-900 shadow-md"
                 >
                   <img
                     src={resolveAssetUrl(shopSettings.bannerImg, CAFE_ASSETS.heroBanner)}
                     alt={shopSettings.brandTitle}
                     referrerPolicy="no-referrer"
                     onError={(e) => handleImgFallback(e, CAFE_ASSETS.heroBanner)}
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-cover transition-transform duration-700 ease-out group-hover:scale-105"
                   />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent p-4 sm:p-6 flex flex-col justify-end">
-                    <p className="text-[11px] sm:text-xs font-semibold text-amber-300 truncate">
-                      {promoSummaryText}
-                    </p>
-                    <p className="text-white font-bold text-sm sm:text-lg mt-0.5 sm:mt-1 leading-snug">
-                      {t.bannerSubline}
-                    </p>
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent p-4 sm:p-7 flex flex-col justify-between">
+                    <div className="flex justify-end">
+                      <a
+                        href="#menu-section"
+                        className="inline-flex items-center gap-1.5 bg-white/15 backdrop-blur-md hover:bg-white/25 text-white text-[11px] font-semibold px-3 py-1.5 rounded-xl border border-white/20 transition-colors"
+                      >
+                        <span>{t.signatureCraft}</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </a>
+                    </div>
+                    <div>
+                      <p className="text-[11px] sm:text-xs font-semibold text-amber-300 truncate">
+                        {promoSummaryText}
+                      </p>
+                      <p className="text-white font-bold text-sm sm:text-xl mt-0.5 sm:mt-1 leading-snug text-balance">
+                        {t.bannerSubline}
+                      </p>
+                    </div>
                   </div>
                 </motion.div>
               </section>
 
               {featuredMenu.length > 0 && selectedCategory === 'All' && !searchQuery.trim() && (
-                <section className="space-y-2.5">
-                  <div className="flex items-center gap-2">
-                    <Star className="w-4 h-4 fill-amber-400 text-amber-500" />
-                    <h2 className="font-bold text-slate-900 text-sm sm:text-base">{t.featuredHeading}</h2>
+                <motion.section
+                  initial={shouldReduceMotion ? false : { opacity: 0, y: 14 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true, amount: 0.15 }}
+                  transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
+                  className="space-y-3"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Star className="w-4 h-4 fill-amber-400 text-amber-500" />
+                      <h2 className="font-bold text-slate-900 text-sm sm:text-lg">{t.featuredHeading}</h2>
+                    </div>
+                    <span className="hidden lg:inline text-xs text-slate-500 font-mono-num">
+                      {featuredMenu.length} {t.itemsCountUnit}
+                    </span>
                   </div>
-                  <div className="flex gap-3 overflow-x-auto hide-scrollbar pb-1">
+
+                  {/* Mobile horizontal scroll strip */}
+                  <div className="flex gap-3 overflow-x-auto hide-scrollbar pb-1 lg:hidden">
                     {featuredMenu.map((item) => {
                       const fp = getDiscountedPrice(item);
                       const displayName = getMenuName(item, lang);
                       return (
                         <button
-                          key={`feat-${item.id}`}
+                          key={`feat-mob-${item.id}`}
                           type="button"
                           onClick={() => setCustomizingItem(item)}
                           className="shrink-0 w-56 sm:w-64 bg-white border border-amber-200/80 rounded-2xl p-2.5 flex items-center gap-3 text-left hover:shadow-md transition-shadow"
@@ -1312,155 +1388,397 @@ export default function App() {
                       );
                     })}
                   </div>
-                </section>
-              )}
 
-              <section id="menu-section" className="space-y-3 sm:space-y-4 pt-1 sm:pt-2">
-                <div className="flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
-                  <div className="flex items-center gap-2.5 sm:gap-3">
-                    <h2 className="font-bold text-slate-900 text-base sm:text-xl">{t.menuHeading}</h2>
-                    <span className="text-xs text-slate-500 font-mono-num">
-                      {filteredMenu.length} {t.itemsCountUnit}
-                    </span>
-                  </div>
-
-                  <div className="flex gap-1.5 overflow-x-auto hide-scrollbar pb-1 max-w-full">
-                    {categories.map((cat) => {
-                      const active = selectedCategory === cat;
+                  {/* Desktop clean 4-column showcase grid */}
+                  <div className="hidden lg:grid lg:grid-cols-4 gap-4">
+                    {featuredMenu.slice(0, 4).map((item, idx) => {
+                      const fp = getDiscountedPrice(item);
+                      const displayName = getMenuName(item, lang);
                       return (
                         <motion.button
-                          key={cat}
+                          key={`feat-desk-${item.id}`}
                           type="button"
-                          whileTap={shouldReduceMotion ? undefined : { scale: 0.93 }}
-                          onClick={() => setSelectedCategory(cat)}
-                          className={`relative px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1.5 ${
-                            active
-                              ? 'text-white'
-                              : 'bg-white text-slate-600 border border-slate-200 hover:border-[#0D4A3E]/40'
-                          }`}
+                          initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
+                          whileInView={{ opacity: 1, y: 0 }}
+                          viewport={{ once: true, amount: 0.2 }}
+                          transition={{ duration: 0.3, delay: idx * 0.05 }}
+                          whileHover={shouldReduceMotion ? undefined : { y: -4 }}
+                          whileTap={shouldReduceMotion ? undefined : { scale: 0.98 }}
+                          onClick={() => setCustomizingItem(item)}
+                          className="group card-sheen bg-white border border-slate-200/90 hover:border-[#0D4A3E]/35 rounded-2xl p-3 flex items-center gap-3.5 text-left hover:shadow-md transition-all"
                         >
-                          {active && (
-                            <motion.span
-                              layoutId="activeCategoryTab"
-                              transition={{ type: 'spring', stiffness: 380, damping: 28 }}
-                              className="absolute inset-0 bg-[#0D4A3E] rounded-xl -z-0 shadow-sm"
-                            />
-                          )}
-                          <span className="relative z-10 flex items-center gap-1.5">
-                            {getCategoryIcon(cat)}
-                            <span>{cat === 'All' ? (isEn ? 'All' : 'ទាំងអស់') : getMenuCategoryLabel(cat, lang)}</span>
+                          <img
+                            src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
+                            alt={displayName}
+                            referrerPolicy="no-referrer"
+                            onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
+                            className="w-16 h-16 rounded-xl object-cover shrink-0 bg-slate-100 transition-transform duration-300 group-hover:scale-105"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11px] text-slate-500 truncate">
+                              {getMenuCategoryLabel(item.category, lang, item.categoryEn)}
+                            </p>
+                            <p className="font-bold text-sm text-slate-900 truncate mt-0.5">{displayName}</p>
+                            <p className="font-bold text-sm font-mono-num text-[#0D4A3E] mt-1">
+                              ${fp.toFixed(2)}
+                            </p>
+                          </div>
+                          <span className="w-8 h-8 rounded-xl bg-[#E8F2EF] group-hover:bg-[#0D4A3E] text-[#0D4A3E] group-hover:text-white flex items-center justify-center shrink-0 transition-colors">
+                            <Plus className="w-4 h-4" />
                           </span>
                         </motion.button>
                       );
                     })}
                   </div>
+                </motion.section>
+              )}
+
+              <section id="menu-section" className="lg:grid lg:grid-cols-12 lg:gap-6 lg:items-start pt-1">
+                <div className="lg:col-span-8 xl:col-span-9 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <h2 className="font-bold text-slate-900 text-base sm:text-xl">{t.menuHeading}</h2>
+                      <span className="text-xs text-slate-500 font-mono-num">
+                        {filteredMenu.length} {t.itemsCountUnit}
+                      </span>
+                    </div>
+
+                    <div className="flex gap-1.5 overflow-x-auto hide-scrollbar pb-1 max-w-full">
+                      {categories.map((cat) => {
+                        const active = selectedCategory === cat;
+                        return (
+                          <motion.button
+                            key={cat}
+                            type="button"
+                            whileHover={shouldReduceMotion ? undefined : { y: -1 }}
+                            whileTap={shouldReduceMotion ? undefined : { scale: 0.94 }}
+                            onClick={() => setSelectedCategory(cat)}
+                            className={`relative px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1.5 shrink-0 ${
+                              active
+                                ? 'text-white'
+                                : 'bg-white text-slate-600 border border-slate-200 hover:border-[#0D4A3E]/40 hover:text-slate-900'
+                            }`}
+                          >
+                            {active && (
+                              <motion.span
+                                layoutId="activeCategoryTab"
+                                transition={{ type: 'spring', stiffness: 380, damping: 28 }}
+                                className="absolute inset-0 bg-[#0D4A3E] rounded-xl -z-0 shadow-sm"
+                              />
+                            )}
+                            <span className="relative z-10 flex items-center gap-1.5">
+                              {getCategoryIcon(cat)}
+                              <span>
+                                {cat === 'All' ? (isEn ? 'All' : 'ទាំងអស់') : getMenuCategoryLabel(cat, lang)}
+                              </span>
+                            </span>
+                          </motion.button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {!filteredMenu.length ? (
+                    <div className="bg-white rounded-3xl border border-slate-200 py-14 text-center text-slate-400 text-sm">
+                      {t.noSearchResults}
+                    </div>
+                  ) : (
+                    <motion.div
+                      layout={!shouldReduceMotion}
+                      className="grid grid-cols-2 md:grid-cols-3 gap-3 sm:gap-5"
+                    >
+                      <AnimatePresence mode="popLayout">
+                        {filteredMenu.map((item, idx) => {
+                          const finalPrice = getDiscountedPrice(item);
+                          const hasDisc = item.discount > 0;
+                          const displayName = getMenuName(item, lang);
+                          const displayDesc = getMenuDesc(item, lang);
+                          const catLabel = getMenuCategoryLabel(item.category, lang, item.categoryEn);
+                          return (
+                            <motion.article
+                              key={item.id}
+                              layout={!shouldReduceMotion}
+                              initial={shouldReduceMotion ? false : { opacity: 0, y: 14, scale: 0.97 }}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={shouldReduceMotion ? undefined : { opacity: 0, scale: 0.95 }}
+                              transition={{ duration: 0.26, delay: Math.min(idx * 0.03, 0.22) }}
+                              whileHover={shouldReduceMotion || !item.available ? undefined : { y: -5 }}
+                              whileTap={shouldReduceMotion || !item.available ? undefined : { scale: 0.97 }}
+                              onClick={() => {
+                                if (item.available) setCustomizingItem(item);
+                              }}
+                              className={`group bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-lg hover:border-[#0D4A3E]/25 ${
+                                item.available ? 'cursor-pointer' : 'opacity-60'
+                              }`}
+                            >
+                              <div>
+                                <div className="aspect-[4/3] w-full rounded-xl overflow-hidden bg-slate-100 mb-2.5 sm:mb-3 relative">
+                                  <img
+                                    src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
+                                    alt={displayName}
+                                    referrerPolicy="no-referrer"
+                                    onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
+                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out"
+                                  />
+                                  {hasDisc && (
+                                    <span className="absolute top-2 left-2 bg-amber-400 text-slate-900 font-bold font-mono-num text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
+                                      <Sparkles className="w-3 h-3" />
+                                      -{item.discount}%
+                                    </span>
+                                  )}
+                                  {item.featured && !hasDisc && (
+                                    <span className="absolute top-2 left-2 bg-[#0D4A3E]/90 text-amber-300 font-bold text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
+                                      <Star className="w-2.5 h-2.5 fill-amber-300" />
+                                      <span>{isEn ? 'Pick' : 'ពិសេស'}</span>
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[10px] sm:text-[11px] text-slate-500 truncate flex items-center gap-1">
+                                  {item.type === 'food' ? (
+                                    <UtensilsCrossed className="w-3 h-3 text-amber-600 shrink-0" />
+                                  ) : (
+                                    <Coffee className="w-3 h-3 text-[#0D4A3E] shrink-0" />
+                                  )}
+                                  <span className="truncate">
+                                    {catLabel}
+                                    {!item.available ? ` · ${t.outOfStock}` : ''}
+                                  </span>
+                                </p>
+                                <h3 className="font-semibold text-xs sm:text-base text-slate-900 mt-0.5 line-clamp-1">
+                                  {displayName}
+                                </h3>
+                                {displayDesc && (
+                                  <p className="text-[10px] sm:text-xs text-slate-500 line-clamp-1 mt-0.5">
+                                    {displayDesc}
+                                  </p>
+                                )}
+                              </div>
+
+                              <div className="flex items-center justify-between mt-2.5 sm:mt-3 pt-2 border-t border-slate-100">
+                                <div className="font-mono-num">
+                                  <span className="font-bold text-sm sm:text-base text-[#0D4A3E]">
+                                    ${finalPrice.toFixed(2)}
+                                  </span>
+                                  {hasDisc && (
+                                    <span className="text-[11px] sm:text-xs text-slate-400 line-through ml-1">
+                                      ${Number(item.price).toFixed(2)}
+                                    </span>
+                                  )}
+                                </div>
+                                <motion.button
+                                  type="button"
+                                  whileTap={shouldReduceMotion ? undefined : { scale: 0.88 }}
+                                  disabled={!item.available}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setCustomizingItem(item);
+                                  }}
+                                  aria-label={`${isEn ? 'Order' : 'កម្ម៉ង់'} ${displayName}`}
+                                  className="min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl bg-[#0D4A3E] hover:bg-[#09352C] text-white flex items-center justify-center disabled:bg-slate-300 transition-all shadow-sm group-hover:scale-105"
+                                >
+                                  <Plus className="w-4 h-4 transition-transform duration-200 group-hover:rotate-90" />
+                                </motion.button>
+                              </div>
+                            </motion.article>
+                          );
+                        })}
+                      </AnimatePresence>
+                    </motion.div>
+                  )}
                 </div>
 
-                {!filteredMenu.length ? (
-                  <div className="bg-white rounded-3xl border border-slate-200 py-14 text-center text-slate-400 text-sm">
-                    {t.noSearchResults}
+                {/* Desktop Sticky Order Bag Sidebar */}
+                <aside className="hidden lg:flex lg:flex-col lg:col-span-4 xl:col-span-3 sticky top-24 bg-white rounded-3xl border border-slate-200/90 shadow-sm overflow-hidden">
+                  <div className="bg-[#0D4A3E] text-white px-5 py-4 flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <ShoppingBag className="w-4 h-4 text-amber-300" />
+                      <h3 className="font-bold text-sm">{t.cartTitle}</h3>
+                    </div>
+                    <motion.span
+                      key={cartCount}
+                      initial={shouldReduceMotion ? false : { scale: 0.7 }}
+                      animate={{ scale: 1 }}
+                      className="bg-amber-400 text-slate-900 font-mono-num text-xs font-bold px-2 py-0.5 rounded-lg"
+                    >
+                      {cartCount}
+                    </motion.span>
                   </div>
-                ) : (
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
-                    {filteredMenu.map((item, idx) => {
-                      const finalPrice = getDiscountedPrice(item);
-                      const hasDisc = item.discount > 0;
-                      const displayName = getMenuName(item, lang);
-                      const displayDesc = getMenuDesc(item, lang);
-                      const catLabel = getMenuCategoryLabel(item.category, lang, item.categoryEn);
-                      return (
-                        <motion.article
-                          key={item.id}
-                          initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          transition={{ duration: 0.25, delay: Math.min(idx * 0.04, 0.25) }}
-                          whileHover={shouldReduceMotion ? undefined : { y: -4 }}
-                          whileTap={shouldReduceMotion || !item.available ? undefined : { scale: 0.965 }}
-                          onClick={() => {
-                            if (item.available) setCustomizingItem(item);
-                          }}
-                          className={`group bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-lg ${
-                            item.available ? 'cursor-pointer' : 'opacity-60'
-                          }`}
-                        >
-                          <div>
-                            <div className="aspect-[4/3] w-full rounded-xl overflow-hidden bg-slate-100 mb-2.5 sm:mb-3 relative">
+
+                  <div className="p-4 space-y-3.5">
+                    {/* Order Mode Segmented Switch */}
+                    <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-xl">
+                      {(
+                        [
+                          { id: 'delivery' as const, label: t.deliveryTab, Icon: Bike },
+                          { id: 'dinein' as const, label: t.dineInTab, Icon: Armchair },
+                        ] as const
+                      ).map(({ id, label, Icon }) => {
+                        const active = orderType === id;
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => setOrderType(id)}
+                            className={`relative py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors ${
+                              active ? 'text-[#0D4A3E]' : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            {active && (
+                              <motion.span
+                                layoutId="desktopOrderType"
+                                transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                                className="absolute inset-0 bg-white rounded-lg shadow-sm"
+                              />
+                            )}
+                            <span className="relative z-10 flex items-center gap-1.5">
+                              <Icon className="w-3.5 h-3.5" />
+                              <span>{label}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {orderType === 'delivery' ? (
+                      <button
+                        type="button"
+                        onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
+                        className="w-full text-left bg-[#F4F8F6] hover:bg-[#E8F2EF] border border-emerald-900/10 rounded-xl px-3 py-2.5 flex items-center gap-2 transition-colors"
+                      >
+                        <MapPin className="w-4 h-4 text-[#0D4A3E] shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] font-bold text-[#0D4A3E] truncate">{pickedAddressName}</p>
+                          <p className="text-[10px] text-slate-500 font-mono-num">
+                            {distanceKm.toFixed(2)} km ·{' '}
+                            {estimatedDeliveryFee === 0
+                              ? isEn
+                                ? 'Free delivery'
+                                : 'ដឹកជញ្ជូនហ្វ្រី'
+                              : `$${estimatedDeliveryFee.toFixed(2)}`}
+                          </p>
+                        </div>
+                        <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
+                      </button>
+                    ) : (
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-xs font-bold text-amber-900 flex items-center justify-between">
+                        <span>{t.dineInLabel}</span>
+                        <span className="font-mono-num">
+                          {t.tableNumLabel} {tableNumberFromQR || 1}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Items List or Empty State */}
+                    {cart.length === 0 ? (
+                      <div className="py-8 px-2 text-center space-y-2 border-t border-slate-100">
+                        <div className="w-11 h-11 rounded-2xl bg-[#E8F2EF] text-[#0D4A3E] flex items-center justify-center mx-auto">
+                          <Coffee className="w-5 h-5" />
+                        </div>
+                        <p className="text-xs text-slate-500 leading-relaxed">{t.emptyCartHint}</p>
+                        <p className="text-[11px] font-semibold text-[#0D4A3E]">{promoSummaryText}</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-[300px] overflow-y-auto pr-0.5 border-t border-slate-100 pt-3">
+                        <AnimatePresence initial={false}>
+                          {cart.map((item, idx) => (
+                            <motion.div
+                              key={item.cartId}
+                              initial={shouldReduceMotion ? false : { opacity: 0, x: 12 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              exit={shouldReduceMotion ? undefined : { opacity: 0, x: -12 }}
+                              transition={{ duration: 0.2 }}
+                              className="bg-slate-50 rounded-xl p-2.5 flex items-center justify-between gap-2"
+                            >
                               <img
                                 src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
-                                alt={displayName}
+                                alt={item.name}
                                 referrerPolicy="no-referrer"
                                 onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
-                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                className="w-10 h-10 rounded-lg object-cover shrink-0 bg-white"
                               />
-                              {hasDisc && (
-                                <span className="absolute top-2 left-2 bg-amber-400 text-slate-900 font-bold font-mono-num text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
-                                  <Sparkles className="w-3 h-3" />
-                                  -{item.discount}%
-                                </span>
-                              )}
-                              {item.featured && !hasDisc && (
-                                <span className="absolute top-2 left-2 bg-[#0D4A3E]/90 text-amber-300 font-bold text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
-                                  <Star className="w-2.5 h-2.5 fill-amber-300" />
-                                  <span>{isEn ? 'Pick' : 'ពិសេស'}</span>
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-[10px] sm:text-[11px] text-slate-500 truncate flex items-center gap-1">
-                              {item.type === 'food' ? (
-                                <UtensilsCrossed className="w-3 h-3 text-amber-600 shrink-0" />
-                              ) : (
-                                <Coffee className="w-3 h-3 text-[#0D4A3E] shrink-0" />
-                              )}
-                              <span className="truncate">
-                                {catLabel}
-                                {!item.available ? ` · ${t.outOfStock}` : ''}
-                              </span>
-                            </p>
-                            <h3 className="font-semibold text-xs sm:text-base text-slate-900 mt-0.5 line-clamp-1">
-                              {displayName}
-                            </h3>
-                            {displayDesc && (
-                              <p className="text-[10px] sm:text-[11px] text-slate-500 line-clamp-1 mt-0.5">
-                                {displayDesc}
-                              </p>
-                            )}
-                          </div>
+                              <div className="min-w-0 flex-1">
+                                <p className="font-bold text-xs text-slate-900 truncate">{item.name}</p>
+                                <p className="text-[10px] text-slate-500 truncate">{item.options}</p>
+                                <p className="text-[11px] font-bold font-mono-num text-[#0D4A3E] mt-0.5">
+                                  ${(item.unitPrice * item.qty).toFixed(2)}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleChangeCartQty(idx, -1)}
+                                  aria-label={isEn ? 'Decrease' : 'បន្ថយ'}
+                                  className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 flex items-center justify-center text-slate-700"
+                                >
+                                  <Minus className="w-3 h-3" />
+                                </button>
+                                <span className="text-xs font-bold font-mono-num w-4 text-center">{item.qty}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleChangeCartQty(idx, 1)}
+                                  aria-label={isEn ? 'Increase' : 'បន្ថែម'}
+                                  className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 flex items-center justify-center text-slate-700"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </motion.div>
+                          ))}
+                        </AnimatePresence>
+                      </div>
+                    )}
 
-                          <div className="flex items-center justify-between mt-2.5 sm:mt-3 pt-2 border-t border-slate-100">
-                            <div className="font-mono-num">
-                              <span className="font-bold text-sm sm:text-base text-[#0D4A3E]">
-                                ${finalPrice.toFixed(2)}
-                              </span>
-                              {hasDisc && (
-                                <span className="text-[11px] sm:text-xs text-slate-400 line-through ml-1">
-                                  ${Number(item.price).toFixed(2)}
-                                </span>
-                              )}
-                            </div>
-                            <motion.button
-                              type="button"
-                              whileTap={shouldReduceMotion ? undefined : { scale: 0.88 }}
-                              disabled={!item.available}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setCustomizingItem(item);
-                              }}
-                              aria-label={`${isEn ? 'Order' : 'កម្ម៉ង់'} ${displayName}`}
-                              className="min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl bg-[#0D4A3E] hover:bg-[#09352C] text-white flex items-center justify-center disabled:bg-slate-300 transition-colors shadow-sm"
-                            >
-                              <Plus className="w-4 h-4" />
-                            </motion.button>
+                    {cart.length > 0 && (
+                      <div className="border-t border-slate-200 pt-3 space-y-3">
+                        <div className="space-y-1 text-xs">
+                          <div className="flex justify-between text-slate-600">
+                            <span>{t.subtotalLabel}</span>
+                            <span className="font-mono-num font-semibold">${cartSubtotal.toFixed(2)}</span>
                           </div>
-                        </motion.article>
-                      );
-                    })}
+                          {orderType === 'delivery' && (
+                            <div className="flex justify-between text-slate-600">
+                              <span>{isEn ? 'Delivery' : 'ថ្លៃដឹកជញ្ជូន'}</span>
+                              <span className="font-mono-num font-semibold text-[#0D4A3E]">
+                                {estimatedDeliveryFee === 0
+                                  ? isEn
+                                    ? 'Free'
+                                    : 'ហ្វ្រី'
+                                  : `$${estimatedDeliveryFee.toFixed(2)}`}
+                              </span>
+                            </div>
+                          )}
+                          <div className="flex justify-between text-sm font-bold text-slate-900 pt-1">
+                            <span>{isEn ? 'Estimated Total' : 'សរុបប៉ាន់ស្មាន'}</span>
+                            <span className="font-mono-num text-[#0D4A3E]">
+                              ${(cartSubtotal + estimatedDeliveryFee).toFixed(2)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <motion.button
+                          type="button"
+                          whileTap={shouldReduceMotion ? undefined : { scale: 0.97 }}
+                          onClick={() => setIsCartOpen(true)}
+                          className="w-full bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold py-3 rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition-colors"
+                        >
+                          <span>{t.proceedCheckout}</span>
+                          <ArrowRight className="w-4 h-4" />
+                        </motion.button>
+                      </div>
+                    )}
                   </div>
-                )}
+                </aside>
               </section>
             </main>
           </div>
 
-          <footer className="max-w-7xl mx-auto w-full px-3 sm:px-6 mt-10 pt-6 border-t border-slate-200 space-y-4">
+          <motion.footer
+            initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, amount: 0.2 }}
+            transition={{ duration: 0.35 }}
+            className="max-w-7xl mx-auto w-full px-3 sm:px-6 mt-10 pt-6 border-t border-slate-200 space-y-4"
+          >
             <div className="bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
               <div className="space-y-0.5">
                 <p className="font-bold text-sm text-[#0D4A3E]">
@@ -1474,8 +1792,9 @@ export default function App() {
               <span>{shopSettings.brandTitle}</span>
               <span>{t.footerSecurity}</span>
             </div>
-          </footer>
+          </motion.footer>
 
+          {/* Mobile Floating Cart Bar (Hidden on Desktop where sticky sidebar is visible) */}
           <AnimatePresence>
             {cartCount > 0 && (
               <motion.button
@@ -1486,7 +1805,7 @@ export default function App() {
                 whileTap={shouldReduceMotion ? undefined : { scale: 0.96 }}
                 transition={{ type: 'spring', damping: 24, stiffness: 320 }}
                 onClick={() => setIsCartOpen(true)}
-                className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 w-[92%] max-w-md bg-[#0D4A3E] hover:bg-[#09352C] text-white px-4 py-3 rounded-2xl shadow-xl flex items-center justify-between z-40 transition-colors"
+                className="lg:hidden fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 w-[92%] max-w-md bg-[#0D4A3E] hover:bg-[#09352C] text-white px-4 py-3 rounded-2xl shadow-xl flex items-center justify-between z-40 transition-colors"
               >
                 <div className="flex items-center gap-3">
                   <div className="bg-white/15 p-2 rounded-xl relative">

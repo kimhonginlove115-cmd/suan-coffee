@@ -128,11 +128,80 @@
   }
 }
 
+@keyframes floatSlow {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(10px, -10px, 0) scale(1.05);
+  }
+}
+
+.hero-glow-drift {
+  animation: floatSlow 9s ease-in-out infinite;
+  will-change: transform;
+}
+
+.nav-link-underline {
+  position: relative;
+}
+
+.nav-link-underline::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 2px;
+  border-radius: 9999px;
+  background-color: #0D4A3E;
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.nav-link-underline:hover::after,
+.nav-link-underline:focus-visible::after {
+  transform: scaleX(1);
+}
+
+.card-sheen {
+  position: relative;
+  overflow: hidden;
+}
+
+.card-sheen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    115deg,
+    transparent 25%,
+    rgba(255, 255, 255, 0.28) 50%,
+    transparent 75%
+  );
+  transform: translateX(-120%);
+  transition: transform 0.65s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+
+.card-sheen:hover::after {
+  transform: translateX(120%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .driver-badge::after,
-  .touch-spark {
+  .touch-spark,
+  .hero-glow-drift {
     animation: none;
+  }
+  .touch-spark {
     display: none;
+  }
+  .card-sheen::after,
+  .nav-link-underline::after {
+    transition: none;
   }
   button:not(:disabled):active,
   a[href]:active {
