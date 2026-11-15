@@ -1,0 +1,6 @@
+{
+  "name": "Emerald Brew Cafe",
+  "description": "Specialty coffee and food ordering web app with Telegram & Phone OTP authentication, live GPS delivery tracking, KHQR checkout, and owner admin console.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

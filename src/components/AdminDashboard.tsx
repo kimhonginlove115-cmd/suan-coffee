@@ -1,0 +1,1350 @@
+import React, { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
+import { Lock, Printer, Trash2, X } from 'lucide-react';
+import type {
+  AdminSecretsConfig,
+  DeliveryMode,
+  ItemType,
+  Member,
+  MenuItem,
+  Order,
+  OrderStatus,
+  ShopSettings,
+  Topping,
+} from '../types';
+import { CAFE_ASSETS, compressImageFile, getDiscountedPrice, getFirebaseBase } from '../utils/cafeUtils';
+
+interface PinModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSuccess: (adminToken: string) => void;
+}
+
+export function AdminPinModal({ isOpen, onClose, onSuccess }: PinModalProps) {
+  const [pin, setPin] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setPin('');
+      setError('');
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const res = await fetch('/api/admin/verify-pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: pin.trim() }),
+      });
+      const data = await res.json();
+      if (data.ok && data.adminToken) {
+        onSuccess(data.adminToken);
+      } else {
+        setError(data.error || 'PIN មិនត្រឹមត្រូវ!');
+      }
+    } catch {
+      setError('មិនអាចភ្ជាប់ទៅ Server ដើម្បីផ្ទៀងផ្ទាត់ PIN បានទេ');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+      <div className="bg-white w-full max-w-xs rounded-3xl p-6 text-center shadow-2xl">
+        <div className="w-12 h-12 rounded-2xl bg-[#E8F2EF] text-[#0D4A3E] flex items-center justify-center mx-auto mb-2">
+          <Lock className="w-5 h-5" />
+        </div>
+        <h3 className="font-bold text-lg text-slate-900">ចូលគ្រប់គ្រងហាង</h3>
+        <p className="text-xs text-slate-500 mt-1">
+          បញ្ចូលលេខកូដ PIN ម្ចាស់ហាង <span className="text-[#0D4A3E] font-bold">(កូដដំបូង: 1234)</span>
+        </p>
+        <form onSubmit={handleSubmit} className="mt-4 space-y-3">
+          <input
+            type="password"
+            inputMode="numeric"
+            autoFocus
+            value={pin}
+            onChange={(e) => setPin(e.target.value)}
+            placeholder="••••"
+            className="w-full text-center text-2xl tracking-[0.5em] font-mono-num font-bold border-2 border-slate-200 focus:border-[#0D4A3E] rounded-2xl py-2.5 outline-none"
+          />
+          {error && <p className="text-xs text-red-600 font-bold">{error}</p>}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 bg-slate-100 py-2.5 rounded-xl text-xs font-bold text-slate-700"
+            >
+              បោះបង់
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="flex-1 bg-[#0D4A3E] text-white py-2.5 rounded-xl text-xs font-bold"
+            >
+              {loading ? '...' : 'ចូល'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+interface AdminDashboardProps {
+  adminToken: string | null;
+  menuItems: MenuItem[];
+  toppings: Topping[];
+  orders: Order[];
+  members: Member[];
+  shopSettings: ShopSettings;
+  onExit: () => void;
+  onRequireReauth: () => void;
+  onUpdateShopSettings: (next: ShopSettings) => Promise<void> | void;
+  onUpdateMenu: (next: MenuItem[]) => void;
+  onUpdateToppings: (next: Topping[]) => void;
+  onUpdateOrderStatus: (orderId: string, status: OrderStatus) => void;
+  onClearCompletedOrders: () => void;
+  onOpenDriverConsole: (orderId: string) => void;
+  onOpenShopMapPicker: () => void;
+  onOpenTableView: (tableNum: number) => void;
+  onToast: (msg: string) => void;
+}
+
+type AdminTab = 'orders' | 'menu' | 'qr' | 'members' | 'settings';
+
+const EMPTY_SECRETS: AdminSecretsConfig = {
+  adminPin: '1234',
+  botToken: '',
+  chatId: '',
+  telegramGatewayToken: '',
+  twilioAccountSid: '',
+  twilioAuthToken: '',
+  twilioFromNumber: '',
+  smsWebhookUrl: '',
+  smsWebhookApiKey: '',
+};
+
+export function AdminDashboard({
+  adminToken,
+  menuItems,
+  toppings,
+  orders,
+  members,
+  shopSettings,
+  onExit,
+  onRequireReauth,
+  onUpdateShopSettings,
+  onUpdateMenu,
+  onUpdateToppings,
+  onUpdateOrderStatus,
+  onClearCompletedOrders,
+  onOpenDriverConsole,
+  onOpenShopMapPicker,
+  onOpenTableView,
+  onToast,
+}: AdminDashboardProps) {
+  const [activeTab, setActiveTab] = useState<AdminTab>('orders');
+  const [orderFilter, setOrderFilter] = useState<'All' | OrderStatus>('All');
+
+  // Menu form state
+  const [editId, setEditId] = useState<string>('');
+  const [itemType, setItemType] = useState<ItemType>('drink');
+  const [itemName, setItemName] = useState('');
+  const [itemPrice, setItemPrice] = useState('');
+  const [itemDiscount, setItemDiscount] = useState('0');
+  const [itemCat, setItemCat] = useState('');
+  const [itemImg, setItemImg] = useState('');
+  const [itemDesc, setItemDesc] = useState('');
+
+  // Topping form state
+  const [newTopName, setNewTopName] = useState('');
+  const [newTopPrice, setNewTopPrice] = useState('');
+
+  // QR generator state
+  const [qrTableCount, setQrTableCount] = useState(6);
+  const [qrBaseUrl, setQrBaseUrl] = useState(() =>
+    typeof window !== 'undefined' && window.location.href.startsWith('http')
+      ? window.location.href.split('?')[0]
+      : 'https://emerald-brew.cafe'
+  );
+  const [qrWifiText, setQrWifiText] = useState('Free Wi-Fi: 12345678');
+  const [qrDataUrls, setQrDataUrls] = useState<Record<number, string>>({});
+
+  // Settings & server secrets draft
+  const [draft, setDraft] = useState<ShopSettings>(shopSettings);
+  const [secrets, setSecrets] = useState<AdminSecretsConfig>(EMPTY_SECRETS);
+  const [serverMembers, setServerMembers] = useState<Member[]>(members);
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  useEffect(() => {
+    setDraft(shopSettings);
+  }, [shopSettings]);
+
+  useEffect(() => {
+    if (!adminToken) return;
+    fetch('/api/admin/config', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+      .then((r) => {
+        if (r.status === 401) {
+          onRequireReauth();
+          return null;
+        }
+        return r.json();
+      })
+      .then((data) => {
+        if (data?.ok) {
+          if (data.secrets) setSecrets({ ...EMPTY_SECRETS, ...data.secrets });
+          if (Array.isArray(data.members) && data.members.length > 0) setServerMembers(data.members);
+        }
+      })
+      .catch(() => {});
+  }, [adminToken, onRequireReauth]);
+
+  const displayedMembers = serverMembers.length > 0 ? serverMembers : members;
+  const totalRevenue = orders.reduce((s, o) => s + Number(o.grandTotal || 0), 0);
+  const pendingCount = orders.filter((o) => o.status === 'Pending').length;
+  const filteredOrders = orderFilter === 'All' ? orders : orders.filter((o) => o.status === orderFilter);
+
+  const generateQRs = async () => {
+    const base = qrBaseUrl.trim().split('?')[0].split('#')[0] || 'https://emerald-brew.cafe';
+    const next: Record<number, string> = {};
+    for (let i = 1; i <= qrTableCount; i++) {
+      try {
+        next[i] = await QRCode.toDataURL(`${base}?table=${i}`, {
+          width: 160,
+          margin: 1,
+          color: { dark: '#0D4A3E', light: '#FFFFFF' },
+        });
+      } catch {
+        // ignore
+      }
+    }
+    setQrDataUrls(next);
+  };
+
+  useEffect(() => {
+    if (activeTab === 'qr') generateQRs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const downloadSticker = (tableNum: number) => {
+    const dataUrl = qrDataUrls[tableNum];
+    if (!dataUrl) return;
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = 400;
+      c.height = 520;
+      const ctx = c.getContext('2d');
+      if (!ctx) return;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, 400, 520);
+      ctx.fillStyle = '#0D4A3E';
+      ctx.fillRect(0, 0, 400, 110);
+      ctx.strokeStyle = '#0D4A3E';
+      ctx.lineWidth = 8;
+      ctx.strokeRect(4, 4, 392, 512);
+      ctx.fillStyle = '#FCD34D';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(shopSettings.brandTitle, 200, 40);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 28px sans-serif';
+      ctx.fillText(`TABLE ${tableNum} · តុលេខ ${tableNum}`, 200, 82);
+      ctx.drawImage(img, 85, 145, 230, 230);
+      ctx.fillStyle = '#0D4A3E';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText('SCAN TO ORDER · ស្កេនដើម្បីកម្ម៉ង់', 200, 425);
+      ctx.fillStyle = '#6B7280';
+      ctx.font = '14px sans-serif';
+      ctx.fillText(qrWifiText, 200, 460);
+      const a = document.createElement('a');
+      a.download = `QR-Table-${tableNum}.png`;
+      a.href = c.toDataURL('image/png');
+      a.click();
+    };
+    img.src = dataUrl;
+  };
+
+  const handleSaveMenuItem = (e: React.FormEvent) => {
+    e.preventDefault();
+    const price = parseFloat(itemPrice) || 0;
+    const discount = parseInt(itemDiscount, 10) || 0;
+    const category = itemCat.trim() || 'Coffee';
+
+    if (editId) {
+      const next = menuItems.map((m) =>
+        String(m.id) === editId
+          ? {
+              ...m,
+              type: itemType,
+              name: itemName.trim(),
+              price,
+              discount,
+              category,
+              desc: itemDesc.trim(),
+              img: itemImg || m.img,
+            }
+          : m
+      );
+      onUpdateMenu(next);
+    } else {
+      const newItem: MenuItem = {
+        id: Date.now(),
+        type: itemType,
+        name: itemName.trim(),
+        price,
+        discount,
+        category,
+        img: itemImg || CAFE_ASSETS.icedLatte,
+        desc: itemDesc.trim(),
+        available: true,
+      };
+      onUpdateMenu([newItem, ...menuItems]);
+    }
+    resetMenuForm();
+    onToast('បានរក្សាទុកទំនិញជោគជ័យ!');
+  };
+
+  const resetMenuForm = () => {
+    setEditId('');
+    setItemType('drink');
+    setItemName('');
+    setItemPrice('');
+    setItemDiscount('0');
+    setItemCat('');
+    setItemImg('');
+    setItemDesc('');
+  };
+
+  const startEditItem = (item: MenuItem) => {
+    setEditId(String(item.id));
+    setItemType(item.type || 'drink');
+    setItemName(item.name);
+    setItemPrice(String(item.price));
+    setItemDiscount(String(item.discount || 0));
+    setItemCat(item.category);
+    setItemImg(item.img);
+    setItemDesc(item.desc || '');
+  };
+
+  const handleAddTopping = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTopName.trim()) return;
+    onUpdateToppings([
+      ...toppings,
+      { id: Date.now(), name: newTopName.trim(), price: parseFloat(newTopPrice) || 0, available: true },
+    ]);
+    setNewTopName('');
+    setNewTopPrice('');
+    onToast('បានបន្ថែម Topping!');
+  };
+
+  const handleSaveAllSettings = async () => {
+    setSavingSettings(true);
+    try {
+      if (adminToken) {
+        const res = await fetch('/api/admin/config', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ secrets }),
+        });
+        if (res.status === 401) {
+          onRequireReauth();
+          return;
+        }
+      }
+      await onUpdateShopSettings(draft);
+      onToast('បានរក្សាទុកការកំណត់ហាង និងសោសុវត្ថិភាពជោគជ័យ!');
+    } catch {
+      onToast('មានបញ្ហាក្នុងការរក្សាទុកការកំណត់');
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const printOrderReceipt = (o: Order) => {
+    const w = window.open('', '', 'width=340,height=480');
+    if (!w) {
+      onToast('សូមអនុញ្ញាត Pop-up ដើម្បី Print');
+      return;
+    }
+    const cust = o.customer || { name: '-', phone: '-' };
+    w.document.write(
+      `<div style="font-family:monospace;padding:12px;"><h3 style="text-align:center;margin:0;">${shopSettings.brandTitle}</h3><p style="text-align:center;font-size:11px;">${o.id} | ${o.timestamp}</p><hr><p style="font-size:12px;">ភ្ញៀវ: ${cust.name} (${cust.phone})<br>${o.type === 'dinein' ? 'តុលេខ: ' + (cust.tableNum || 1) : cust.addressName || ''}</p><hr>${o.items.map((i) => `<div style="font-size:12px;margin-bottom:4px;">${i.qty}x ${i.name} - $${(i.unitPrice * i.qty).toFixed(2)}<br><small>${i.options}</small></div>`).join('')}<hr><p style="font-weight:bold;text-align:right;">សរុប: $${Number(o.grandTotal || 0).toFixed(2)} (${o.payment})</p></div>`
+    );
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
+  const deliveryPreview = (() => {
+    if (draft.deliveryMode === 'free') return 'គំរូ៖ ដឹកជញ្ជូនហ្វ្រី $0.00!';
+    if (draft.deliveryMode === 'flat')
+      return `គំរូ៖ ថ្លៃដឹកថេរ $${Number(draft.baseFee || 0).toFixed(2)}${
+        draft.freeDeliveryOver > 0 ? ` (ហ្វ្រីពេលទិញលើស $${draft.freeDeliveryOver})` : ''
+      }`;
+    const ex = Math.round(((Number(draft.baseFee) || 0) + 2 * (Number(draft.deliveryRatePerKm) || 0)) * 4) / 4;
+    return `គំរូ៖ ដឹក 2 km = $${ex.toFixed(2)}${
+      draft.freeDeliveryOver > 0 ? ` | ទិញលើស $${draft.freeDeliveryOver} = ហ្វ្រី` : ''
+    }`;
+  })();
+
+  return (
+    <div className="max-w-6xl mx-auto p-4 md:p-6 pb-20 space-y-5">
+      <div className="no-print bg-slate-900 text-white p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span className="font-bold text-sm">🛡️ ផ្ទាំងគ្រប់គ្រងម្ចាស់ហាង</span>
+          <button
+            type="button"
+            onClick={() => onUpdateShopSettings({ ...shopSettings, isOpen: shopSettings.isOpen === false })}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold ${
+              shopSettings.isOpen !== false ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
+            }`}
+          >
+            {shopSettings.isOpen !== false ? 'ហាងបើកលក់' : 'ហាងកំពុងបិទ'}
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={onExit}
+          className="bg-red-500 hover:bg-red-600 text-white px-4 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5"
+        >
+          <X className="w-3.5 h-3.5" />
+          <span>ចេញទៅមើលហាង</span>
+        </button>
+      </div>
+
+      {/* KPIs */}
+      <div className="no-print grid grid-cols-3 gap-3">
+        <div className="bg-white p-4 rounded-2xl border border-slate-200">
+          <p className="text-xs text-slate-500">ចំណូលសរុប</p>
+          <p className="text-xl font-bold font-mono-num text-[#0D4A3E] mt-0.5">${totalRevenue.toFixed(2)}</p>
+        </div>
+        <div className="bg-white p-4 rounded-2xl border border-slate-200">
+          <p className="text-xs text-slate-500">ការកម្ម៉ង់សរុប</p>
+          <p className="text-xl font-bold font-mono-num text-slate-900 mt-0.5">{orders.length}</p>
+        </div>
+        <div className="bg-white p-4 rounded-2xl border border-slate-200">
+          <p className="text-xs text-slate-500">សមាជិកចុះឈ្មោះ</p>
+          <p className="text-xl font-bold font-mono-num text-slate-900 mt-0.5">{displayedMembers.length}</p>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="no-print flex gap-2 overflow-x-auto pb-2 border-b border-slate-200">
+        {(
+          [
+            ['orders', `ការកម្ម៉ង់${pendingCount > 0 ? ` (${pendingCount})` : ''}`],
+            ['menu', 'ម៉ឺនុយ & Topping'],
+            ['qr', 'QR បិទតាមតុ'],
+            ['members', 'សមាជិក'],
+            ['settings', 'កំណត់ហាង, KHQR & API ផ្លូវការ'],
+          ] as Array<[AdminTab, string]>
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setActiveTab(id)}
+            className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors ${
+              activeTab === id ? 'bg-[#0D4A3E] text-white' : 'bg-white border border-slate-200 text-slate-600'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Orders Tab */}
+      {activeTab === 'orders' && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap justify-between items-center gap-2">
+            <div className="flex gap-1.5 overflow-x-auto">
+              {(['All', 'Pending', 'Brewing', 'Ready', 'Completed'] as const).map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setOrderFilter(st)}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap ${
+                    orderFilter === st
+                      ? 'bg-[#0D4A3E] text-white'
+                      : 'bg-white border border-slate-200 text-slate-600'
+                  }`}
+                >
+                  {st === 'All'
+                    ? 'ទាំងអស់'
+                    : st === 'Pending'
+                      ? 'រង់ចាំ'
+                      : st === 'Brewing'
+                        ? 'កំពុងរៀបចំ'
+                        : st === 'Ready'
+                          ? 'កំពុងដឹក'
+                          : 'រួចរាល់'}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={onClearCompletedOrders}
+              className="text-xs text-red-600 font-semibold flex items-center gap-1"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>សម្អាតដែលរួច</span>
+            </button>
+          </div>
+
+          {!filteredOrders.length ? (
+            <div className="bg-white p-12 rounded-2xl border border-slate-200 text-center text-slate-400 text-sm">
+              មិនមានការកម្ម៉ង់ទេ
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-4">
+              {filteredOrders.map((o) => {
+                const cust = o.customer || { name: '-', phone: '-' };
+                const base = window.location.href.split('?')[0];
+                return (
+                  <div key={o.id} className="bg-white p-4 rounded-2xl border border-slate-200 space-y-2.5">
+                    <div className="flex justify-between gap-2">
+                      <div>
+                        <span className="font-bold font-mono-num text-[#0D4A3E]">{o.id}</span>
+                        <span className="text-xs text-slate-500 ml-2">
+                          {o.type === 'dinein' ? `តុលេខ ${cust.tableNum || 1}` : `ដឹក ${cust.distanceKm || '0'} km`}
+                        </span>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {o.timestamp} · {cust.name} ({cust.phone}) · {o.payment}
+                        </p>
+                      </div>
+                      <span className="font-bold font-mono-num text-base shrink-0">
+                        ${Number(o.grandTotal || 0).toFixed(2)}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-50 p-2.5 rounded-xl text-xs space-y-0.5">
+                      {o.items.map((i, idx) => (
+                        <div key={idx}>
+                          <strong>
+                            {i.qty}x {i.name}
+                          </strong>{' '}
+                          ({i.options})
+                        </div>
+                      ))}
+                    </div>
+
+                    {cust.addressNote && (
+                      <p className="text-xs text-amber-800 bg-amber-50 px-3 py-1.5 rounded-lg">
+                        📝 {cust.addressNote}
+                      </p>
+                    )}
+
+                    {o.type === 'delivery' && (
+                      <div className="bg-sky-50 p-2.5 rounded-xl text-xs space-y-2">
+                        <div className="flex justify-between gap-2">
+                          <span className="truncate">{cust.addressName || 'ទីតាំងលើផែនទី'}</span>
+                          {cust.coords && (
+                            <a
+                              href={`https://maps.google.com/?q=${cust.coords.lat},${cust.coords.lng}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-bold underline shrink-0"
+                            >
+                              Google Maps ↗
+                            </a>
+                          )}
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => onOpenDriverConsole(o.id)}
+                            className="flex-1 bg-amber-400 hover:bg-amber-500 font-bold py-1.5 rounded-lg text-xs"
+                          >
+                            🛵 បើកទម្រង់អ្នកដឹក (Live GPS)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard?.writeText(`${base}?driver=${encodeURIComponent(o.id)}`);
+                              onToast('Copy Link អ្នកដឹកជញ្ជូនរួចរាល់!');
+                            }}
+                            className="bg-white border border-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold"
+                          >
+                            Copy Link
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap justify-between items-center gap-2 pt-2 border-t border-slate-100">
+                      <select
+                        value={o.status}
+                        onChange={(e) => onUpdateOrderStatus(o.id, e.target.value as OrderStatus)}
+                        className="text-xs font-bold border border-slate-200 rounded-xl px-2.5 py-1.5"
+                      >
+                        <option value="Pending">រង់ចាំទទួល</option>
+                        <option value="Brewing">កំពុងរៀបចំ</option>
+                        <option value="Ready">កំពុងដឹក</option>
+                        <option value="Completed">បានបញ្ចប់</option>
+                      </select>
+                      <div className="flex gap-2 items-center">
+                        <button
+                          type="button"
+                          onClick={() => printOrderReceipt(o)}
+                          className="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg font-bold flex items-center gap-1"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                          <span>Print</span>
+                        </button>
+                        {cust.tg && (
+                          <a
+                            href={`https://t.me/${encodeURIComponent(cust.tg.replace('@', ''))}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-xs text-sky-600 font-bold underline"
+                          >
+                            Telegram
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Menu & Toppings Tab */}
+      {activeTab === 'menu' && (
+        <div className="grid lg:grid-cols-3 gap-5">
+          <div className="space-y-4">
+            <div className="bg-white p-4 rounded-2xl border border-slate-200">
+              <h3 className="font-bold text-sm mb-3 text-[#0D4A3E]">
+                {editId ? `កែប្រែ៖ ${itemName}` : '+ បញ្ចូលភេសជ្ជៈ / អាហារថ្មី'}
+              </h3>
+              <form onSubmit={handleSaveMenuItem} className="space-y-2.5">
+                <select
+                  value={itemType}
+                  onChange={(e) => setItemType(e.target.value as ItemType)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white font-semibold"
+                >
+                  <option value="drink">☕ ភេសជ្ជៈ (ក្តៅ/ត្រជាក់, Size, ផ្អែម, ទឹកកក, Topping)</option>
+                  <option value="food">🍜 ចំណីអាហារ / មី / នំ</option>
+                </select>
+                <input
+                  type="text"
+                  required
+                  value={itemName}
+                  onChange={(e) => setItemName(e.target.value)}
+                  placeholder="ឈ្មោះទំនិញ *"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    required
+                    value={itemPrice}
+                    onChange={(e) => setItemPrice(e.target.value)}
+                    placeholder="តម្លៃ ($) *"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    max="90"
+                    value={itemDiscount}
+                    onChange={(e) => setItemDiscount(e.target.value)}
+                    placeholder="បញ្ចុះ %"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                  />
+                </div>
+                <input
+                  type="text"
+                  required
+                  value={itemCat}
+                  onChange={(e) => setItemCat(e.target.value)}
+                  placeholder="ប្រភេទ (ឧ. Coffee, Matcha, Food & Noodles)"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                />
+                <input
+                  type="url"
+                  value={itemImg.startsWith('data:') ? '' : itemImg}
+                  onChange={(e) => setItemImg(e.target.value)}
+                  placeholder="Link រូបភាព"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                />
+                <div className="flex items-center gap-2">
+                  {itemImg && (
+                    <img src={itemImg} alt="Preview" className="w-11 h-11 rounded-xl object-cover border shrink-0" />
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) compressImageFile(f, 400, (b) => setItemImg(b), onToast);
+                    }}
+                    className="text-xs w-full"
+                  />
+                </div>
+                <textarea
+                  rows={2}
+                  value={itemDesc}
+                  onChange={(e) => setItemDesc(e.target.value)}
+                  placeholder="ពិពណ៌នា..."
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    className="flex-1 bg-[#0D4A3E] text-white font-bold py-2 rounded-xl text-xs"
+                  >
+                    {editId ? 'រក្សាទុកការកែប្រែ' : '+ រក្សាទុក'}
+                  </button>
+                  {editId && (
+                    <button
+                      type="button"
+                      onClick={resetMenuForm}
+                      className="px-3 bg-slate-200 rounded-xl text-xs font-bold"
+                    >
+                      បោះបង់
+                    </button>
+                  )}
+                </div>
+              </form>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-slate-200">
+              <h3 className="font-bold text-sm mb-2 text-[#0D4A3E]">គ្រប់គ្រង Topping</h3>
+              <form onSubmit={handleAddTopping} className="flex gap-1.5 mb-3">
+                <input
+                  type="text"
+                  required
+                  value={newTopName}
+                  onChange={(e) => setNewTopName(e.target.value)}
+                  placeholder="ឈ្មោះ Topping"
+                  className="flex-1 px-2.5 py-1.5 border border-slate-200 rounded-xl text-xs"
+                />
+                <input
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  required
+                  value={newTopPrice}
+                  onChange={(e) => setNewTopPrice(e.target.value)}
+                  placeholder="$0.5"
+                  className="w-16 px-2 py-1.5 border border-slate-200 rounded-xl text-xs"
+                />
+                <button type="submit" className="bg-[#0D4A3E] text-white px-3 py-1.5 rounded-xl text-xs font-bold">
+                  +
+                </button>
+              </form>
+              <div className="space-y-1.5">
+                {toppings.map((t) => (
+                  <div
+                    key={t.id}
+                    className="flex items-center justify-between bg-slate-50 px-3 py-1.5 rounded-xl text-xs"
+                  >
+                    <span>
+                      <strong>{t.name}</strong> (+${Number(t.price).toFixed(2)})
+                    </span>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onUpdateToppings(
+                            toppings.map((x) => (x.id === t.id ? { ...x, available: !x.available } : x))
+                          )
+                        }
+                        className={`px-2 py-0.5 rounded font-bold ${
+                          t.available ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
+                        }`}
+                      >
+                        {t.available ? 'មាន' : 'អស់'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onUpdateToppings(toppings.filter((x) => x.id !== t.id))}
+                        className="text-red-500 font-bold"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="lg:col-span-2 bg-white p-4 rounded-2xl border border-slate-200 h-fit">
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="font-bold text-sm">បញ្ជីទំនិញទាំងអស់ ({menuItems.length})</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  if (confirm('លុបមុខទំនិញទាំងអស់ចេញពីហាង?')) onUpdateMenu([]);
+                }}
+                className="text-xs bg-red-50 text-red-600 font-bold px-3 py-1 rounded-xl"
+              >
+                លុបទាំងអស់
+              </button>
+            </div>
+            <div className="space-y-2.5">
+              {menuItems.map((i) => (
+                <div
+                  key={i.id}
+                  className="flex flex-wrap items-center justify-between gap-2 p-2.5 border border-slate-200 rounded-2xl"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <img
+                      src={i.img || CAFE_ASSETS.icedLatte}
+                      alt={i.name}
+                      className="w-11 h-11 rounded-xl object-cover bg-slate-100"
+                    />
+                    <div>
+                      <p className="font-bold text-xs">
+                        {i.name} {i.discount > 0 ? `(-${i.discount}%)` : ''}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        {i.type === 'food' ? '🍜 អាហារ' : '☕ ភេសជ្ជៈ'} · {i.category} · $
+                        {getDiscountedPrice(i).toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => startEditItem(i)}
+                      className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-800"
+                    >
+                      កែប្រែ
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateMenu(
+                          menuItems.map((x) => (x.id === i.id ? { ...x, available: !x.available } : x))
+                        )
+                      }
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                        i.available ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
+                      }`}
+                    >
+                      {i.available ? 'មាន' : 'អស់'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onUpdateMenu(menuItems.filter((x) => x.id !== i.id))}
+                      className="px-2 py-1 text-red-600 font-bold"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QR Tab */}
+      {activeTab === 'qr' && (
+        <div className="space-y-4">
+          <div className="no-print bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-sm text-[#0D4A3E]">QR Code បិទតាមតុ</h3>
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="bg-slate-900 text-white px-3.5 py-1.5 rounded-xl text-xs font-bold"
+              >
+                Print QR
+              </button>
+            </div>
+            <div className="grid sm:grid-cols-3 gap-2">
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={qrTableCount}
+                onChange={(e) => setQrTableCount(Math.max(1, Number(e.target.value) || 6))}
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs"
+              />
+              <input
+                type="text"
+                value={qrBaseUrl}
+                onChange={(e) => setQrBaseUrl(e.target.value)}
+                placeholder="Link Website"
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs"
+              />
+              <input
+                type="text"
+                value={qrWifiText}
+                onChange={(e) => setQrWifiText(e.target.value)}
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={generateQRs}
+              className="bg-[#0D4A3E] text-white px-4 py-2 rounded-xl text-xs font-bold"
+            >
+              បង្កើត QR Stickers
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+            {Array.from({ length: qrTableCount }, (_, idx) => idx + 1).map((tNum) => (
+              <div
+                key={tNum}
+                className="bg-white rounded-3xl border-2 border-[#0D4A3E] overflow-hidden shadow-sm flex flex-col items-center text-center"
+              >
+                <div className="w-full bg-[#0D4A3E] text-white py-3 px-4 flex items-center justify-center gap-2">
+                  <img
+                    src={shopSettings.logoImg}
+                    alt={shopSettings.brandTitle}
+                    className="w-8 h-8 rounded-full object-cover border border-amber-300"
+                  />
+                  <div className="text-left">
+                    <p className="text-[10px] uppercase text-amber-300 font-bold">{shopSettings.brandTitle}</p>
+                    <h4 className="text-sm font-bold">តុលេខ {tNum} · TABLE {tNum}</h4>
+                  </div>
+                </div>
+                <div className="p-4 flex flex-col items-center">
+                  {qrDataUrls[tNum] && (
+                    <img
+                      src={qrDataUrls[tNum]}
+                      alt={`QR Table ${tNum}`}
+                      className="w-36 h-36 p-2 bg-white border-2 border-[#E8F2EF] rounded-2xl mb-2"
+                    />
+                  )}
+                  <p className="text-xs font-bold text-[#0D4A3E]">ស្កេនដើម្បីកម្ម៉ង់</p>
+                  <p className="text-[11px] text-slate-500">{qrWifiText}</p>
+                  <div className="no-print flex gap-2 mt-3">
+                    <button
+                      type="button"
+                      onClick={() => downloadSticker(tNum)}
+                      className="bg-[#E8F2EF] text-[#0D4A3E] px-3 py-1.5 rounded-xl text-xs font-bold"
+                    >
+                      Download PNG
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenTableView(tNum)}
+                      className="bg-slate-100 text-slate-700 px-3 py-1.5 rounded-xl text-xs font-bold"
+                    >
+                      បើកមើលតុ {tNum}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Members Tab */}
+      {activeTab === 'members' && (
+        <div className="bg-white p-4 rounded-2xl border border-slate-200">
+          <h3 className="font-bold text-sm mb-3 text-[#0D4A3E]">
+            បញ្ជីភ្ញៀវចុះឈ្មោះផ្លូវការ ({displayedMembers.length})
+          </h3>
+          {!displayedMembers.length ? (
+            <p className="text-slate-400 text-sm text-center py-8">មិនទាន់មានសមាជិក</p>
+          ) : (
+            <div className="space-y-2">
+              {displayedMembers.map((m) => (
+                <div
+                  key={m.id}
+                  className="flex flex-wrap items-center justify-between gap-2 p-3 border border-slate-200 rounded-2xl"
+                >
+                  <div>
+                    <p className="font-bold text-sm text-slate-900">
+                      {m.name}{' '}
+                      <span className="text-amber-600 text-xs font-mono-num">(★ {m.points || 0})</span>
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {m.phone || 'គ្មានលេខ'} {m.phoneVerified ? '✓ Phone Verified' : ''} ·{' '}
+                      {m.telegramUsername || m.tg || (m.telegramId ? `TG #${m.telegramId}` : 'គ្មាន Telegram')}{' '}
+                      {m.telegramVerified ? '✓ TG Verified' : ''}
+                    </p>
+                  </div>
+                  {(m.telegramUsername || m.tg) && (
+                    <a
+                      href={`https://t.me/${encodeURIComponent((m.telegramUsername || m.tg || '').replace('@', ''))}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="bg-sky-600 text-white px-3 py-1.5 rounded-xl text-xs font-bold"
+                    >
+                      ឆាត Telegram
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Settings Tab */}
+      {activeTab === 'settings' && (
+        <div className="max-w-2xl space-y-4">
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
+            <h3 className="font-bold text-sm text-[#0D4A3E] border-b border-slate-100 pb-2">
+              ១. ប្តូរឈ្មោះហាង និង រូបភាពហាង
+            </h3>
+            <div className="grid sm:grid-cols-2 gap-2">
+              <input
+                type="text"
+                value={draft.brandTitle}
+                onChange={(e) => setDraft({ ...draft, brandTitle: e.target.value })}
+                placeholder="ឈ្មោះហាង"
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs font-bold"
+              />
+              <input
+                type="text"
+                value={draft.shopName}
+                onChange={(e) => setDraft({ ...draft, shopName: e.target.value })}
+                placeholder="ពាក្យស្វាគមន៍"
+                className="px-3 py-2 border border-slate-200 rounded-xl text-xs"
+              />
+            </div>
+
+            <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+              <img
+                src={draft.logoImg}
+                alt="Logo"
+                className="w-14 h-14 rounded-full object-cover border shrink-0 bg-white"
+              />
+              <div className="flex-1 space-y-1.5">
+                <label className="text-xs font-bold block">Logo ហាង</label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) compressImageFile(f, 250, (b) => setDraft({ ...draft, logoImg: b }), onToast);
+                  }}
+                  className="text-xs w-full"
+                />
+              </div>
+            </div>
+
+            <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
+              <label className="text-xs font-bold block">រូបផ្ទាំងមុខហាង (Banner)</label>
+              <img src={draft.bannerImg} alt="Banner" className="w-full h-24 rounded-xl object-cover border bg-white" />
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) compressImageFile(f, 650, (b) => setDraft({ ...draft, bannerImg: b }), onToast);
+                }}
+                className="text-xs w-full"
+              />
+            </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
+            <h3 className="font-bold text-sm text-[#0D4A3E] border-b border-slate-100 pb-2">
+              ២. KHQR / ABA & កូដបញ្ចុះតម្លៃ (Promo Code)
+            </h3>
+            <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+              {draft.khqrImg ? (
+                <img
+                  src={draft.khqrImg}
+                  alt="KHQR"
+                  className="w-20 h-20 rounded-xl object-contain border bg-white shrink-0"
+                />
+              ) : (
+                <div className="w-20 h-20 rounded-xl border bg-white flex items-center justify-center text-[10px] text-slate-400 shrink-0">
+                  Auto QR
+                </div>
+              )}
+              <div className="flex-1 space-y-1.5">
+                <input
+                  type="text"
+                  value={draft.bankInfo}
+                  onChange={(e) => setDraft({ ...draft, bankInfo: e.target.value })}
+                  placeholder="ឈ្មោះគណនី & លេខកុងធនាគារ (ABA / ACLEDA)"
+                  className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-bold bg-white"
+                />
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) compressImageFile(f, 320, (b) => setDraft({ ...draft, khqrImg: b }), onToast);
+                  }}
+                  className="text-xs w-full"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
+              <div>
+                <label className="text-xs font-bold block">លេខកូដ Promo</label>
+                <input
+                  type="text"
+                  value={draft.promoCode}
+                  onChange={(e) => setDraft({ ...draft, promoCode: e.target.value.toUpperCase() })}
+                  className="w-full mt-1 px-3 py-1.5 border border-slate-200 rounded-xl text-xs uppercase font-bold"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold block">បញ្ចុះតម្លៃ (%)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={90}
+                  value={draft.promoPercent}
+                  onChange={(e) => setDraft({ ...draft, promoPercent: Number(e.target.value) || 0 })}
+                  className="w-full mt-1 px-3 py-1.5 border border-slate-200 rounded-xl text-xs font-bold"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
+            <h3 className="font-bold text-sm text-[#0D4A3E] border-b border-slate-100 pb-2">
+              ៣. ទីតាំងហាង & តម្លៃដឹកជញ្ជូន
+            </h3>
+            <select
+              value={draft.deliveryMode}
+              onChange={(e) => setDraft({ ...draft, deliveryMode: e.target.value as DeliveryMode })}
+              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white font-bold"
+            >
+              <option value="distance">គិតតាមចម្ងាយផែនទី ($ ចាប់ផ្តើម + $/km)</option>
+              <option value="flat">តម្លៃថេរគ្រប់ទីតាំង (Flat Rate)</option>
+              <option value="free">ដឹកជញ្ជូនហ្វ្រីទាំងអស់</option>
+            </select>
+            {draft.deliveryMode !== 'free' && (
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="text-[11px] font-bold block">
+                    {draft.deliveryMode === 'flat' ? 'តម្លៃថេរ ($)' : 'ចាប់ផ្តើម ($)'}
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={draft.baseFee}
+                    onChange={(e) => setDraft({ ...draft, baseFee: Number(e.target.value) || 0 })}
+                    className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-xl text-xs"
+                  />
+                </div>
+                {draft.deliveryMode === 'distance' && (
+                  <div>
+                    <label className="text-[11px] font-bold block">បន្ថែម ($/km)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={draft.deliveryRatePerKm}
+                      onChange={(e) => setDraft({ ...draft, deliveryRatePerKm: Number(e.target.value) || 0 })}
+                      className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-xl text-xs"
+                    />
+                  </div>
+                )}
+                <div>
+                  <label className="text-[11px] font-bold block">ហ្វ្រីលើស ($)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    value={draft.freeDeliveryOver}
+                    onChange={(e) => setDraft({ ...draft, freeDeliveryOver: Number(e.target.value) || 0 })}
+                    className="w-full mt-1 px-2 py-1.5 border border-slate-200 rounded-xl text-xs"
+                  />
+                </div>
+              </div>
+            )}
+            <div className="bg-[#E8F2EF] text-[#0D4A3E] px-3 py-2 rounded-xl text-xs font-bold">
+              {deliveryPreview}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={onOpenShopMapPicker}
+                className="text-xs bg-[#0D4A3E] text-white font-bold px-3 py-1.5 rounded-lg"
+              >
+                📍 រើសទីតាំងហាងលើ Map
+              </button>
+              <button
+                type="button"
+                onClick={() => setDraft({ ...draft, lat: 11.5564, lng: 104.9282 })}
+                className="text-xs bg-slate-100 px-2.5 py-1.5 rounded-lg"
+              >
+                ភ្នំពេញ
+              </button>
+              <button
+                type="button"
+                onClick={() => setDraft({ ...draft, lat: 13.3633, lng: 103.8564 })}
+                className="text-xs bg-slate-100 px-2.5 py-1.5 rounded-lg"
+              >
+                សៀមរាប
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
+            <h3 className="font-bold text-sm text-[#0D4A3E] border-b border-slate-100 pb-2">
+              ៤. ការតភ្ជាប់ Telegram Bot, Phone OTP API & PIN (រក្សាទុកសុវត្ថិភាពលើ Server)
+            </h3>
+
+            <div className="bg-sky-50 p-3.5 rounded-xl border border-sky-200 space-y-2">
+              <p className="text-xs font-bold text-slate-900">
+                Telegram Bot ផ្លូវការ (Free ១០០% · ចូលគណនី, ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ Share Contact & Order Alerts)
+              </p>
+              <div className="grid sm:grid-cols-3 gap-2">
+                <input
+                  type="text"
+                  value={draft.botUsername}
+                  onChange={(e) => setDraft({ ...draft, botUsername: e.target.value.replace('@', '') })}
+                  placeholder="Bot Username (អត់ @)"
+                  className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                />
+                <input
+                  type="password"
+                  value={secrets.botToken}
+                  onChange={(e) => setSecrets({ ...secrets, botToken: e.target.value })}
+                  placeholder="Bot Token (@BotFather)"
+                  className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                />
+                <input
+                  type="text"
+                  value={secrets.chatId}
+                  onChange={(e) => setSecrets({ ...secrets, chatId: e.target.value })}
+                  placeholder="Group Chat ID"
+                  className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                />
+              </div>
+              <input
+                type="text"
+                value={draft.tgUsername}
+                onChange={(e) => setDraft({ ...draft, tgUsername: e.target.value.replace('@', '') })}
+                placeholder="Telegram Username ហាងសម្រាប់ភ្ជាប់វិក្កយបត្រ (អត់ @)"
+                className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+              />
+            </div>
+
+            <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2.5">
+              <p className="text-xs font-bold text-slate-900">
+                ជម្រើសបន្ថែម៖ សេវាផ្ញើ SMS OTP (គិតថ្លៃតាមសារ — មិនចាំបាច់បំពេញបើប្រើ Telegram Free ខាងលើ)
+              </p>
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                  ជម្រើសទី ១៖ Telegram Gateway API Token (ផ្ញើ OTP ផ្លូវការតាមលេខទូរស័ព្ទ)
+                </label>
+                <input
+                  type="password"
+                  value={secrets.telegramGatewayToken}
+                  onChange={(e) => setSecrets({ ...secrets, telegramGatewayToken: e.target.value })}
+                  placeholder="Telegram Gateway Token"
+                  className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                />
+              </div>
+
+              <div className="pt-1 border-t border-slate-200">
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                  ជម្រើសទី ២៖ Twilio SMS API
+                </label>
+                <div className="grid sm:grid-cols-3 gap-2">
+                  <input
+                    type="text"
+                    value={secrets.twilioAccountSid}
+                    onChange={(e) => setSecrets({ ...secrets, twilioAccountSid: e.target.value })}
+                    placeholder="Account SID"
+                    className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                  />
+                  <input
+                    type="password"
+                    value={secrets.twilioAuthToken}
+                    onChange={(e) => setSecrets({ ...secrets, twilioAuthToken: e.target.value })}
+                    placeholder="Auth Token"
+                    className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                  />
+                  <input
+                    type="text"
+                    value={secrets.twilioFromNumber}
+                    onChange={(e) => setSecrets({ ...secrets, twilioFromNumber: e.target.value })}
+                    placeholder="From (+1...)"
+                    className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-1 border-t border-slate-200">
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                  ជម្រើសទី ៣៖ Custom SMS Gateway Webhook (PlasGate / MekongSMS)
+                </label>
+                <div className="grid sm:grid-cols-2 gap-2">
+                  <input
+                    type="url"
+                    value={secrets.smsWebhookUrl}
+                    onChange={(e) => setSecrets({ ...secrets, smsWebhookUrl: e.target.value })}
+                    placeholder="https://your-sms-provider.com/send"
+                    className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                  />
+                  <input
+                    type="password"
+                    value={secrets.smsWebhookApiKey}
+                    onChange={(e) => setSecrets({ ...secrets, smsWebhookApiKey: e.target.value })}
+                    placeholder="API Key / Bearer Token"
+                    className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <input
+              type="url"
+              value={draft.firebaseUrl}
+              onChange={(e) => setDraft({ ...draft, firebaseUrl: e.target.value })}
+              placeholder="Firebase Realtime DB URL (ស្រេចចិត្ត)"
+              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+            />
+            {getFirebaseBase(draft.firebaseUrl) && (
+              <p className="text-[11px] text-emerald-700 font-semibold">✓ Firebase URL ត្រូវបានកំណត់</p>
+            )}
+
+            <div>
+              <label className="text-xs font-bold block mb-1">លេខកូដ PIN ម្ចាស់ហាងថ្មី</label>
+              <input
+                type="password"
+                maxLength={8}
+                value={secrets.adminPin}
+                onChange={(e) => setSecrets({ ...secrets, adminPin: e.target.value })}
+                placeholder="PIN (1234)"
+                className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-bold font-mono-num"
+              />
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={savingSettings}
+            onClick={handleSaveAllSettings}
+            className="w-full bg-[#0D4A3E] hover:bg-[#09352C] text-white py-3 rounded-2xl text-sm font-bold"
+          >
+            {savingSettings ? 'កំពុងរក្សាទុក...' : '💾 រក្សាទុកការកំណត់ផ្លូវការ'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
