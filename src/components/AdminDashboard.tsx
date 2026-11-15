@@ -13,6 +13,12 @@ import type {
   Topping,
 } from '../types';
 import { CAFE_ASSETS, compressImageFile, getDiscountedPrice, getFirebaseBase } from '../utils/cafeUtils';
+import {
+  buildDynamicKhqr,
+  decodeKhqrFromImageFile,
+  extractKhqrSummary,
+  isValidEmvKhqr,
+} from '../utils/khqr';
 
 interface PinModalProps {
   isOpen: boolean;
@@ -185,10 +191,35 @@ export function AdminDashboard({
   const [secrets, setSecrets] = useState<AdminSecretsConfig>(EMPTY_SECRETS);
   const [serverMembers, setServerMembers] = useState<Member[]>(members);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [khqrPreviewUrl, setKhqrPreviewUrl] = useState('');
 
   useEffect(() => {
     setDraft(shopSettings);
   }, [shopSettings]);
+
+  const sampleDynamicKhqr = buildDynamicKhqr({
+    basePayload: draft.khqrPayload,
+    bakongId: draft.khqrBakongId,
+    merchantName: draft.khqrMerchantName || draft.brandTitle,
+    amountUsd: 1.5,
+    currency: draft.khqrCurrency || 'USD',
+    khrRate: draft.khqrKhrRate || 4100,
+    billNumber: 'TEST01',
+  });
+
+  useEffect(() => {
+    if (!sampleDynamicKhqr.isOfficialEmv) {
+      setKhqrPreviewUrl('');
+      return;
+    }
+    QRCode.toDataURL(sampleDynamicKhqr.payload, {
+      width: 140,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+    })
+      .then(setKhqrPreviewUrl)
+      .catch(() => setKhqrPreviewUrl(''));
+  }, [sampleDynamicKhqr.isOfficialEmv, sampleDynamicKhqr.payload]);
 
   useEffect(() => {
     if (!adminToken) return;
@@ -1062,37 +1093,163 @@ export function AdminDashboard({
 
           <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
             <h3 className="font-bold text-sm text-[#0D4A3E] border-b border-slate-100 pb-2">
-              ២. KHQR / ABA & កូដបញ្ចុះតម្លៃ (Promo Code)
+              ២. KHQR ស្វ័យប្រវត្តិ (Dynamic Amount) & កូដ Promo
             </h3>
-            <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
-              {draft.khqrImg ? (
-                <img
-                  src={draft.khqrImg}
-                  alt="KHQR"
-                  className="w-20 h-20 rounded-xl object-contain border bg-white shrink-0"
-                />
-              ) : (
-                <div className="w-20 h-20 rounded-xl border bg-white flex items-center justify-center text-[10px] text-slate-400 shrink-0">
-                  Auto QR
+
+            <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-3">
+              <div className="flex flex-col sm:flex-row gap-3 items-start">
+                <div className="w-28 shrink-0 text-center space-y-1 mx-auto sm:mx-0">
+                  {khqrPreviewUrl ? (
+                    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                      <div className="bg-[#E1232E] text-white text-[9px] font-bold py-0.5">
+                        KHQR · $1.50
+                      </div>
+                      <img src={khqrPreviewUrl} alt="Dynamic KHQR Preview" className="w-24 h-24 mx-auto p-1" />
+                    </div>
+                  ) : draft.khqrImg ? (
+                    <img
+                      src={draft.khqrImg}
+                      alt="Static KHQR"
+                      className="w-24 h-24 rounded-xl object-contain border bg-white mx-auto"
+                    />
+                  ) : (
+                    <div className="w-24 h-24 rounded-xl border bg-white flex items-center justify-center text-[10px] text-slate-400 mx-auto px-2">
+                      Dynamic KHQR
+                    </div>
+                  )}
+                  <p className="text-[10px] font-bold text-[#0D4A3E]">
+                    {sampleDynamicKhqr.isOfficialEmv ? '✓ Dynamic ស្វ័យប្រវត្តិ' : 'Static / មិនទាន់កំណត់'}
+                  </p>
                 </div>
-              )}
-              <div className="flex-1 space-y-1.5">
-                <input
-                  type="text"
-                  value={draft.bankInfo}
-                  onChange={(e) => setDraft({ ...draft, bankInfo: e.target.value })}
-                  placeholder="ឈ្មោះគណនី & លេខកុងធនាគារ (ABA / ACLEDA)"
-                  className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-bold bg-white"
-                />
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) compressImageFile(f, 320, (b) => setDraft({ ...draft, khqrImg: b }), onToast);
-                  }}
-                  className="text-xs w-full"
-                />
+
+                <div className="flex-1 w-full space-y-2">
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                      វិធីទី ១ (ងាយបំផុត)៖ Upload រូប KHQR ធនាគារអ្នក (ABA / ACLEDA / Bakong)
+                    </label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        if (!f) return;
+                        const decoded = await decodeKhqrFromImageFile(f);
+                        if (decoded && isValidEmvKhqr(decoded)) {
+                          const info = extractKhqrSummary(decoded);
+                          setDraft((prev) => ({
+                            ...prev,
+                            khqrPayload: decoded,
+                            khqrBakongId: info.bakongId || prev.khqrBakongId || '',
+                            khqrMerchantName: info.merchantName || prev.khqrMerchantName || prev.brandTitle,
+                            khqrCurrency: info.currency || prev.khqrCurrency || 'USD',
+                          }));
+                          compressImageFile(
+                            f,
+                            320,
+                            (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
+                            onToast
+                          );
+                          onToast('✓ ទាញយកកូដ KHQR ផ្លូវការស្វ័យប្រវត្តិ — បើក Dynamic Amount ជោគជ័យ!');
+                        } else {
+                          compressImageFile(
+                            f,
+                            320,
+                            (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
+                            onToast
+                          );
+                          onToast('រូបនេះស្កេនកូដមិនច្បាស់! សូមបញ្ចូល Bakong ID ឬ Paste កូដ 000201... ខាងក្រោម');
+                        }
+                      }}
+                      className="text-xs w-full"
+                    />
+                  </div>
+
+                  <div className="grid sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block mb-0.5">
+                        វិធីទី ២៖ Bakong ID (ឧ. shop@aba / 012xxx@bkrt)
+                      </label>
+                      <input
+                        type="text"
+                        value={draft.khqrBakongId || ''}
+                        onChange={(e) => setDraft({ ...draft, khqrBakongId: e.target.value.trim() })}
+                        placeholder="username@aba ឬ 012345678@bkrt"
+                        className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-mono-num bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block mb-0.5">
+                        ឈ្មោះហាងលើ KHQR (អក្សរអង់គ្លេស)
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={25}
+                        value={draft.khqrMerchantName || ''}
+                        onChange={(e) => setDraft({ ...draft, khqrMerchantName: e.target.value })}
+                        placeholder="SUAN COFFEE"
+                        className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid sm:grid-cols-3 gap-2">
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block mb-0.5">
+                        រូបិយប័ណ្ណ KHQR
+                      </label>
+                      <select
+                        value={draft.khqrCurrency || 'USD'}
+                        onChange={(e) =>
+                          setDraft({ ...draft, khqrCurrency: e.target.value === 'KHR' ? 'KHR' : 'USD' })
+                        }
+                        className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-bold bg-white"
+                      >
+                        <option value="USD">ដុល្លារ (USD $)</option>
+                        <option value="KHR">រៀល (KHR ៛)</option>
+                      </select>
+                    </div>
+                    {draft.khqrCurrency === 'KHR' && (
+                      <div>
+                        <label className="text-[11px] font-semibold text-slate-600 block mb-0.5">
+                          អត្រាប្តូរ 1$ = (៛)
+                        </label>
+                        <input
+                          type="number"
+                          min={3500}
+                          step={50}
+                          value={draft.khqrKhrRate || 4100}
+                          onChange={(e) => setDraft({ ...draft, khqrKhrRate: Number(e.target.value) || 4100 })}
+                          className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-mono-num bg-white"
+                        />
+                      </div>
+                    )}
+                    <div className={draft.khqrCurrency === 'KHR' ? '' : 'sm:col-span-2'}>
+                      <label className="text-[11px] font-semibold text-slate-600 block mb-0.5">
+                        ព័ត៌មានធនាគារបន្ថែម (បង្ហាញលើវិក្កយបត្រ)
+                      </label>
+                      <input
+                        type="text"
+                        value={draft.bankInfo}
+                        onChange={(e) => setDraft({ ...draft, bankInfo: e.target.value })}
+                        placeholder="ឧ. ABA: SUAN COFFEE (001 234 567)"
+                        className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-bold bg-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-600 block mb-0.5">
+                      កូដ KHQR ដើម (បំពេញស្វ័យប្រវត្តិពេល Upload រូប ឬ Paste 000201...)
+                    </label>
+                    <input
+                      type="text"
+                      value={draft.khqrPayload || ''}
+                      onChange={(e) => setDraft({ ...draft, khqrPayload: e.target.value.trim() })}
+                      placeholder="000201010211..."
+                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-[11px] font-mono-num bg-white"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
             <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">

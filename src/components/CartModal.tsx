@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
-import { MapPin, Minus, Plus, Send, X } from 'lucide-react';
+import { Download, MapPin, Minus, Plus, Send, X } from 'lucide-react';
 import type { CartItem, Coords, Member, OrderType, PaymentMethod, ShopSettings } from '../types';
 import { CAFE_ASSETS, computeDeliveryFee } from '../utils/cafeUtils';
+import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 
 interface CartModalProps {
   isOpen: boolean;
@@ -87,16 +88,39 @@ export function CartModal({
   const fee = orderType === 'delivery' ? computedFee : 0;
   const grandTotal = Math.max(0, subtotal - promoDisc + fee);
 
-  // Render local QR fallback if no uploaded KHQR image is provided
+  const dynamicKhqr = useMemo(
+    () =>
+      buildDynamicKhqr({
+        basePayload: shopSettings.khqrPayload,
+        bakongId: shopSettings.khqrBakongId,
+        merchantName: shopSettings.khqrMerchantName || shopSettings.brandTitle,
+        amountUsd: grandTotal,
+        currency: shopSettings.khqrCurrency || 'USD',
+        khrRate: shopSettings.khqrKhrRate || 4100,
+        billNumber: `TBL${tableNum}`,
+      }),
+    [
+      shopSettings.khqrPayload,
+      shopSettings.khqrBakongId,
+      shopSettings.khqrMerchantName,
+      shopSettings.brandTitle,
+      shopSettings.khqrCurrency,
+      shopSettings.khqrKhrRate,
+      grandTotal,
+      tableNum,
+    ]
+  );
+
+  // Render crisp EMVCo Dynamic KHQR whenever grandTotal or payment changes
   useEffect(() => {
-    if (!isOpen || payment !== 'KHQR / ABA' || shopSettings.khqrImg || !khqrCanvasRef.current) return;
-    const payload = `KHQR:${shopSettings.bankInfo || 'EMERALD BREW CAFE'}|AMT:${grandTotal.toFixed(2)}USD`;
-    QRCode.toCanvas(khqrCanvasRef.current, payload, {
-      width: 148,
+    if (!isOpen || payment !== 'KHQR / ABA' || !dynamicKhqr.isOfficialEmv || !khqrCanvasRef.current) return;
+    QRCode.toCanvas(khqrCanvasRef.current, dynamicKhqr.payload, {
+      width: 176,
       margin: 1,
-      color: { dark: '#0D4A3E', light: '#FFFFFF' },
+      errorCorrectionLevel: 'M',
+      color: { dark: '#000000', light: '#FFFFFF' },
     }).catch(() => {});
-  }, [isOpen, payment, shopSettings.khqrImg, shopSettings.bankInfo, grandTotal]);
+  }, [isOpen, payment, dynamicKhqr]);
 
   const handleApplyPromo = () => {
     const code = promoInput.trim().toUpperCase();
@@ -364,22 +388,76 @@ export function CartModal({
             </div>
 
             {payment === 'KHQR / ABA' && (
-              <div className="mt-3 bg-sky-50 border border-sky-200 rounded-2xl p-3 text-center space-y-1.5">
-                <p className="text-xs font-bold text-slate-900">
-                  ស្កេន KHQR ដើម្បីទូទាត់៖{' '}
-                  <span className="text-red-600 font-mono-num text-sm">${grandTotal.toFixed(2)}</span>
-                </p>
-                {shopSettings.khqrImg ? (
-                  <img
-                    src={shopSettings.khqrImg}
-                    alt="KHQR Code"
-                    referrerPolicy="no-referrer"
-                    className="w-36 h-36 mx-auto rounded-xl object-contain bg-white border p-1"
-                  />
+              <div className="mt-3 bg-slate-50 border border-slate-200 rounded-2xl p-3 text-center space-y-2.5">
+                {dynamicKhqr.isOfficialEmv ? (
+                  <>
+                    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden max-w-[230px] mx-auto shadow-sm">
+                      <div className="bg-[#E1232E] text-white py-1.5 px-3 flex items-center justify-between">
+                        <span className="font-extrabold text-xs tracking-wider">KHQR</span>
+                        <span className="text-[10px] font-semibold bg-white/20 px-1.5 py-0.5 rounded">
+                          Dynamic Amount
+                        </span>
+                      </div>
+                      <div className="p-3 space-y-1.5">
+                        <p className="text-[11px] font-bold text-slate-700 truncate">
+                          {dynamicKhqr.merchantDisplay}
+                        </p>
+                        <p className="text-xl font-extrabold font-mono-num text-[#E1232E]">
+                          {dynamicKhqr.formattedAmount}
+                        </p>
+                        <div className="border-t border-dashed border-slate-200 pt-2 flex justify-center">
+                          <canvas ref={khqrCanvasRef} className="rounded-lg bg-white" />
+                        </div>
+                        {dynamicKhqr.bakongIdDisplay && (
+                          <p className="text-[10px] text-slate-500 font-mono-num truncate">
+                            {dynamicKhqr.bakongIdDisplay}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const ok = await downloadBrandedKhqrPng({
+                          payload: dynamicKhqr.payload,
+                          merchantDisplay: dynamicKhqr.merchantDisplay,
+                          formattedAmount: dynamicKhqr.formattedAmount,
+                          bankInfo: shopSettings.bankInfo,
+                          filename: `KHQR-${grandTotal.toFixed(2)}.png`,
+                        });
+                        if (ok) onToast('បានរក្សាទុករូប KHQR ចូលទូរស័ព្ទហើយ!');
+                      }}
+                      className="inline-flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 px-3 py-1.5 rounded-xl text-[11px] font-bold transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5 text-[#E1232E]" />
+                      <span>រក្សាទុករូប KHQR (ស្កេនពី Gallery)</span>
+                    </button>
+                    {shopSettings.bankInfo && (
+                      <p className="text-[11px] font-bold text-slate-700">{shopSettings.bankInfo}</p>
+                    )}
+                  </>
+                ) : shopSettings.khqrImg ? (
+                  <>
+                    <p className="text-xs font-bold text-slate-900">
+                      ស្កេន KHQR ដើម្បីទូទាត់៖{' '}
+                      <span className="text-red-600 font-mono-num text-sm">${grandTotal.toFixed(2)}</span>
+                    </p>
+                    <img
+                      src={shopSettings.khqrImg}
+                      alt="KHQR Code"
+                      referrerPolicy="no-referrer"
+                      className="w-36 h-36 mx-auto rounded-xl object-contain bg-white border p-1"
+                    />
+                    {shopSettings.bankInfo && (
+                      <p className="text-[11px] font-bold text-slate-700">{shopSettings.bankInfo}</p>
+                    )}
+                  </>
                 ) : (
-                  <canvas ref={khqrCanvasRef} className="mx-auto rounded-xl bg-white border p-1.5" />
+                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
+                    មិនទាន់បានកំណត់ Bakong ID ឬ KHQR ហាងទេ។ សូមម្ចាស់ហាងបញ្ចូលក្នុង គ្រប់គ្រងហាង → ការកំណត់។
+                  </p>
                 )}
-                <p className="text-[11px] font-bold text-slate-700">{shopSettings.bankInfo}</p>
               </div>
             )}
 

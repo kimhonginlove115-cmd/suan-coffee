@@ -1076,6 +1076,7 @@ export default function App() {
       <ReceiptModal
         order={receiptState.order}
         tgUrl={receiptState.tgUrl}
+        shopSettings={shopSettings}
         onClose={() => setReceiptState({ order: null, tgUrl: '' })}
         onOpenLiveTrack={(id) => {
           setReceiptState({ order: null, tgUrl: '' });

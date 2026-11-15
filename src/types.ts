@@ -85,6 +85,11 @@ export interface ShopSettings {
   logoImg: string;
   bannerImg: string;
   khqrImg: string;
+  khqrBakongId?: string;
+  khqrPayload?: string;
+  khqrMerchantName?: string;
+  khqrCurrency?: 'USD' | 'KHR';
+  khqrKhrRate?: number;
   bankInfo: string;
   promoCode: string;
   promoPercent: number;

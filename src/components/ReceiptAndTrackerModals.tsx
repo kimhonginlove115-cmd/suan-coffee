@@ -1,15 +1,50 @@
+import { useEffect, useMemo, useRef } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Check, MapPin, Send, X } from 'lucide-react';
-import type { Order } from '../types';
+import QRCode from 'qrcode';
+import { Check, Download, MapPin, Send, X } from 'lucide-react';
+import type { Order, ShopSettings } from '../types';
+import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 
 interface ReceiptModalProps {
   order: Order | null;
   tgUrl: string;
+  shopSettings: ShopSettings;
   onClose: () => void;
   onOpenLiveTrack: (orderId: string) => void;
 }
 
-export function ReceiptModal({ order, tgUrl, onClose, onOpenLiveTrack }: ReceiptModalProps) {
+export function ReceiptModal({
+  order,
+  tgUrl,
+  shopSettings,
+  onClose,
+  onOpenLiveTrack,
+}: ReceiptModalProps) {
+  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const dynamicKhqr = useMemo(() => {
+    if (!order || order.payment !== 'KHQR / ABA') return null;
+    return buildDynamicKhqr({
+      basePayload: shopSettings.khqrPayload,
+      bakongId: shopSettings.khqrBakongId,
+      merchantName: shopSettings.khqrMerchantName || shopSettings.brandTitle,
+      amountUsd: Number(order.grandTotal || 0),
+      currency: shopSettings.khqrCurrency || 'USD',
+      khrRate: shopSettings.khqrKhrRate || 4100,
+      billNumber: order.id,
+    });
+  }, [order, shopSettings]);
+
+  useEffect(() => {
+    if (!dynamicKhqr?.isOfficialEmv || !qrCanvasRef.current) return;
+    QRCode.toCanvas(qrCanvasRef.current, dynamicKhqr.payload, {
+      width: 148,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#000000', light: '#FFFFFF' },
+    }).catch(() => {});
+  }, [dynamicKhqr]);
+
   return (
     <AnimatePresence>
       {order && (
@@ -24,7 +59,7 @@ export function ReceiptModal({ order, tgUrl, onClose, onOpenLiveTrack }: Receipt
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0.95, opacity: 0 }}
             transition={{ type: 'spring', damping: 24, stiffness: 300 }}
-            className="bg-white w-full max-w-sm rounded-3xl p-5 space-y-3 shadow-2xl text-center"
+            className="bg-white w-full max-w-sm rounded-3xl p-5 space-y-3 shadow-2xl text-center max-h-[90vh] overflow-y-auto"
           >
             <motion.div
               initial={{ scale: 0.5 }}
@@ -39,7 +74,7 @@ export function ReceiptModal({ order, tgUrl, onClose, onOpenLiveTrack }: Receipt
               {order.id} · ម៉ោង {order.timestamp}
             </p>
 
-            <div className="bg-slate-50 p-3.5 rounded-2xl text-left text-xs space-y-1.5 max-h-48 overflow-y-auto">
+            <div className="bg-slate-50 p-3.5 rounded-2xl text-left text-xs space-y-1.5 max-h-40 overflow-y-auto">
               {order.items.map((i, idx) => (
                 <div key={idx} className="flex justify-between gap-2">
                   <span>
@@ -71,6 +106,41 @@ export function ReceiptModal({ order, tgUrl, onClose, onOpenLiveTrack }: Receipt
                 </span>
               </div>
             </div>
+
+            {order.payment === 'KHQR / ABA' && dynamicKhqr?.isOfficialEmv && (
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
+                <div className="bg-white rounded-xl border border-slate-200 overflow-hidden max-w-[195px] mx-auto">
+                  <div className="bg-[#E1232E] text-white py-1 px-2.5 flex items-center justify-between text-[10px] font-bold">
+                    <span>KHQR</span>
+                    <span>{order.id}</span>
+                  </div>
+                  <div className="p-2.5 space-y-1">
+                    <p className="text-base font-extrabold font-mono-num text-[#E1232E]">
+                      {dynamicKhqr.formattedAmount}
+                    </p>
+                    <div className="flex justify-center">
+                      <canvas ref={qrCanvasRef} className="rounded bg-white" />
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    downloadBrandedKhqrPng({
+                      payload: dynamicKhqr.payload,
+                      merchantDisplay: dynamicKhqr.merchantDisplay,
+                      formattedAmount: dynamicKhqr.formattedAmount,
+                      bankInfo: shopSettings.bankInfo,
+                      filename: `KHQR-${order.id}.png`,
+                    })
+                  }
+                  className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 hover:text-slate-950 underline"
+                >
+                  <Download className="w-3 h-3 text-[#E1232E]" />
+                  <span>រក្សាទុករូប KHQR វិក្កយបត្រ</span>
+                </button>
+              </div>
+            )}
 
             <div className="space-y-2 pt-2">
               {order.type === 'delivery' && (
