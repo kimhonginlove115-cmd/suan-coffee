@@ -32,6 +32,7 @@ export function ReceiptModal({
       currency: shopSettings.khqrCurrency || 'USD',
       khrRate: shopSettings.khqrKhrRate || 4100,
       billNumber: order.id,
+      timestampMs: order.createdAt,
     });
   }, [order, shopSettings]);
 

@@ -7,8 +7,9 @@ export interface TlvNode {
 }
 
 export function tlv(tag: string, value: string): string {
-  const len = String(value.length).padStart(2, '0');
-  return `${tag}${len}${value}`;
+  const safeVal = String(value ?? '').slice(0, 99);
+  const len = String(safeVal.length).padStart(2, '0');
+  return `${tag}${len}${safeVal}`;
 }
 
 // Standard EMVCo / NBC Bakong CRC-16/CCITT-FALSE (polynomial 0x1021, initial 0xFFFF)
@@ -118,6 +119,7 @@ export function buildDynamicKhqr(opts: {
   currency?: 'USD' | 'KHR';
   khrRate?: number;
   billNumber?: string;
+  timestampMs?: number;
 }): DynamicKhqrResult {
   const currency: 'USD' | 'KHR' = opts.currency === 'KHR' ? 'KHR' : 'USD';
   const rate = opts.khrRate && opts.khrRate > 0 ? opts.khrRate : 4100;
@@ -134,9 +136,13 @@ export function buildDynamicKhqr(opts: {
   const currencyCode = currency === 'KHR' ? '116' : '840';
 
   const cleanBase = (opts.basePayload || '').trim();
-  const cleanBakongId = (opts.bakongId || '').trim();
+  const cleanBakongId = toAsciiMerchantText(opts.bakongId, '', 60).replace(/\s+/g, '');
   const fallbackMerchant = toAsciiMerchantText(opts.merchantName, 'EMERALD BREW CAFE', 25);
   const cleanBill = toAsciiMerchantText(opts.billNumber, '', 20);
+  const tsPart =
+    typeof opts.timestampMs === 'number' && Number.isFinite(opts.timestampMs) && opts.timestampMs > 0
+      ? tlv('99', tlv('00', String(Math.floor(opts.timestampMs))))
+      : '';
 
   // Mode A: Clone official uploaded/pasted bank KHQR and upgrade it to Dynamic Amount
   if (cleanBase && isValidEmvKhqr(cleanBase)) {
@@ -193,7 +199,7 @@ export function buildDynamicKhqr(opts: {
       tlv('00', '01'),
       tlv('01', safeUsd > 0 ? '12' : '11'),
       ...outNodes.sort((a, b) => Number(a.tag) - Number(b.tag)).map((n) => tlv(n.tag, n.value)),
-      tlv('99', tlv('00', String(Date.now()))),
+      tsPart,
     ].join('');
 
     const withCrcPrefix = `${orderedBody}6304`;
@@ -223,7 +229,7 @@ export function buildDynamicKhqr(opts: {
       tlv('59', fallbackMerchant),
       tlv('60', cityDisplay),
       ...(cleanBill ? [tlv('62', tlv('01', cleanBill))] : []),
-      tlv('99', tlv('00', String(Date.now()))),
+      tsPart,
     ].join('');
 
     const withCrcPrefix = `${parts}6304`;
@@ -250,12 +256,49 @@ export function buildDynamicKhqr(opts: {
   };
 }
 
+function scanImageWithMaxDim(
+  img: HTMLImageElement,
+  maxDim: number,
+  inversionAttempts: 'dontInvert' | 'onlyInvert' | 'attemptBoth'
+): string | null {
+  let w = img.naturalWidth || img.width;
+  let h = img.naturalHeight || img.height;
+  if (!w || !h) return null;
+  if (w > maxDim || h > maxDim) {
+    const scale = maxDim / Math.max(w, h);
+    w = Math.max(1, Math.round(w * scale));
+    h = Math.max(1, Math.round(h * scale));
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  const imageData = ctx.getImageData(0, 0, w, h);
+  canvas.width = 0;
+  canvas.height = 0;
+  const code = jsQR(imageData.data, w, h, { inversionAttempts });
+  const text = code?.data?.trim() || '';
+  return text.startsWith('000201') ? text : null;
+}
+
 export async function decodeKhqrFromImageFile(file: File): Promise<string | null> {
   if (file.size > 15 * 1024 * 1024) return null;
   return new Promise((resolve) => {
     const objectUrl = URL.createObjectURL(file);
     const img = new Image();
+    let settled = false;
+    const timeoutId = window.setTimeout(() => done(null), 10000);
+
     const done = (val: string | null) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeoutId);
+      img.onload = null;
+      img.onerror = null;
       try {
         URL.revokeObjectURL(objectUrl);
       } catch {
@@ -263,34 +306,19 @@ export async function decodeKhqrFromImageFile(file: File): Promise<string | null
       }
       resolve(val);
     };
+
     img.onerror = () => done(null);
-    img.onload = () => {
+    img.onload = async () => {
       try {
-        const maxDim = 900;
-        let w = img.naturalWidth || img.width;
-        let h = img.naturalHeight || img.height;
-        if (!w || !h) return done(null);
-        if (w > maxDim || h > maxDim) {
-          const scale = maxDim / Math.max(w, h);
-          w = Math.max(1, Math.round(w * scale));
-          h = Math.max(1, Math.round(h * scale));
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return done(null);
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, w, h);
-        ctx.drawImage(img, 0, 0, w, h);
-        const imageData = ctx.getImageData(0, 0, w, h);
-        canvas.width = 0;
-        canvas.height = 0;
-        const code = jsQR(imageData.data, w, h, { inversionAttempts: 'attemptBoth' });
-        if (code?.data && code.data.trim().startsWith('000201')) {
-          return done(code.data.trim());
-        }
-        return done(null);
+        await new Promise((r) => setTimeout(r, 16));
+        if (settled) return;
+        const pass1 = scanImageWithMaxDim(img, 560, 'dontInvert');
+        if (pass1) return done(pass1);
+
+        await new Promise((r) => setTimeout(r, 16));
+        if (settled) return;
+        const pass2 = scanImageWithMaxDim(img, 820, 'onlyInvert');
+        return done(pass2);
       } catch {
         return done(null);
       }

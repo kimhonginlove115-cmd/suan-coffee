@@ -360,7 +360,18 @@ export function compressImageFile(
 
   const objectUrl = URL.createObjectURL(file);
   const img = new Image();
+  let settled = false;
+  const timeoutId = window.setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    onError('ការបង្រួមរូបភាពចំណាយពេលយូរពេក!');
+  }, 10000);
+
   const cleanup = () => {
+    window.clearTimeout(timeoutId);
+    img.onload = null;
+    img.onerror = null;
     try {
       URL.revokeObjectURL(objectUrl);
     } catch {
@@ -369,11 +380,15 @@ export function compressImageFile(
   };
 
   img.onerror = () => {
+    if (settled) return;
+    settled = true;
     cleanup();
     onError('ប្រភេទរូបភាពនេះមិនគាំទ្រទេ!');
   };
 
   img.onload = () => {
+    if (settled) return;
+    settled = true;
     try {
       let w = img.naturalWidth || img.width;
       let h = img.naturalHeight || img.height;

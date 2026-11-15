@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
 import { Lock, Printer, Trash2, X } from 'lucide-react';
 import type {
@@ -214,35 +214,49 @@ export function AdminDashboard({
     setDraft(shopSettings);
   }, [shopSettings]);
 
-  const sampleDynamicKhqr = buildDynamicKhqr({
-    basePayload: draft.khqrPayload,
-    bakongId: draft.khqrBakongId,
-    merchantName: draft.khqrMerchantName || draft.brandTitle,
-    amountUsd: 1.5,
-    currency: draft.khqrCurrency || 'USD',
-    khrRate: draft.khqrKhrRate || 4100,
-    billNumber: 'TEST01',
-  });
+  const sampleDynamicKhqr = useMemo(
+    () =>
+      buildDynamicKhqr({
+        basePayload: draft.khqrPayload,
+        bakongId: draft.khqrBakongId,
+        merchantName: draft.khqrMerchantName || draft.brandTitle,
+        amountUsd: 1.5,
+        currency: draft.khqrCurrency || 'USD',
+        khrRate: draft.khqrKhrRate || 4100,
+        billNumber: 'TEST01',
+      }),
+    [
+      draft.khqrPayload,
+      draft.khqrBakongId,
+      draft.khqrMerchantName,
+      draft.brandTitle,
+      draft.khqrCurrency,
+      draft.khqrKhrRate,
+    ]
+  );
 
   useEffect(() => {
     if (!sampleDynamicKhqr.isOfficialEmv) {
-      setKhqrPreviewUrl('');
+      setKhqrPreviewUrl((prev) => (prev === '' ? prev : ''));
       return;
     }
     let cancelled = false;
-    QRCode.toDataURL(sampleDynamicKhqr.payload, {
-      width: 140,
-      margin: 1,
-      errorCorrectionLevel: 'M',
-    })
-      .then((url) => {
-        if (!cancelled) setKhqrPreviewUrl(url);
+    const timer = window.setTimeout(() => {
+      QRCode.toDataURL(sampleDynamicKhqr.payload, {
+        width: 140,
+        margin: 1,
+        errorCorrectionLevel: 'M',
       })
-      .catch(() => {
-        if (!cancelled) setKhqrPreviewUrl('');
-      });
+        .then((url) => {
+          if (!cancelled) setKhqrPreviewUrl((prev) => (prev === url ? prev : url));
+        })
+        .catch(() => {
+          if (!cancelled) setKhqrPreviewUrl((prev) => (prev === '' ? prev : ''));
+        });
+    }, 150);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [sampleDynamicKhqr.isOfficialEmv, sampleDynamicKhqr.payload]);
 
@@ -1244,28 +1258,27 @@ export function AdminDashboard({
                               khqrMerchantName: info.merchantName || prev.khqrMerchantName || prev.brandTitle,
                               khqrCurrency: info.currency || prev.khqrCurrency || 'USD',
                             }));
-                            compressImageFile(
-                              f,
-                              320,
-                              (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
-                              onToast
-                            );
                             onToast('✓ ទាញយកកូដ KHQR ផ្លូវការស្វ័យប្រវត្តិ — បើក Dynamic Amount ជោគជ័យ!');
                           } else {
-                            compressImageFile(
-                              f,
-                              320,
-                              (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
-                              onToast
-                            );
                             onToast('រូបនេះស្កេនកូដមិនច្បាស់! សូមបញ្ចូល Bakong ID ឬ Paste កូដ 000201... ខាងក្រោម');
                           }
+                          compressImageFile(
+                            f,
+                            320,
+                            (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
+                            onToast
+                          );
                         } finally {
                           setDecodingKhqr(false);
                         }
                       }}
                       className="text-xs w-full"
                     />
+                    {decodingKhqr && (
+                      <p className="text-[11px] font-bold text-amber-700 mt-1">
+                        ⏳ កំពុងស្កេនកូដ KHQR ពីរូបភាព...
+                      </p>
+                    )}
                   </div>
 
                   <div className="grid sm:grid-cols-2 gap-2">
@@ -1276,7 +1289,10 @@ export function AdminDashboard({
                       <input
                         type="text"
                         value={draft.khqrBakongId || ''}
-                        onChange={(e) => setDraft({ ...draft, khqrBakongId: e.target.value.trim() })}
+                        onChange={(e) => {
+                          const val = e.target.value.trim();
+                          setDraft((prev) => ({ ...prev, khqrBakongId: val }));
+                        }}
                         placeholder="username@aba ឬ 012345678@bkrt"
                         className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-mono-num bg-white"
                       />
@@ -1289,7 +1305,10 @@ export function AdminDashboard({
                         type="text"
                         maxLength={25}
                         value={draft.khqrMerchantName || ''}
-                        onChange={(e) => setDraft({ ...draft, khqrMerchantName: e.target.value })}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setDraft((prev) => ({ ...prev, khqrMerchantName: val }));
+                        }}
                         placeholder="SUAN COFFEE"
                         className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
                       />
@@ -1303,9 +1322,10 @@ export function AdminDashboard({
                       </label>
                       <select
                         value={draft.khqrCurrency || 'USD'}
-                        onChange={(e) =>
-                          setDraft({ ...draft, khqrCurrency: e.target.value === 'KHR' ? 'KHR' : 'USD' })
-                        }
+                        onChange={(e) => {
+                          const val = e.target.value === 'KHR' ? 'KHR' : 'USD';
+                          setDraft((prev) => ({ ...prev, khqrCurrency: val }));
+                        }}
                         className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-bold bg-white"
                       >
                         <option value="USD">ដុល្លារ (USD $)</option>
@@ -1322,7 +1342,10 @@ export function AdminDashboard({
                           min={3500}
                           step={50}
                           value={draft.khqrKhrRate || 4100}
-                          onChange={(e) => setDraft({ ...draft, khqrKhrRate: Number(e.target.value) || 4100 })}
+                          onChange={(e) => {
+                            const val = Number(e.target.value) || 4100;
+                            setDraft((prev) => ({ ...prev, khqrKhrRate: val }));
+                          }}
                           className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-mono-num bg-white"
                         />
                       </div>
@@ -1334,7 +1357,10 @@ export function AdminDashboard({
                       <input
                         type="text"
                         value={draft.bankInfo}
-                        onChange={(e) => setDraft({ ...draft, bankInfo: e.target.value })}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setDraft((prev) => ({ ...prev, bankInfo: val }));
+                        }}
                         placeholder="ឧ. ABA: SUAN COFFEE (001 234 567)"
                         className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-bold bg-white"
                       />
@@ -1348,7 +1374,10 @@ export function AdminDashboard({
                     <input
                       type="text"
                       value={draft.khqrPayload || ''}
-                      onChange={(e) => setDraft({ ...draft, khqrPayload: e.target.value.trim() })}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        setDraft((prev) => ({ ...prev, khqrPayload: val }));
+                      }}
                       placeholder="000201010211..."
                       className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-[11px] font-mono-num bg-white"
                     />
