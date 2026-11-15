@@ -1,3 +1,4 @@
+export type AppLang = 'km' | 'en';
 export type ItemType = 'drink' | 'food';
 export type OrderType = 'delivery' | 'dinein';
 export type OrderStatus = 'Pending' | 'Brewing' | 'Ready' | 'Completed';
@@ -13,17 +14,22 @@ export interface MenuItem {
   id: string | number;
   type: ItemType;
   name: string;
+  nameEn?: string;
   price: number;
   discount: number;
   category: string;
+  categoryEn?: string;
   img: string;
   desc: string;
+  descEn?: string;
   available: boolean;
+  featured?: boolean;
 }
 
 export interface Topping {
   id: string | number;
   name: string;
+  nameEn?: string;
   price: number;
   available: boolean;
 }
@@ -38,6 +44,7 @@ export interface CartItem {
 }
 
 export interface OrderCustomer {
+  memberId?: string | number;
   name: string;
   phone: string;
   tg?: string;
@@ -46,6 +53,22 @@ export interface OrderCustomer {
   coords?: Coords;
   distanceKm?: string;
   tableNum?: number | string;
+}
+
+export interface OrderFeedback {
+  rating: number;
+  comment: string;
+  submittedAt: number;
+  customerName?: string;
+}
+
+export interface DriverInfo {
+  name?: string;
+  phone?: string;
+  note?: string;
+  pickedUpAt?: number;
+  arrivedAt?: number;
+  deliveredAt?: number;
 }
 
 export interface Order {
@@ -61,7 +84,9 @@ export interface Order {
   grandTotal: number;
   customer: OrderCustomer;
   driverCoords: Coords | null;
+  driverInfo?: DriverInfo;
   status: OrderStatus;
+  feedback?: OrderFeedback;
 }
 
 export interface Member {

@@ -49,64 +49,81 @@ export const DEFAULT_MENU: MenuItem[] = [
   {
     id: 1,
     type: 'drink',
-    name: 'Iced Latte Emerald',
+    name: 'ឡាតេទឹកកក Emerald',
+    nameEn: 'Iced Latte Emerald',
     price: 2.5,
     discount: 0,
     category: 'Coffee',
+    categoryEn: 'Coffee',
     img: CAFE_ASSETS.icedLatte,
     desc: 'កាហ្វេអារ៉ាប៊ីកា លាយទឹកដោះគោស្រស់',
+    descEn: 'Signature Arabica espresso blended with fresh chilled milk',
     available: true,
+    featured: true,
   },
   {
     id: 2,
     type: 'drink',
-    name: 'Uji Matcha Latte',
+    name: 'ម៉ាត់ឆាឡាតេជប៉ុន (Uji Matcha)',
+    nameEn: 'Uji Matcha Latte',
     price: 3.0,
     discount: 15,
     category: 'Matcha',
+    categoryEn: 'Matcha',
     img: CAFE_ASSETS.ujiMatcha,
     desc: 'ម្សៅតែបៃតងជប៉ុនសុទ្ធ',
+    descEn: 'Authentic ceremonial-grade Japanese green tea latte',
     available: true,
+    featured: true,
   },
   {
     id: 3,
     type: 'drink',
-    name: 'Brown Sugar Milk Tea',
+    name: 'តែទឹកដោះគោស្ករត្នោត',
+    nameEn: 'Brown Sugar Milk Tea',
     price: 2.25,
     discount: 0,
     category: 'Milk Tea',
+    categoryEn: 'Milk Tea',
     img: CAFE_ASSETS.brownSugar,
     desc: 'តែទឹកដោះគោស្ករត្នោត និងគុជខ្មៅ',
+    descEn: 'Rich brown sugar syrup swirled with fresh milk and boba pearls',
     available: true,
   },
   {
     id: 4,
     type: 'food',
     name: 'មីហឹរកូរ៉េពងមាន់',
+    nameEn: 'Korean Spicy Egg Noodles',
     price: 3.5,
     discount: 10,
     category: 'Food & Noodles',
+    categoryEn: 'Food & Noodles',
     img: CAFE_ASSETS.spicyNoodles,
     desc: 'មីហឹរឈ្ងុយឆ្ងាញ់ បន្ថែមពងមាន់ទន់',
+    descEn: 'Savory spicy Korean noodles topped with a soft-boiled egg',
     available: true,
   },
   {
     id: 5,
     type: 'food',
     name: 'នំ Croissant ប័រស្រួយ',
+    nameEn: 'Flaky Butter Croissant',
     price: 2.0,
     discount: 0,
     category: 'Bakery & Snacks',
+    categoryEn: 'Bakery & Snacks',
     img: CAFE_ASSETS.butterCroissant,
     desc: 'នំដុតថ្មីៗឈ្ងុយប័របារាំង',
+    descEn: 'Freshly baked golden French butter croissant',
     available: true,
   },
 ];
 
 export const DEFAULT_TOPPINGS: Topping[] = [
-  { id: 101, name: 'គុជខ្មៅ (Black Pearl)', price: 0.5, available: true },
-  { id: 102, name: 'ឈីសហ្វូម (Cheese Foam)', price: 0.75, available: true },
-  { id: 103, name: 'Extra Espresso Shot', price: 0.75, available: true },
+  { id: 101, name: 'គុជខ្មៅ (Black Pearl)', nameEn: 'Black Pearl Boba', price: 0.5, available: true },
+  { id: 102, name: 'ឈីសហ្វូម (Cheese Foam)', nameEn: 'Cheese Foam', price: 0.75, available: true },
+  { id: 103, name: 'បន្ថែម Espresso ១ ស៊ុត', nameEn: 'Extra Espresso Shot', price: 0.75, available: true },
 ];
 
 export const DEFAULT_SETTINGS: ShopSettings = {
@@ -220,29 +237,64 @@ export function normalizeMenuItems(raw: unknown): MenuItem[] {
   if (!Array.isArray(raw)) return DEFAULT_MENU;
   return raw
     .filter((m): m is Record<string, unknown> => Boolean(m && typeof m === 'object'))
-    .map((m, idx) => ({
-      id: (m.id as number | string) ?? `item-${idx}`,
-      type: m.type === 'food' ? 'food' : 'drink',
-      name: String(m.name || 'Menu Item'),
-      price: Math.max(0, Number(m.price) || 0),
-      discount: Math.min(90, Math.max(0, Number(m.discount) || 0)),
-      category: String(m.category || 'Coffee'),
-      img: resolveAssetUrl(typeof m.img === 'string' ? m.img : '', CAFE_ASSETS.icedLatte),
-      desc: String(m.desc || ''),
-      available: m.available !== false,
-    }));
+    .map((m, idx) => {
+      const id = (m.id as number | string) ?? `item-${idx}`;
+      const name = String(m.name || 'Menu Item');
+      const presetMatch = DEFAULT_MENU.find(
+        (d) =>
+          String(d.id) === String(id) ||
+          d.name.trim().toLowerCase() === name.trim().toLowerCase()
+      );
+      return {
+        id,
+        type: m.type === 'food' ? 'food' : 'drink',
+        name,
+        nameEn:
+          typeof m.nameEn === 'string' && m.nameEn.trim()
+            ? m.nameEn.trim()
+            : presetMatch?.nameEn,
+        price: Math.max(0, Number(m.price) || 0),
+        discount: Math.min(90, Math.max(0, Number(m.discount) || 0)),
+        category: String(m.category || 'Coffee'),
+        categoryEn:
+          typeof m.categoryEn === 'string' && m.categoryEn.trim()
+            ? m.categoryEn.trim()
+            : presetMatch?.categoryEn,
+        img: resolveAssetUrl(typeof m.img === 'string' ? m.img : '', CAFE_ASSETS.icedLatte),
+        desc: String(m.desc || ''),
+        descEn:
+          typeof m.descEn === 'string' && m.descEn.trim()
+            ? m.descEn.trim()
+            : presetMatch?.descEn,
+        available: m.available !== false,
+        featured: typeof m.featured === 'boolean' ? m.featured : Boolean(presetMatch?.featured),
+      };
+    });
 }
 
 export function normalizeToppings(raw: unknown): Topping[] {
   if (!Array.isArray(raw)) return DEFAULT_TOPPINGS;
   return raw
     .filter((t): t is Record<string, unknown> => Boolean(t && typeof t === 'object'))
-    .map((t, idx) => ({
-      id: (t.id as number | string) ?? `top-${idx}`,
-      name: String(t.name || 'Topping'),
-      price: Math.max(0, Number(t.price) || 0),
-      available: t.available !== false,
-    }));
+    .map((t, idx) => {
+      const id = (t.id as number | string) ?? `top-${idx}`;
+      const name = String(t.name || 'Topping');
+      const presetMatch = DEFAULT_TOPPINGS.find(
+        (d) =>
+          String(d.id) === String(id) ||
+          d.name.trim().toLowerCase() === name.trim().toLowerCase()
+      );
+      return {
+        id,
+        name,
+        nameEn:
+          typeof t.nameEn === 'string' && t.nameEn.trim()
+            ? t.nameEn.trim()
+            : presetMatch?.nameEn,
+        price: Math.max(0, Number(t.price) || 0),
+        available: t.available !== false,
+      };
+    });
 }
 
 export function normalizeShopSettings(raw: unknown, fallback: ShopSettings = DEFAULT_SETTINGS): ShopSettings {
@@ -279,6 +331,32 @@ export function normalizeOrders(raw: unknown): Order[] {
               lng: Number((o.driverCoords as Record<string, unknown>).lng) || DEFAULT_SETTINGS.lng,
             }
           : null;
+      const fbRaw =
+        o.feedback && typeof o.feedback === 'object' ? (o.feedback as Record<string, unknown>) : null;
+      const fbRating = fbRaw ? Math.min(5, Math.max(1, Math.round(Number(fbRaw.rating) || 0))) : 0;
+      const feedback =
+        fbRaw && fbRating >= 1
+          ? {
+              rating: fbRating,
+              comment: String(fbRaw.comment || '').trim(),
+              submittedAt: Number(fbRaw.submittedAt) || Number(o.createdAt) || Date.now(),
+              customerName: fbRaw.customerName ? String(fbRaw.customerName) : undefined,
+            }
+          : undefined;
+      const diRaw =
+        o.driverInfo && typeof o.driverInfo === 'object'
+          ? (o.driverInfo as Record<string, unknown>)
+          : null;
+      const driverInfo = diRaw
+        ? {
+            name: diRaw.name ? String(diRaw.name).trim() : undefined,
+            phone: diRaw.phone ? String(diRaw.phone).trim() : undefined,
+            note: diRaw.note ? String(diRaw.note).trim() : undefined,
+            pickedUpAt: diRaw.pickedUpAt ? Number(diRaw.pickedUpAt) : undefined,
+            arrivedAt: diRaw.arrivedAt ? Number(diRaw.arrivedAt) : undefined,
+            deliveredAt: diRaw.deliveredAt ? Number(diRaw.deliveredAt) : undefined,
+          }
+        : undefined;
       return {
         id: String(o.id),
         createdAt: Number(o.createdAt) || 0,
@@ -298,6 +376,7 @@ export function normalizeOrders(raw: unknown): Order[] {
         fee: Number(o.fee) || 0,
         grandTotal: Number(o.grandTotal) || 0,
         customer: {
+          memberId: cust.memberId as string | number | undefined,
           name: String(cust.name || '-'),
           phone: String(cust.phone || ''),
           tg: String(cust.tg || ''),
@@ -308,10 +387,12 @@ export function normalizeOrders(raw: unknown): Order[] {
           tableNum: cust.tableNum as number | string | undefined,
         },
         driverCoords,
+        driverInfo,
         status:
           o.status === 'Brewing' || o.status === 'Ready' || o.status === 'Completed'
             ? o.status
             : 'Pending',
+        feedback,
       };
     });
 }

@@ -1,20 +1,56 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { CheckCircle2, KeyRound, LogOut, Phone, Send, ShieldCheck, Smartphone, X } from 'lucide-react';
-import type { AuthCapabilities, Member, ShopSettings } from '../types';
-import { fetchWithTimeout } from '../utils/cafeUtils';
+import {
+  Award,
+  CheckCircle2,
+  Clock,
+  History,
+  KeyRound,
+  LogOut,
+  MessageSquare,
+  Phone,
+  RotateCcw,
+  Send,
+  ShieldCheck,
+  ShoppingBag,
+  Smartphone,
+  Star,
+  X,
+} from 'lucide-react';
+import type { AppLang, AuthCapabilities, Member, Order, ShopSettings } from '../types';
+import { CAFE_ASSETS, fetchWithTimeout, handleImgFallback, resolveAssetUrl } from '../utils/cafeUtils';
+import { getOrderStatusText } from '../utils/i18n';
 import { SecurityShieldIllustration } from './AnimatedIllustrations';
 
 interface AuthModalProps {
+  lang?: AppLang;
   isOpen: boolean;
   onClose: () => void;
   currentMember: Member | null;
   authToken: string | null;
   shopSettings: ShopSettings;
+  orders: Order[];
   onAuthenticated: (member: Member, token: string | null) => void;
   onLogout: () => void;
+  onReorder: (order: Order) => void;
+  onSubmitFeedback: (orderId: string, rating: number, comment: string) => Promise<boolean>;
+  onRefreshOrders?: () => void;
   onToast: (msg: string) => void;
 }
+
+function normalizePhoneMatch(raw?: string): string {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('855')) return `0${digits.slice(3)}`;
+  return digits.startsWith('0') ? digits : `0${digits}`;
+}
+
+const ORDER_STATUS_CLS: Record<string, string> = {
+  Pending: 'bg-amber-100 text-amber-800',
+  Brewing: 'bg-sky-100 text-sky-800',
+  Ready: 'bg-emerald-100 text-[#0D4A3E]',
+  Completed: 'bg-slate-100 text-slate-600',
+};
 
 type AuthTab = 'telegram' | 'phone';
 
@@ -25,14 +61,20 @@ declare global {
 }
 
 export function AuthModal({
+  lang = 'km',
   isOpen,
   onClose,
   currentMember,
   shopSettings,
+  orders,
   onAuthenticated,
   onLogout,
+  onReorder,
+  onSubmitFeedback,
+  onRefreshOrders,
   onToast,
 }: AuthModalProps) {
+  const isEn = lang === 'en';
   const [activeTab, setActiveTab] = useState<AuthTab>('telegram');
   const [capabilities, setCapabilities] = useState<AuthCapabilities | null>(null);
 
@@ -56,6 +98,12 @@ export function AuthModal({
   const [tgPollStep, setTgPollStep] = useState<'awaiting_start' | 'awaiting_contact'>('awaiting_start');
   const [isPollingTg, setIsPollingTg] = useState(false);
 
+  // Order feedback form state
+  const [activeFeedbackOrderId, setActiveFeedbackOrderId] = useState<string | null>(null);
+  const [fbRating, setFbRating] = useState(5);
+  const [fbComment, setFbComment] = useState('');
+  const [submittingFeedback, setSubmittingFeedback] = useState(false);
+
   // Official Telegram Login Widget container
   const widgetContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -66,8 +114,14 @@ export function AuthModal({
     if (!isOpen) {
       setErrorMsg('');
       setLoading(false);
+      setActiveFeedbackOrderId(null);
+      setFbComment('');
+      setFbRating(5);
       if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
       return;
+    }
+    if (currentMember) {
+      onRefreshOrders?.();
     }
     const ctrl = new AbortController();
     fetchWithTimeout('/api/auth/capabilities', { signal: ctrl.signal }, 8000)
@@ -77,7 +131,43 @@ export function AuthModal({
       })
       .catch(() => {});
     return () => ctrl.abort();
-  }, [isOpen]);
+  }, [isOpen, currentMember, onRefreshOrders]);
+
+  const memberOrders = useMemo(() => {
+    if (!currentMember) return [];
+    const mId = String(currentMember.id);
+    const mPhone = normalizePhoneMatch(currentMember.phone);
+    const mTg = (currentMember.telegramUsername || currentMember.tg || '').replace(/^@+/, '').trim().toLowerCase();
+    const mName = (currentMember.name || '').trim().toLowerCase();
+
+    return [...orders]
+      .filter((o) => {
+        const c = o.customer;
+        if (!c) return false;
+        if (c.memberId !== undefined && c.memberId !== null && String(c.memberId) === mId) return true;
+        const oPhone = normalizePhoneMatch(c.phone);
+        if (mPhone && oPhone && mPhone === oPhone) return true;
+        const oTg = (c.tg || '').replace(/^@+/, '').trim().toLowerCase();
+        if (mTg && oTg && mTg === oTg) return true;
+        if (mName && (c.name || '').trim().toLowerCase() === mName) return true;
+        return false;
+      })
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  }, [currentMember, orders]);
+
+  const totalPointsEarned = useMemo(() => {
+    if (!currentMember) return 0;
+    const fromOrders = memberOrders.reduce(
+      (sum, o) => sum + o.items.reduce((isum, it) => isum + Math.max(1, Number(it.qty) || 1), 0),
+      0
+    );
+    return Math.max(Number(currentMember.points || 0), fromOrders);
+  }, [currentMember, memberOrders]);
+
+  const totalSpent = useMemo(
+    () => memberOrders.reduce((sum, o) => sum + (Number(o.grandTotal) || 0), 0),
+    [memberOrders]
+  );
 
   // Mount Official Telegram Login Widget when botUsername + botToken are configured on server
   useEffect(() => {
@@ -368,69 +458,90 @@ export function AuthModal({
                 <SecurityShieldIllustration verified={Boolean(currentMember)} />
                 <div className="min-w-0">
                   <h3 className="font-bold text-base text-slate-900 truncate">
-                    {currentMember ? 'គណនីសុវត្ថិភាពរបស់អ្នក' : 'ចូលប្រើ ឬ បង្កើតគណនីផ្លូវការ'}
+                    {currentMember
+                      ? isEn
+                        ? 'Your Account'
+                        : 'គណនីសុវត្ថិភាពរបស់អ្នក'
+                      : isEn
+                        ? 'Sign In or Create Account'
+                        : 'ចូលប្រើ ឬ បង្កើតគណនីផ្លូវការ'}
                   </h3>
                   <p className="text-xs text-slate-500 flex items-center gap-1 mt-0.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-[#0D4A3E] shrink-0" />
-                    <span>HMAC-SHA256 & ការផ្ទៀងផ្ទាត់ពិតប្រាកដ</span>
+                    <span>
+                      {isEn
+                        ? 'HMAC-SHA256 & Real Verification'
+                        : 'HMAC-SHA256 & ការផ្ទៀងផ្ទាត់ពិតប្រាកដ'}
+                    </span>
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={onClose}
-                aria-label="បិទ"
+                aria-label={isEn ? 'Close' : 'បិទ'}
                 className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full bg-white border border-slate-200 text-slate-600 hover:text-slate-900 transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-5 overflow-y-auto space-y-4">
+            <div className="p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] overflow-y-auto space-y-4">
               {currentMember ? (
                 <motion.div
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="space-y-4"
                 >
-                  <div className="bg-[#0D4A3E] text-white p-5 rounded-2xl space-y-2">
+                  <div className="bg-[#0D4A3E] text-white p-5 rounded-2xl space-y-3 shadow-sm">
                     <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
                         {currentMember.telegramPhotoUrl && (
                           <img
                             src={currentMember.telegramPhotoUrl}
                             alt={currentMember.name}
                             referrerPolicy="no-referrer"
-                            className="w-11 h-11 rounded-full object-cover border-2 border-amber-300"
+                            className="w-11 h-11 rounded-full object-cover border-2 border-amber-300 shrink-0"
                           />
                         )}
-                        <div>
-                          <p className="text-xs text-emerald-200">សមាជិកផ្លូវការ · {shopSettings.brandTitle}</p>
-                          <h4 className="font-bold text-lg mt-0.5">{currentMember.name}</h4>
+                        <div className="min-w-0">
+                          <p className="text-xs text-emerald-200 truncate">
+                            {isEn ? 'Verified Member' : 'សមាជិកផ្លូវការ'} · {shopSettings.brandTitle}
+                          </p>
+                          <h4 className="font-bold text-lg mt-0.5 truncate">{currentMember.name}</h4>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <p className="text-xs text-emerald-200">ពិន្ទុសន្សំ</p>
+                      <div className="text-right shrink-0 bg-white/10 px-3 py-1.5 rounded-xl border border-white/15">
+                        <p className="text-[10px] text-emerald-200 flex items-center justify-end gap-1">
+                          <Award className="w-3 h-3 text-amber-300" />
+                          <span>{isEn ? 'Total Points' : 'ពិន្ទុសន្សំសរុប'}</span>
+                        </p>
                         <p className="font-mono-num text-xl font-bold text-amber-300">
-                          ★ {currentMember.points || 0}
+                          ★ {totalPointsEarned}
                         </p>
                       </div>
                     </div>
 
-                    <div className="pt-2 border-t border-white/15 space-y-1.5 text-xs">
+                    <div className="pt-2.5 border-t border-white/15 space-y-1.5 text-xs">
                       <div className="flex items-center justify-between">
-                        <span className="text-emerald-200">លេខទូរស័ព្ទ</span>
+                        <span className="text-emerald-200">{isEn ? 'Phone Number' : 'លេខទូរស័ព្ទ'}</span>
                         <span className="font-mono-num font-semibold flex items-center gap-1">
-                          {currentMember.phone || 'មិនទាន់ភ្ជាប់'}
+                          {currentMember.phone || (isEn ? 'Not linked' : 'មិនទាន់ភ្ជាប់')}
                           {currentMember.phoneVerified && (
                             <CheckCircle2 className="w-3.5 h-3.5 text-amber-300" />
                           )}
                         </span>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span className="text-emerald-200">គណនី Telegram</span>
+                        <span className="text-emerald-200">{isEn ? 'Telegram Account' : 'គណនី Telegram'}</span>
                         <span className="font-semibold flex items-center gap-1 text-sky-200">
-                          {currentMember.telegramUsername || currentMember.tg || (currentMember.telegramId ? `ID ${currentMember.telegramId}` : 'មិនទាន់ភ្ជាប់')}
+                          {currentMember.telegramUsername ||
+                            currentMember.tg ||
+                            (currentMember.telegramId
+                              ? `ID ${currentMember.telegramId}`
+                              : isEn
+                                ? 'Not linked'
+                                : 'មិនទាន់ភ្ជាប់')}
                           {currentMember.telegramVerified && (
                             <CheckCircle2 className="w-3.5 h-3.5 text-sky-300" />
                           )}
@@ -439,13 +550,286 @@ export function AuthModal({
                     </div>
                   </div>
 
+                  {/* Points & Spend Summary */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="bg-[#F6F8F7] border border-slate-200/80 rounded-2xl p-2.5 text-center">
+                      <p className="text-[10px] text-slate-500 font-semibold">
+                        {isEn ? 'Total Orders' : 'ការកម្ម៉ង់សរុប'}
+                      </p>
+                      <p className="font-mono-num font-bold text-base text-slate-900 mt-0.5">
+                        {memberOrders.length}
+                      </p>
+                    </div>
+                    <div className="bg-amber-50 border border-amber-200/70 rounded-2xl p-2.5 text-center">
+                      <p className="text-[10px] text-amber-800 font-semibold">
+                        {isEn ? 'Total Points' : 'ពិន្ទុសរុប (Points)'}
+                      </p>
+                      <p className="font-mono-num font-bold text-base text-amber-700 mt-0.5">
+                        ★ {totalPointsEarned}
+                      </p>
+                    </div>
+                    <div className="bg-[#E8F2EF] border border-[#0D4A3E]/15 rounded-2xl p-2.5 text-center">
+                      <p className="text-[10px] text-[#0D4A3E] font-semibold">
+                        {isEn ? 'Total Spent' : 'ចំណាយសរុប'}
+                      </p>
+                      <p className="font-mono-num font-bold text-base text-[#0D4A3E] mt-0.5">
+                        ${totalSpent.toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Order History Section */}
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
+                        <History className="w-4 h-4 text-[#0D4A3E]" />
+                        <span>{isEn ? 'Order History' : 'ប្រវត្តិការកម្ម៉ង់ (Order History)'}</span>
+                      </h4>
+                      <span className="text-[11px] font-mono-num font-bold text-slate-500">
+                        {memberOrders.length} {isEn ? 'orders' : 'វិក្កយបត្រ'}
+                      </span>
+                    </div>
+
+                    {!memberOrders.length ? (
+                      <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-5 text-center space-y-1.5">
+                        <ShoppingBag className="w-7 h-7 text-slate-300 mx-auto" />
+                        <p className="text-xs font-semibold text-slate-600">
+                          {isEn ? 'No orders yet' : 'មិនទាន់មានប្រវត្តិការកម្ម៉ង់ទេ'}
+                        </p>
+                        <p className="text-[11px] text-slate-400">
+                          {isEn
+                            ? 'Order drinks or food to start earning points (+1 ★ per item)!'
+                            : 'កម្ម៉ង់ភេសជ្ជៈ ឬអាហារដើម្បីប្រមូលពិន្ទុសន្សំ (+1 ★ ក្នុង ១ មុខ)!'}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5 max-h-64 overflow-y-auto pr-0.5">
+                        {memberOrders.map((order) => {
+                          const badgeCls = ORDER_STATUS_CLS[order.status] || ORDER_STATUS_CLS.Pending;
+                          const badgeLabel = getOrderStatusText(order.status, lang);
+                          const pts = order.items.reduce(
+                            (sum, it) => sum + Math.max(1, Number(it.qty) || 1),
+                            0
+                          );
+                          const dateStr = order.createdAt
+                            ? new Date(order.createdAt).toLocaleDateString(isEn ? 'en-US' : 'km-KH', {
+                                month: 'short',
+                                day: 'numeric',
+                              })
+                            : '';
+                          return (
+                            <div
+                              key={order.id}
+                              className="bg-white border border-slate-200 rounded-2xl p-3 space-y-2 shadow-sm"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span className="font-mono-num font-bold text-xs text-[#0D4A3E]">
+                                    {order.id}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 flex items-center gap-0.5 truncate">
+                                    <Clock className="w-3 h-3 shrink-0" />
+                                    {dateStr ? `${dateStr} · ` : ''}
+                                    {order.timestamp}
+                                  </span>
+                                </div>
+                                <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold shrink-0 ${badgeCls}`}>
+                                  {badgeLabel}
+                                </span>
+                              </div>
+
+                              <div className="space-y-1.5">
+                                {order.items.map((item, idx) => (
+                                  <div
+                                    key={`${order.id}-${idx}`}
+                                    className="flex items-center justify-between gap-2 text-xs"
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <img
+                                        src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
+                                        alt={item.name}
+                                        referrerPolicy="no-referrer"
+                                        onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
+                                        className="w-8 h-8 rounded-lg object-cover bg-slate-100 shrink-0"
+                                      />
+                                      <div className="min-w-0">
+                                        <p className="font-semibold text-slate-800 truncate">
+                                          {item.qty}x {item.name}
+                                        </p>
+                                        <p className="text-[10px] text-slate-500 truncate">{item.options}</p>
+                                      </div>
+                                    </div>
+                                    <span className="font-mono-num font-semibold text-slate-700 shrink-0">
+                                      ${(Number(item.unitPrice || 0) * Number(item.qty || 1)).toFixed(2)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+
+                              <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 text-xs">
+                                  <span className="font-mono-num font-bold text-slate-900">
+                                    ${Number(order.grandTotal || 0).toFixed(2)}
+                                  </span>
+                                  <span className="text-[10px] font-mono-num font-bold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-md">
+                                    +{pts} ★
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  {order.status === 'Completed' && !order.feedback && (
+                                    <motion.button
+                                      type="button"
+                                      whileTap={{ scale: 0.94 }}
+                                      onClick={() => {
+                                        if (activeFeedbackOrderId === order.id) {
+                                          setActiveFeedbackOrderId(null);
+                                        } else {
+                                          setActiveFeedbackOrderId(order.id);
+                                          setFbRating(5);
+                                          setFbComment('');
+                                        }
+                                      }}
+                                      className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-[11px] font-bold px-2.5 py-1.5 rounded-xl flex items-center gap-1"
+                                    >
+                                      <Star className="w-3 h-3 fill-amber-500 text-amber-600" />
+                                      <span>{isEn ? 'Rate Order' : 'វាយតម្លៃ'}</span>
+                                    </motion.button>
+                                  )}
+                                  <motion.button
+                                    type="button"
+                                    whileTap={{ scale: 0.94 }}
+                                    onClick={() => onReorder(order)}
+                                    className="bg-[#0D4A3E] hover:bg-[#09352C] text-white text-[11px] font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-sm"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>{isEn ? 'Re-order' : 'កម្ម៉ង់ម្តងទៀត'}</span>
+                                  </motion.button>
+                                </div>
+                              </div>
+
+                              {order.feedback && (
+                                <div className="bg-[#F4F8F6] border border-[#0D4A3E]/15 rounded-xl p-2.5 space-y-1">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[10px] font-bold text-[#0D4A3E] flex items-center gap-1">
+                                      <MessageSquare className="w-3 h-3" />
+                                      <span>{isEn ? 'Your Review' : 'ការវាយតម្លៃរបស់អ្នក'}</span>
+                                    </span>
+                                    <div className="flex items-center gap-0.5">
+                                      {[1, 2, 3, 4, 5].map((s) => (
+                                        <Star
+                                          key={s}
+                                          className={`w-3 h-3 ${
+                                            s <= order.feedback!.rating
+                                              ? 'fill-amber-400 text-amber-500'
+                                              : 'text-slate-300'
+                                          }`}
+                                        />
+                                      ))}
+                                    </div>
+                                  </div>
+                                  {order.feedback.comment && (
+                                    <p className="text-[11px] text-slate-700 leading-relaxed">
+                                      “{order.feedback.comment}”
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+
+                              {order.status === 'Completed' &&
+                                !order.feedback &&
+                                activeFeedbackOrderId === order.id && (
+                                  <form
+                                    onSubmit={async (e) => {
+                                      e.preventDefault();
+                                      if (submittingFeedback) return;
+                                      setSubmittingFeedback(true);
+                                      try {
+                                        const ok = await onSubmitFeedback(order.id, fbRating, fbComment);
+                                        if (ok) {
+                                          setActiveFeedbackOrderId(null);
+                                          setFbComment('');
+                                          setFbRating(5);
+                                        }
+                                      } finally {
+                                        setSubmittingFeedback(false);
+                                      }
+                                    }}
+                                    className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 space-y-2.5"
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-[11px] font-bold text-slate-800">
+                                        {isEn ? 'Rate & Leave Feedback' : 'ផ្តល់ពិន្ទុ & មតិយោបល់'}
+                                      </span>
+                                      <div className="flex items-center gap-1">
+                                        {[1, 2, 3, 4, 5].map((starVal) => (
+                                          <button
+                                            key={starVal}
+                                            type="button"
+                                            onClick={() => setFbRating(starVal)}
+                                            aria-label={`${starVal} stars`}
+                                            className="p-0.5 transition-transform active:scale-90"
+                                          >
+                                            <Star
+                                              className={`w-5 h-5 ${
+                                                starVal <= fbRating
+                                                  ? 'fill-amber-400 text-amber-500'
+                                                  : 'text-slate-300'
+                                              }`}
+                                            />
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                    <textarea
+                                      rows={2}
+                                      maxLength={500}
+                                      value={fbComment}
+                                      onChange={(e) => setFbComment(e.target.value)}
+                                      placeholder={
+                                        isEn
+                                          ? 'Share your thoughts on taste or service...'
+                                          : 'សរសេរមតិយោបល់របស់អ្នក (រសជាតិ ឬសេវាកម្ម)...'
+                                      }
+                                      className="w-full px-3 py-2 border border-amber-200 rounded-xl text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
+                                    />
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setActiveFeedbackOrderId(null)}
+                                        className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-slate-200 text-slate-600"
+                                      >
+                                        {isEn ? 'Cancel' : 'បោះបង់'}
+                                      </button>
+                                      <button
+                                        type="submit"
+                                        disabled={submittingFeedback}
+                                        className="flex-1 bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-60 text-white py-1.5 rounded-lg text-[11px] font-bold"
+                                      >
+                                        {submittingFeedback
+                                          ? isEn
+                                            ? 'Submitting...'
+                                            : 'កំពុងផ្ញើ...'
+                                          : isEn
+                                            ? 'Submit Review'
+                                            : 'ផ្ញើការវាយតម្លៃ'}
+                                      </button>
+                                    </div>
+                                  </form>
+                                )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
                   <button
                     type="button"
                     onClick={onLogout}
                     className="w-full flex items-center justify-center gap-2 border border-red-200 text-red-600 hover:bg-red-50 py-2.5 rounded-xl text-xs font-bold transition-colors"
                   >
                     <LogOut className="w-4 h-4" />
-                    <span>ចាកចេញពីគណនីដោយសុវត្ថិភាព</span>
+                    <span>{isEn ? 'Sign Out Safely' : 'ចាកចេញពីគណនីដោយសុវត្ថិភាព'}</span>
                   </button>
                 </motion.div>
               ) : (
@@ -464,7 +848,7 @@ export function AuthModal({
                       }`}
                     >
                       <Send className="w-3.5 h-3.5 text-sky-600" />
-                      <span>Telegram ផ្លូវការ</span>
+                      <span>{isEn ? 'Telegram Login' : 'Telegram ផ្លូវការ'}</span>
                     </button>
                     <button
                       type="button"
@@ -479,7 +863,7 @@ export function AuthModal({
                       }`}
                     >
                       <Smartphone className="w-3.5 h-3.5 text-[#0D4A3E]" />
-                      <span>លេខទូរស័ព្ទ (Free)</span>
+                      <span>{isEn ? 'Phone (Free)' : 'លេខទូរស័ព្ទ (Free)'}</span>
                     </button>
                   </div>
 

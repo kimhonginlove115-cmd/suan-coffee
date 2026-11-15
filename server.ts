@@ -1152,6 +1152,51 @@ app.post('/api/orders', async (req, res) => {
   }
   const isNew = !serverOrders.has(order.id);
   serverOrders.set(order.id, order);
+
+  if (isNew) {
+    const cust = (order.customer || {}) as Record<string, unknown>;
+    const items = Array.isArray(order.items) ? (order.items as Array<Record<string, unknown>>) : [];
+    const earnedPoints = items.reduce((sum, it) => sum + Math.max(1, Number(it.qty) || 1), 0);
+    if (earnedPoints > 0) {
+      let targetMember: MemberRecord | undefined;
+      if (cust.memberId !== undefined && cust.memberId !== null) {
+        targetMember = membersById.get(String(cust.memberId));
+      }
+      if (!targetMember && typeof cust.phone === 'string' && cust.phone.trim()) {
+        const norm = normalizePhone(cust.phone);
+        const byPhone = norm ? memberIdByPhone.get(norm) : undefined;
+        if (byPhone) targetMember = membersById.get(byPhone);
+      }
+      if (!targetMember && typeof cust.tg === 'string' && cust.tg.trim()) {
+        const tgKey = cust.tg.replace(/^@+/, '').trim().toLowerCase();
+        const byTg = tgKey ? memberIdByTgUsername.get(tgKey) : undefined;
+        if (byTg) targetMember = membersById.get(byTg);
+      }
+      if (targetMember) {
+        targetMember.points = (targetMember.points || 0) + earnedPoints;
+      }
+    }
+
+    // Decrement defined stock quantities on ordered menu items
+    if (items.length > 0 && Array.isArray(db.menuItems)) {
+      const qtyByName = new Map<string, number>();
+      for (const it of items) {
+        const key = String(it.name || '').trim().toLowerCase();
+        if (!key) continue;
+        qtyByName.set(key, (qtyByName.get(key) || 0) + Math.max(1, Number(it.qty) || 1));
+      }
+      for (const m of db.menuItems as Array<Record<string, unknown>>) {
+        if (typeof m.stockQty === 'number' && Number.isFinite(m.stockQty)) {
+          const key = String(m.name || '').trim().toLowerCase();
+          const orderedQty = qtyByName.get(key);
+          if (orderedQty) {
+            m.stockQty = Math.max(0, Math.round(m.stockQty) - orderedQty);
+          }
+        }
+      }
+    }
+  }
+
   flushDb();
 
   // Send official Telegram Bot order alert from server when a new order arrives
@@ -1177,6 +1222,38 @@ app.post('/api/orders', async (req, res) => {
   }
 
   return res.json({ ok: true, order });
+});
+
+app.post('/api/orders/:id/feedback', (req, res) => {
+  const orderId = String(req.params.id || '').trim();
+  const existing = serverOrders.get(orderId);
+  if (!existing) {
+    return res.status(404).json({ ok: false, error: 'រកមិនឃើញការកម្ម៉ង់នេះទេ' });
+  }
+  if (existing.status !== 'Completed') {
+    return res.status(400).json({ ok: false, error: 'អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលបានបញ្ចប់ប៉ុណ្ណោះ' });
+  }
+
+  const rating = Math.round(Number(req.body?.rating));
+  if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ ok: false, error: 'សូមជ្រើសរើសផ្កាយពី ១ ដល់ ៥' });
+  }
+  const comment = String(req.body?.comment || '').trim().slice(0, 500);
+  const cust = (existing.customer || {}) as Record<string, unknown>;
+  const customerName = String(req.body?.customerName || cust.name || '').trim() || undefined;
+
+  const updated = {
+    ...existing,
+    feedback: {
+      rating,
+      comment,
+      submittedAt: Date.now(),
+      customerName,
+    },
+  };
+  serverOrders.set(orderId, updated);
+  flushDb();
+  return res.json({ ok: true, order: updated });
 });
 
 app.delete('/api/orders/:id', (req, res) => {

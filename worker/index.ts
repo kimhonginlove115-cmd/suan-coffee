@@ -1186,8 +1186,46 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     }
     const idx = db.orders.findIndex((o) => o.id === order.id);
     const isNew = idx === -1;
-    if (isNew) db.orders.unshift(order);
-    else db.orders[idx] = order;
+    if (isNew) {
+      db.orders.unshift(order);
+      const cust = (order.customer || {}) as Record<string, unknown>;
+      const items = Array.isArray(order.items) ? (order.items as Array<Record<string, unknown>>) : [];
+      const earnedPoints = items.reduce((sum, it) => sum + Math.max(1, Number(it.qty) || 1), 0);
+      if (earnedPoints > 0) {
+        const memberIdStr = cust.memberId !== undefined && cust.memberId !== null ? String(cust.memberId) : '';
+        const phoneNorm = typeof cust.phone === 'string' && cust.phone.trim() ? normalizePhone(cust.phone) : '';
+        const tgClean = typeof cust.tg === 'string' ? cust.tg.replace(/^@+/, '').trim().toLowerCase() : '';
+        const matched = db.members.find(
+          (m) =>
+            (memberIdStr && String(m.id) === memberIdStr) ||
+            (phoneNorm && m.phone && normalizePhone(m.phone) === phoneNorm) ||
+            (tgClean && m.telegramUsername && m.telegramUsername.replace(/^@+/, '').toLowerCase() === tgClean)
+        );
+        if (matched) {
+          matched.points = (matched.points || 0) + earnedPoints;
+        }
+      }
+
+      if (items.length > 0 && Array.isArray(db.menuItems)) {
+        const qtyByName = new Map<string, number>();
+        for (const it of items) {
+          const key = String(it.name || '').trim().toLowerCase();
+          if (!key) continue;
+          qtyByName.set(key, (qtyByName.get(key) || 0) + Math.max(1, Number(it.qty) || 1));
+        }
+        for (const m of db.menuItems as Array<Record<string, unknown>>) {
+          if (typeof m.stockQty === 'number' && Number.isFinite(m.stockQty)) {
+            const key = String(m.name || '').trim().toLowerCase();
+            const orderedQty = qtyByName.get(key);
+            if (orderedQty) {
+              m.stockQty = Math.max(0, Math.round(m.stockQty) - orderedQty);
+            }
+          }
+        }
+      }
+    } else {
+      db.orders[idx] = order;
+    }
     await saveDb(env, db);
 
     if (isNew) {
@@ -1211,6 +1249,42 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       }
     }
     return jsonResponse({ ok: true, order });
+  }
+
+  if (path.startsWith('/api/orders/') && path.endsWith('/feedback') && method === 'POST') {
+    const orderId = decodeURIComponent(
+      path.slice('/api/orders/'.length, path.length - '/feedback'.length)
+    ).trim();
+    const idx = db.orders.findIndex((o) => o.id === orderId);
+    if (idx === -1) {
+      return jsonResponse({ ok: false, error: 'រកមិនឃើញការកម្ម៉ង់នេះទេ' }, 404);
+    }
+    const existing = db.orders[idx];
+    if (existing.status !== 'Completed') {
+      return jsonResponse({ ok: false, error: 'អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលបានបញ្ចប់ប៉ុណ្ណោះ' }, 400);
+    }
+
+    const body = await readJsonBody(req);
+    const rating = Math.round(Number(body.rating));
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      return jsonResponse({ ok: false, error: 'សូមជ្រើសរើសផ្កាយពី ១ ដល់ ៥' }, 400);
+    }
+    const comment = String(body.comment || '').trim().slice(0, 500);
+    const cust = (existing.customer || {}) as Record<string, unknown>;
+    const customerName = String(body.customerName || cust.name || '').trim() || undefined;
+
+    const updated = {
+      ...existing,
+      feedback: {
+        rating,
+        comment,
+        submittedAt: Date.now(),
+        customerName,
+      },
+    };
+    db.orders[idx] = updated;
+    await saveDb(env, db);
+    return jsonResponse({ ok: true, order: updated });
   }
 
   if (path.startsWith('/api/orders/') && method === 'DELETE') {

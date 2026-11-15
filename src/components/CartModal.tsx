@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
 import { Armchair, Banknote, Bike, Download, MapPin, Minus, Plus, QrCode, Send, X } from 'lucide-react';
-import type { CartItem, Coords, Member, OrderType, PaymentMethod, ShopSettings } from '../types';
+import type { AppLang, CartItem, Coords, Member, OrderType, PaymentMethod, ShopSettings } from '../types';
 import { CAFE_ASSETS, computeDeliveryFee, handleImgFallback, resolveAssetUrl } from '../utils/cafeUtils';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 
 interface CartModalProps {
+  lang?: AppLang;
   isOpen: boolean;
   cart: CartItem[];
   orderType: OrderType;
@@ -42,6 +43,7 @@ interface CartModalProps {
 }
 
 export function CartModal({
+  lang = 'km',
   isOpen,
   cart,
   orderType,
@@ -58,6 +60,7 @@ export function CartModal({
   onSubmitOrder,
   onToast,
 }: CartModalProps) {
+  const isEn = lang === 'en';
   const [promoInput, setPromoInput] = useState('');
   const [appliedPromoPct, setAppliedPromoPct] = useState(0);
   const [payment, setPayment] = useState<PaymentMethod>('Cash');
@@ -134,27 +137,31 @@ export function CartModal({
     const code = promoInput.trim().toUpperCase();
     if (shopSettings.promoCode && code === shopSettings.promoCode.toUpperCase() && shopSettings.promoPercent > 0) {
       setAppliedPromoPct(shopSettings.promoPercent);
-      onToast(`បញ្ចុះតម្លៃ ${shopSettings.promoPercent}% ជោគជ័យ!`);
+      onToast(
+        isEn
+          ? `Promo applied: ${shopSettings.promoPercent}% off!`
+          : `បញ្ចុះតម្លៃ ${shopSettings.promoPercent}% ជោគជ័យ!`
+      );
     } else {
       setAppliedPromoPct(0);
-      onToast('លេខកូដ Promo មិនត្រឹមត្រូវទេ!');
+      onToast(isEn ? 'Invalid promo code!' : 'លេខកូដ Promo មិនត្រឹមត្រូវទេ!');
     }
   };
 
   const handleSubmit = async (sendTg: boolean) => {
     if (submitting) return;
     if (!cart.length) {
-      onToast('កន្ត្រកទំនិញទទេ!');
+      onToast(isEn ? 'Cart is empty!' : 'កន្ត្រកទំនិញទទេ!');
       return;
     }
     if (shopSettings.isOpen === false) {
-      onToast('សូមអភ័យទោស! ហាងកំពុងបិទបណ្តោះអាសន្ន។');
+      onToast(isEn ? 'Sorry! The shop is temporarily closed.' : 'សូមអភ័យទោស! ហាងកំពុងបិទបណ្តោះអាសន្ន។');
       return;
     }
 
     if (orderType === 'delivery') {
       if (!custName.trim() || !custPhone.trim()) {
-        onToast('សូមបំពេញឈ្មោះ និងលេខទូរស័ព្ទ!');
+        onToast(isEn ? 'Please enter your name and phone number!' : 'សូមបំពេញឈ្មោះ និងលេខទូរស័ព្ទ!');
         return;
       }
     }
@@ -222,11 +229,13 @@ export function CartModal({
             className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] overflow-y-auto shadow-2xl max-h-[92dvh]"
           >
             <div className="flex justify-between items-center mb-3">
-              <h3 className="font-bold text-lg text-[#0D4A3E]">បញ្ជាក់ការកម្ម៉ង់</h3>
+              <h3 className="font-bold text-lg text-[#0D4A3E]">
+                {isEn ? 'Confirm Order' : 'បញ្ជាក់ការកម្ម៉ង់'}
+              </h3>
               <button
                 type="button"
                 onClick={onClose}
-                aria-label="បិទ"
+                aria-label={isEn ? 'Close' : 'បិទ'}
                 className="min-h-[40px] min-w-[40px] flex items-center justify-center bg-slate-100 rounded-full hover:bg-slate-200"
               >
                 <X className="w-4 h-4" />
@@ -280,7 +289,7 @@ export function CartModal({
                 type="text"
                 value={promoInput}
                 onChange={(e) => setPromoInput(e.target.value)}
-                placeholder="លេខកូដបញ្ចុះតម្លៃ (Promo Code)"
+                placeholder={isEn ? 'Promo Code' : 'លេខកូដបញ្ចុះតម្លៃ (Promo Code)'}
                 className="flex-1 border border-slate-200 rounded-xl px-3 py-2 text-xs uppercase focus:outline-none focus:border-[#0D4A3E]"
               />
               <button
@@ -288,7 +297,7 @@ export function CartModal({
                 onClick={handleApplyPromo}
                 className="bg-slate-900 text-white px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap"
               >
-                ប្រើកូដ
+                {isEn ? 'Apply' : 'ប្រើកូដ'}
               </button>
             </div>
 
@@ -303,7 +312,7 @@ export function CartModal({
                 }`}
               >
                 <Bike className="w-4 h-4" />
-                <span>ដឹកជញ្ជូន</span>
+                <span>{isEn ? 'Delivery' : 'ដឹកជញ្ជូន'}</span>
               </button>
               <button
                 type="button"
@@ -315,7 +324,7 @@ export function CartModal({
                 }`}
               >
                 <Armchair className="w-4 h-4" />
-                <span>ញ៉ាំក្នុងហាង</span>
+                <span>{isEn ? 'Dine-In' : 'ញ៉ាំក្នុងហាង'}</span>
               </button>
             </div>
 
@@ -333,21 +342,21 @@ export function CartModal({
                     onClick={onOpenLocationPicker}
                     className="bg-[#0D4A3E] text-white px-3 py-1.5 rounded-lg text-xs font-bold shrink-0"
                   >
-                    បើកផែនទី
+                    {isEn ? 'Open Map' : 'បើកផែនទី'}
                   </button>
                 </div>
                 <input
                   type="text"
                   value={custName}
                   onChange={(e) => setCustName(e.target.value)}
-                  placeholder="ឈ្មោះ *"
+                  placeholder={isEn ? 'Your Name *' : 'ឈ្មោះ *'}
                   className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-xs focus:outline-none focus:border-[#0D4A3E]"
                 />
                 <input
                   type="tel"
                   value={custPhone}
                   onChange={(e) => setCustPhone(e.target.value)}
-                  placeholder="លេខទូរស័ព្ទ *"
+                  placeholder={isEn ? 'Phone Number *' : 'លេខទូរស័ព្ទ *'}
                   className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-mono-num focus:outline-none focus:border-[#0D4A3E]"
                 />
                 <input
@@ -361,13 +370,15 @@ export function CartModal({
                   type="text"
                   value={addressNote}
                   onChange={(e) => setAddressNote(e.target.value)}
-                  placeholder="លេខផ្ទះ / ផ្លូវ / ចំណាំបន្ថែម..."
+                  placeholder={isEn ? 'House #, Street / Delivery Note...' : 'លេខផ្ទះ / ផ្លូវ / ចំណាំបន្ថែម...'}
                   className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-xs focus:outline-none focus:border-[#0D4A3E]"
                 />
               </div>
             ) : (
               <div className="mt-3 space-y-2">
-                <label className="text-[11px] font-semibold text-slate-600 block">លេខតុ</label>
+                <label className="text-[11px] font-semibold text-slate-600 block">
+                  {isEn ? 'Table Number' : 'លេខតុ'}
+                </label>
                 <input
                   type="number"
                   min={1}
@@ -379,7 +390,7 @@ export function CartModal({
                   type="tel"
                   value={dineInPhone}
                   onChange={(e) => setDineInPhone(e.target.value)}
-                  placeholder="លេខទូរស័ព្ទ / Telegram (ស្រេចចិត្ត)"
+                  placeholder={isEn ? 'Phone / Telegram (Optional)' : 'លេខទូរស័ព្ទ / Telegram (ស្រេចចិត្ត)'}
                   className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-xs"
                 />
               </div>
@@ -400,7 +411,7 @@ export function CartModal({
                   {pm === 'Cash' ? (
                     <>
                       <Banknote className="w-4 h-4" />
-                      <span>សាច់ប្រាក់ (Cash)</span>
+                      <span>{isEn ? 'Cash' : 'សាច់ប្រាក់ (Cash)'}</span>
                     </>
                   ) : (
                     <>
@@ -451,12 +462,16 @@ export function CartModal({
                           bankInfo: shopSettings.bankInfo,
                           filename: `KHQR-${grandTotal.toFixed(2)}.png`,
                         });
-                        if (ok) onToast('បានរក្សាទុករូប KHQR ចូលទូរស័ព្ទហើយ!');
+                        if (ok) {
+                          onToast(
+                            isEn ? 'KHQR image saved to your device!' : 'បានរក្សាទុករូប KHQR ចូលទូរស័ព្ទហើយ!'
+                          );
+                        }
                       }}
                       className="inline-flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 px-3 py-1.5 rounded-xl text-[11px] font-bold transition-colors"
                     >
                       <Download className="w-3.5 h-3.5 text-[#E1232E]" />
-                      <span>រក្សាទុករូប KHQR (ស្កេនពី Gallery)</span>
+                      <span>{isEn ? 'Save KHQR Image (Scan from Gallery)' : 'រក្សាទុករូប KHQR (ស្កេនពី Gallery)'}</span>
                     </button>
                     {shopSettings.bankInfo && (
                       <p className="text-[11px] font-bold text-slate-700">{shopSettings.bankInfo}</p>
@@ -465,7 +480,7 @@ export function CartModal({
                 ) : shopSettings.khqrImg ? (
                   <>
                     <p className="text-xs font-bold text-slate-900">
-                      ស្កេន KHQR ដើម្បីទូទាត់៖{' '}
+                      {isEn ? 'Scan KHQR to pay:' : 'ស្កេន KHQR ដើម្បីទូទាត់៖'}{' '}
                       <span className="text-red-600 font-mono-num text-sm">${grandTotal.toFixed(2)}</span>
                     </p>
                     <img
@@ -480,7 +495,9 @@ export function CartModal({
                   </>
                 ) : (
                   <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-2.5">
-                    មិនទាន់បានកំណត់ Bakong ID ឬ KHQR ហាងទេ។ សូមម្ចាស់ហាងបញ្ចូលក្នុង គ្រប់គ្រងហាង → ការកំណត់។
+                    {isEn
+                      ? 'Bakong ID or KHQR is not configured yet. Please set it in Shop Admin → Settings.'
+                      : 'មិនទាន់បានកំណត់ Bakong ID ឬ KHQR ហាងទេ។ សូមម្ចាស់ហាងបញ្ចូលក្នុង គ្រប់គ្រងហាង → ការកំណត់។'}
                   </p>
                 )}
               </div>
@@ -488,21 +505,23 @@ export function CartModal({
 
             <div className="mt-3 bg-slate-50 p-3 rounded-xl space-y-1 text-xs">
               <div className="flex justify-between">
-                <span>ទំនិញ៖</span>
+                <span>{isEn ? 'Subtotal:' : 'ទំនិញ៖'}</span>
                 <span className="font-mono-num">${subtotal.toFixed(2)}</span>
               </div>
               {promoDisc > 0 && (
                 <div className="flex justify-between text-red-600 font-bold">
-                  <span>បញ្ចុះតម្លៃ Promo៖</span>
+                  <span>{isEn ? 'Promo Discount:' : 'បញ្ចុះតម្លៃ Promo៖'}</span>
                   <span className="font-mono-num">-${promoDisc.toFixed(2)}</span>
                 </div>
               )}
               {orderType === 'delivery' && (
                 <div className="flex justify-between">
-                  <span>ថ្លៃដឹកជញ្ជូន៖</span>
+                  <span>{isEn ? 'Delivery Fee:' : 'ថ្លៃដឹកជញ្ជូន៖'}</span>
                   <span className="font-mono-num">
                     {fee === 0 ? (
-                      <span className="text-emerald-700 font-bold">ហ្វ្រី ($0.00)</span>
+                      <span className="text-emerald-700 font-bold">
+                        {isEn ? 'Free ($0.00)' : 'ហ្វ្រី ($0.00)'}
+                      </span>
                     ) : (
                       `$${fee.toFixed(2)}`
                     )}
@@ -510,7 +529,7 @@ export function CartModal({
                 </div>
               )}
               <div className="flex justify-between font-bold text-base text-[#0D4A3E] border-t border-slate-200 pt-1.5">
-                <span>សរុប៖</span>
+                <span>{isEn ? 'Total:' : 'សរុប៖'}</span>
                 <span className="font-mono-num">${grandTotal.toFixed(2)}</span>
               </div>
             </div>
@@ -522,7 +541,13 @@ export function CartModal({
                 onClick={() => handleSubmit(false)}
                 className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-60 text-white font-bold py-3 rounded-2xl text-sm transition-colors active:scale-[0.98]"
               >
-                {submitting ? 'កំពុងបញ្ជូន...' : 'បញ្ជាក់ការកម្ម៉ង់'}
+                {submitting
+                  ? isEn
+                    ? 'Submitting...'
+                    : 'កំពុងបញ្ជូន...'
+                  : isEn
+                    ? 'Confirm Order'
+                    : 'បញ្ជាក់ការកម្ម៉ង់'}
               </button>
               <button
                 type="button"
@@ -531,7 +556,7 @@ export function CartModal({
                 className="w-full bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-bold py-2.5 rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-colors active:scale-[0.98]"
               >
                 <Send className="w-3.5 h-3.5" />
-                <span>កម្ម៉ង់ & ផ្ញើចូល Telegram ហាង</span>
+                <span>{isEn ? 'Order & Send to Shop Telegram' : 'កម្ម៉ង់ & ផ្ញើចូល Telegram ហាង'}</span>
               </button>
             </div>
           </motion.div>

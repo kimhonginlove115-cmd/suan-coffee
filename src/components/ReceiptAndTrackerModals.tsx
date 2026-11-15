@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
 import { Check, Download, MapPin, Send, X } from 'lucide-react';
-import type { Order, ShopSettings } from '../types';
+import type { AppLang, Order, ShopSettings } from '../types';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
+import { getOrderStatusText } from '../utils/i18n';
 
 interface ReceiptModalProps {
+  lang?: AppLang;
   order: Order | null;
   tgUrl: string;
   shopSettings: ShopSettings;
@@ -14,12 +16,14 @@ interface ReceiptModalProps {
 }
 
 export function ReceiptModal({
+  lang = 'km',
   order,
   tgUrl,
   shopSettings,
   onClose,
   onOpenLiveTrack,
 }: ReceiptModalProps) {
+  const isEn = lang === 'en';
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const dynamicKhqr = useMemo(() => {
@@ -77,17 +81,18 @@ export function ReceiptModal({
             >
               <Check className="w-7 h-7 stroke-[2.8]" />
             </motion.div>
-            <h3 className="font-bold text-lg text-[#0D4A3E]">កម្ម៉ង់បានជោគជ័យ!</h3>
+            <h3 className="font-bold text-lg text-[#0D4A3E]">
+              {isEn ? 'Order Confirmed!' : 'កម្ម៉ង់បានជោគជ័យ!'}
+            </h3>
             <p className="text-xs text-slate-500 font-mono-num">
-              {order.id} · ម៉ោង {order.timestamp}
+              {order.id} · {isEn ? 'Time' : 'ម៉ោង'} {order.timestamp}
             </p>
 
             <div className="bg-slate-50 p-3.5 rounded-2xl text-left text-xs space-y-1.5 max-h-40 overflow-y-auto">
               {order.items.map((i, idx) => (
                 <div key={idx} className="flex justify-between gap-2">
                   <span>
-                    {i.qty}x {i.name}{' '}
-                    <span className="text-slate-400">({i.options})</span>
+                    {i.qty}x {i.name} <span className="text-slate-400">({i.options})</span>
                   </span>
                   <span className="font-mono-num shrink-0">${(i.unitPrice * i.qty).toFixed(2)}</span>
                 </div>
@@ -97,18 +102,20 @@ export function ReceiptModal({
             <div className="text-xs text-slate-600 space-y-1 px-1">
               {order.promoDisc > 0 && (
                 <div className="flex justify-between text-red-600">
-                  <span>បញ្ចុះតម្លៃ Promo៖</span>
+                  <span>{isEn ? 'Promo Discount:' : 'បញ្ចុះតម្លៃ Promo៖'}</span>
                   <span className="font-mono-num">-${Number(order.promoDisc).toFixed(2)}</span>
                 </div>
               )}
               {order.type === 'delivery' && (
                 <div className="flex justify-between">
-                  <span>ថ្លៃដឹកជញ្ជូន៖</span>
+                  <span>{isEn ? 'Delivery Fee:' : 'ថ្លៃដឹកជញ្ជូន៖'}</span>
                   <span className="font-mono-num">${Number(order.fee || 0).toFixed(2)}</span>
                 </div>
               )}
               <div className="flex justify-between font-bold text-sm text-slate-900 pt-1 border-t border-slate-100">
-                <span>សរុប ({order.payment})៖</span>
+                <span>
+                  {isEn ? 'Total' : 'សរុប'} ({order.payment}){isEn ? ':' : '៖'}
+                </span>
                 <span className="font-mono-num text-[#0D4A3E]">
                   ${Number(order.grandTotal || 0).toFixed(2)}
                 </span>
@@ -145,7 +152,7 @@ export function ReceiptModal({
                   className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 hover:text-slate-950 underline"
                 >
                   <Download className="w-3 h-3 text-[#E1232E]" />
-                  <span>រក្សាទុករូប KHQR វិក្កយបត្រ</span>
+                  <span>{isEn ? 'Save Receipt KHQR' : 'រក្សាទុករូប KHQR វិក្កយបត្រ'}</span>
                 </button>
               </div>
             )}
@@ -158,7 +165,7 @@ export function ReceiptModal({
                   className="w-full bg-amber-400 hover:bg-amber-500 text-slate-900 font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
                 >
                   <MapPin className="w-4 h-4" />
-                  <span>មើលទីតាំងអ្នកដឹក Live Map</span>
+                  <span>{isEn ? 'Track Driver on Live Map' : 'មើលទីតាំងអ្នកដឹក Live Map'}</span>
                 </button>
               )}
               {tgUrl && (
@@ -169,7 +176,7 @@ export function ReceiptModal({
                   className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>ផ្ញើវិក្កយបត្រទៅ Telegram ហាង</span>
+                  <span>{isEn ? 'Send Receipt to Shop Telegram' : 'ផ្ញើវិក្កយបត្រទៅ Telegram ហាង'}</span>
                 </a>
               )}
               <button
@@ -177,7 +184,7 @@ export function ReceiptModal({
                 onClick={onClose}
                 className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-2.5 rounded-xl text-xs"
               >
-                បិទ
+                {isEn ? 'Close' : 'បិទ'}
               </button>
             </div>
           </motion.div>
@@ -188,20 +195,28 @@ export function ReceiptModal({
 }
 
 interface OrderTrackerModalProps {
+  lang?: AppLang;
   isOpen: boolean;
   orders: Order[];
   onClose: () => void;
   onOpenLiveTrack: (orderId: string) => void;
 }
 
-const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
-  Pending: { text: 'រង់ចាំហាងទទួល', cls: 'text-amber-700' },
-  Brewing: { text: 'កំពុងរៀបចំ', cls: 'text-sky-700' },
-  Ready: { text: 'កំពុងដឹកជញ្ជូន', cls: 'text-[#0D4A3E]' },
-  Completed: { text: 'បានបញ្ចប់', cls: 'text-slate-500' },
+const STATUS_CLS: Record<string, string> = {
+  Pending: 'text-amber-700',
+  Brewing: 'text-sky-700',
+  Ready: 'text-[#0D4A3E]',
+  Completed: 'text-slate-500',
 };
 
-export function OrderTrackerModal({ isOpen, orders, onClose, onOpenLiveTrack }: OrderTrackerModalProps) {
+export function OrderTrackerModal({
+  lang = 'km',
+  isOpen,
+  orders,
+  onClose,
+  onOpenLiveTrack,
+}: OrderTrackerModalProps) {
+  const isEn = lang === 'en';
   return (
     <AnimatePresence>
       {isOpen && (
@@ -222,11 +237,13 @@ export function OrderTrackerModal({ isOpen, orders, onClose, onOpenLiveTrack }: 
             style={{ maxHeight: '85vh' }}
           >
             <div className="flex justify-between items-center mb-3">
-              <h3 className="font-bold text-base text-[#0D4A3E]">តាមដានការកម្ម៉ង់ & Live Map</h3>
+              <h3 className="font-bold text-base text-[#0D4A3E]">
+                {isEn ? 'Order Tracking & Live Map' : 'តាមដានការកម្ម៉ង់ & Live Map'}
+              </h3>
               <button
                 type="button"
                 onClick={onClose}
-                aria-label="បិទ"
+                aria-label={isEn ? 'Close' : 'បិទ'}
                 className="min-h-[40px] min-w-[40px] flex items-center justify-center bg-slate-100 rounded-full"
               >
                 <X className="w-4 h-4" />
@@ -234,18 +251,20 @@ export function OrderTrackerModal({ isOpen, orders, onClose, onOpenLiveTrack }: 
             </div>
 
             {!orders.length ? (
-              <p className="text-center text-slate-400 py-10 text-sm">មិនទាន់មានការកម្ម៉ង់ទេ</p>
+              <p className="text-center text-slate-400 py-10 text-sm">
+                {isEn ? 'No orders yet' : 'មិនទាន់មានការកម្ម៉ង់ទេ'}
+              </p>
             ) : (
               <div className="space-y-3">
                 {orders.slice(0, 10).map((o) => {
-                  const st = STATUS_LABEL[o.status] || STATUS_LABEL.Pending;
+                  const statusCls = STATUS_CLS[o.status] || STATUS_CLS.Pending;
                   return (
                     <div key={o.id} className="border border-slate-200 rounded-2xl p-3.5 text-xs space-y-2">
                       <div className="flex justify-between items-center font-bold">
                         <span className="font-mono-num text-slate-900">
                           {o.id} · {o.timestamp}
                         </span>
-                        <span className={st.cls}>{st.text}</span>
+                        <span className={statusCls}>{getOrderStatusText(o.status, lang)}</span>
                       </div>
                       <div className="text-slate-600 space-y-0.5">
                         {o.items.map((i, idx) => (
@@ -264,7 +283,7 @@ export function OrderTrackerModal({ isOpen, orders, onClose, onOpenLiveTrack }: 
                           onClick={() => onOpenLiveTrack(o.id)}
                           className="w-full bg-amber-400 hover:bg-amber-500 text-slate-900 font-bold py-2 rounded-xl text-xs"
                         >
-                          🗺️ មើលទីតាំងអ្នកដឹក Live Map
+                          {isEn ? '🗺️ View Driver Live Map' : '🗺️ មើលទីតាំងអ្នកដឹក Live Map'}
                         </button>
                       )}
                     </div>

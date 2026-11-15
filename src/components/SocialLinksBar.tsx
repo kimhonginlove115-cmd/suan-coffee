@@ -41,9 +41,11 @@ interface SocialItem {
 export function SocialLinksBar({
   shopSettings,
   variant = 'footer',
+  lang = 'km',
 }: {
   shopSettings: ShopSettings;
   variant?: 'hero' | 'footer';
+  lang?: 'km' | 'en';
 }) {
   const fbHref = normalizeExternalUrl(shopSettings.facebookUrl, 'facebook');
   const ttHref = normalizeExternalUrl(shopSettings.tiktokUrl, 'tiktok');
@@ -146,7 +148,7 @@ export function SocialLinksBar({
   const mapHref = `https://www.google.com/maps?q=${shopSettings.lat},${shopSettings.lng}`;
   items.push({
     id: 'map',
-    label: 'ទីតាំងហាង',
+    label: lang === 'en' ? 'Shop Map' : 'ទីតាំងហាង',
     href: mapHref,
     bgClass: variant === 'hero' ? 'bg-white/15 text-white border border-white/20 hover:bg-white/25' : 'bg-[#E8F2EF] text-[#0D4A3E] hover:bg-[#D5E9E3]',
     external: true,

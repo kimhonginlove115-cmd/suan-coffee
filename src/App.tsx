@@ -6,6 +6,7 @@ import {
   Coffee,
   Croissant,
   CupSoda,
+  Globe,
   LayoutGrid,
   Leaf,
   MapPin,
@@ -15,13 +16,16 @@ import {
   ShoppingBag,
   SlidersHorizontal,
   Sparkles,
+  Star,
   Tag,
   User,
   UtensilsCrossed,
 } from 'lucide-react';
 import type {
+  AppLang,
   CartItem,
   Coords,
+  DriverInfo,
   Member,
   MenuItem,
   Order,
@@ -53,6 +57,12 @@ import {
   safeSessionSet,
   safeSet,
 } from './utils/cafeUtils';
+import {
+  TEXT_DICTIONARY,
+  getMenuCategoryLabel,
+  getMenuDesc,
+  getMenuName,
+} from './utils/i18n';
 import { CoffeeCupSteamIllustration, DeliveryRiderIllustration } from './components/AnimatedIllustrations';
 import { AuthModal } from './components/AuthModal';
 import { LocationPickerModal } from './components/LocationPickerModal';
@@ -79,6 +89,17 @@ function getCategoryIcon(cat: string) {
 
 export default function App() {
   const shouldReduceMotion = useReducedMotion();
+
+  const [lang, setLang] = useState<AppLang>(() => {
+    if (typeof window !== 'undefined') {
+      const qLang = new URLSearchParams(window.location.search).get('lang');
+      if (qLang === 'en' || qLang === 'km') return qLang;
+    }
+    const stored = safeGet<string>('cafe_lang_v15', 'km');
+    return stored === 'en' ? 'en' : 'km';
+  });
+  const t = TEXT_DICTIONARY[lang];
+  const isEn = lang === 'en';
 
   const [menuItems, setMenuItems] = useState<MenuItem[]>(() =>
     normalizeMenuItems(safeGet<MenuItem[]>('cafe_menu_v15', DEFAULT_MENU))
@@ -108,7 +129,6 @@ export default function App() {
   );
   const [activeDriverOrderId, setActiveDriverOrderId] = useState<string | null>(null);
   const [liveTrackOrderId, setLiveTrackOrderId] = useState<string | null>(null);
-  const [ordersLoadedOnce, setOrdersLoadedOnce] = useState(false);
 
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
@@ -120,7 +140,9 @@ export default function App() {
     lat: shopSettings.lat,
     lng: shopSettings.lng,
   });
-  const [pickedAddressName, setPickedAddressName] = useState('ភ្នំពេញ · ចុចរើសទីតាំង');
+  const [pickedAddressName, setPickedAddressName] = useState(() =>
+    lang === 'en' ? 'Phnom Penh · Tap to pick location' : 'ភ្នំពេញ · ចុចរើសទីតាំង'
+  );
 
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isPinOpen, setIsPinOpen] = useState(false);
@@ -165,6 +187,20 @@ export default function App() {
       setIsCartOpen(false);
     }
   }, [cart.length, isCartOpen]);
+
+  useEffect(() => {
+    safeSet('cafe_lang_v15', lang);
+    document.documentElement.lang = lang;
+    setPickedAddressName((prev) => {
+      if (lang === 'en' && prev === 'ភ្នំពេញ · ចុចរើសទីតាំង') {
+        return 'Phnom Penh · Tap to pick location';
+      }
+      if (lang === 'km' && prev === 'Phnom Penh · Tap to pick location') {
+        return 'ភ្នំពេញ · ចុចរើសទីតាំង';
+      }
+      return prev;
+    });
+  }, [lang]);
 
   useEffect(() => {
     safeSet('cafe_menu_v15', menuItems);
@@ -311,21 +347,20 @@ export default function App() {
       const sig = sorted
         .map(
           (o) =>
-            `${o.id}:${o.status}:${o.driverCoords?.lat ?? ''},${o.driverCoords?.lng ?? ''}:${o.customer?.coords?.lat ?? ''},${o.customer?.coords?.lng ?? ''}`
+            `${o.id}:${o.status}:${o.driverCoords?.lat ?? ''},${o.driverCoords?.lng ?? ''}:${o.customer?.coords?.lat ?? ''},${o.customer?.coords?.lng ?? ''}:${o.driverInfo?.name ?? ''}:${o.driverInfo?.phone ?? ''}:${o.driverInfo?.arrivedAt ?? ''}:${o.feedback?.rating ?? ''}:${o.feedback?.submittedAt ?? ''}`
         )
         .join('|');
       if (sorted.length > lastOrderCountRef.current && isAdminUnlocked) {
         playDingSound();
-        showToast('🔔 មានការកម្ម៉ង់ថ្មីចូល!');
+        showToast(isEn ? '🔔 New order received!' : '🔔 មានការកម្ម៉ង់ថ្មីចូល!');
       }
       lastOrderCountRef.current = sorted.length;
       if (sig !== lastOrdersSigRef.current) {
         lastOrdersSigRef.current = sig;
         setOrders(sorted);
       }
-      setOrdersLoadedOnce(true);
     },
-    [isAdminUnlocked, showToast]
+    [isAdminUnlocked, isEn, showToast]
   );
 
   const fetchOrdersFromSources = useCallback(async () => {
@@ -359,8 +394,6 @@ export default function App() {
         }
       } catch {
         // ignore network hiccup
-      } finally {
-        setOrdersLoadedOnce(true);
       }
     } finally {
       isFetchingOrdersRef.current = false;
@@ -482,7 +515,7 @@ export default function App() {
     }
     const drv = p.get('driver');
     if (drv) {
-      setActiveDriverOrderId(drv);
+      setActiveDriverOrderId(drv === '1' || drv === 'all' ? null : drv);
       setViewMode('driver');
     } else if (p.get('admin') === '1') {
       setIsPinOpen(true);
@@ -574,9 +607,14 @@ export default function App() {
     return menuItems.filter(
       (i) =>
         (selectedCategory === 'All' || i.category === selectedCategory) &&
-        (i.name || '').toLowerCase().includes(q)
+        (!q ||
+          (i.name || '').toLowerCase().includes(q) ||
+          (i.nameEn || '').toLowerCase().includes(q) ||
+          (i.category || '').toLowerCase().includes(q))
     );
   }, [menuItems, selectedCategory, searchQuery]);
+
+  const featuredMenu = useMemo(() => menuItems.filter((i) => i.featured && i.available), [menuItems]);
 
   const cartCount = useMemo(() => cart.reduce((s, i) => s + i.qty, 0), [cart]);
   const cartSubtotal = useMemo(() => cart.reduce((s, i) => s + i.unitPrice * i.qty, 0), [cart]);
@@ -622,6 +660,23 @@ export default function App() {
     });
   };
 
+  const handleReorder = (pastOrder: Order) => {
+    if (!pastOrder.items || !pastOrder.items.length) return;
+    const baseTime = Date.now();
+    const reorderedItems: CartItem[] = pastOrder.items.map((item, idx) => ({
+      cartId: baseTime + idx + Math.random(),
+      name: item.name,
+      img: item.img,
+      qty: Math.max(1, Number(item.qty) || 1),
+      unitPrice: Number(item.unitPrice) || 0,
+      options: item.options || 'ធម្មតា',
+    }));
+    setCart((prev) => [...prev, ...reorderedItems]);
+    setIsAuthOpen(false);
+    setIsCartOpen(true);
+    showToast(`✓ បានដាក់ទំនិញពី ${pastOrder.id} ចូលកន្ត្រកហើយ!`);
+  };
+
   const handleSubmitOrder = async (payload: {
     sendTg: boolean;
     payment: PaymentMethod;
@@ -639,6 +694,10 @@ export default function App() {
       );
     }
 
+    const customerPayload: Order['customer'] = currentMember
+      ? { ...payload.customer, memberId: currentMember.id }
+      : payload.customer;
+
     const newOrder: Order = {
       id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
       createdAt: Date.now(),
@@ -650,7 +709,7 @@ export default function App() {
       promoDisc: payload.promoDisc,
       fee: payload.fee,
       grandTotal: payload.grandTotal,
-      customer: payload.customer,
+      customer: customerPayload,
       driverCoords: null,
       status: 'Pending',
     };
@@ -701,11 +760,101 @@ export default function App() {
     );
   };
 
+  const handleSubmitOrderFeedback = async (
+    orderId: string,
+    rating: number,
+    comment: string
+  ): Promise<boolean> => {
+    const cleanRating = Math.min(5, Math.max(1, Math.round(rating)));
+    const cleanComment = comment.trim().slice(0, 500);
+    const localFeedback = {
+      rating: cleanRating,
+      comment: cleanComment,
+      submittedAt: Date.now(),
+      customerName: currentMember?.name,
+    };
+
+    try {
+      const res = await fetchWithTimeout(
+        `/api/orders/${encodeURIComponent(orderId)}/feedback`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rating: cleanRating,
+            comment: cleanComment,
+            customerName: currentMember?.name,
+          }),
+        },
+        8000
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const savedOrder = data?.order as Order | undefined;
+        setOrders((prev) =>
+          prev.map((o) => {
+            if (o.id !== orderId) return o;
+            const updated: Order = {
+              ...o,
+              feedback: savedOrder?.feedback || localFeedback,
+            };
+            const fb = getFirebaseBase(shopSettings.firebaseUrl);
+            if (fb) {
+              fetch(`${fb}/orders/${encodeURIComponent(updated.id)}.json`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(updated),
+              }).catch(() => {});
+            }
+            return updated;
+          })
+        );
+        showToast('✓ សូមអរគុណសម្រាប់ការវាយតម្លៃរបស់អ្នក!');
+        return true;
+      }
+      const errData = await res.json().catch(() => null);
+      if (res.status === 400) {
+        showToast(errData?.error || 'អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលបានបញ្ចប់ប៉ុណ្ណោះ');
+        return false;
+      }
+    } catch {
+      // Fall back to local + Firebase sync if server unreachable
+    }
+
+    const target = orders.find((o) => o.id === orderId);
+    if (!target || target.status !== 'Completed') {
+      showToast('អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលបានបញ្ចប់ប៉ុណ្ណោះ');
+      return false;
+    }
+
+    const updatedOrder: Order = { ...target, feedback: localFeedback };
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? updatedOrder : o)));
+    await syncOrderEverywhere(updatedOrder);
+    showToast('✓ សូមអរគុណសម្រាប់ការវាយតម្លៃរបស់អ្នក!');
+    return true;
+  };
+
   const handleUpdateDriverCoords = (orderId: string, coords: Coords, status?: OrderStatus) => {
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
         const updated = { ...o, driverCoords: coords, status: status || o.status };
+        syncOrderEverywhere(updated);
+        return updated;
+      })
+    );
+  };
+
+  const handleUpdateDriverInfo = (orderId: string, info: DriverInfo, nextStatus?: OrderStatus) => {
+    setOrders((prev) =>
+      prev.map((o) => {
+        if (o.id !== orderId) return o;
+        const updated: Order = {
+          ...o,
+          driverInfo: { ...o.driverInfo, ...info },
+          driverCoords: o.driverCoords || { lat: shopSettings.lat, lng: shopSettings.lng },
+          status: nextStatus || o.status,
+        };
         syncOrderEverywhere(updated);
         return updated;
       })
@@ -741,12 +890,18 @@ export default function App() {
     setViewMode('driver');
   };
 
+  const handleOpenDriverPortal = () => {
+    setLiveTrackOrderId(null);
+    setActiveDriverOrderId(null);
+    setViewMode('driver');
+  };
+
   const promoSummaryText =
     shopSettings.deliveryMode === 'free'
-      ? 'ដឹកជញ្ជូនហ្វ្រីគ្រប់ទីតាំង'
+      ? t.freeDeliveryAll
       : shopSettings.freeDeliveryOver > 0
-        ? `ដឹកជញ្ជូនហ្វ្រីពេលកម្ម៉ង់ចាប់ពី $${shopSettings.freeDeliveryOver} ឡើងទៅ`
-        : 'សេវាដឹកជញ្ជូនរហ័សទាន់ចិត្ត';
+        ? `${t.freeDeliveryOver} $${shopSettings.freeDeliveryOver}`
+        : t.fastDelivery;
 
   return (
     <div className="min-h-screen bg-[#F6F8F7] text-slate-800 overflow-x-clip">
@@ -764,48 +919,33 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {viewMode === 'driver' && activeDriverOrder && (
+      {viewMode === 'driver' && (
         <DriverConsole
+          lang={lang}
+          onChangeLang={setLang}
           order={activeDriverOrder}
+          orders={orders}
           shopSettings={shopSettings}
+          onSelectOrder={(id) => setActiveDriverOrderId(id)}
           onExit={() => setViewMode(isAdminUnlocked ? 'admin' : 'customer')}
           onUpdateDriverCoords={handleUpdateDriverCoords}
+          onUpdateDriverInfo={handleUpdateDriverInfo}
           onCompleteDelivery={(id) => {
-            handleUpdateOrderStatus(id, 'Completed');
-            showToast('✅ បានបញ្ចប់ការដឹកជញ្ជូន!');
-            setViewMode(isAdminUnlocked ? 'admin' : 'customer');
+            handleUpdateDriverInfo(id, { deliveredAt: Date.now() }, 'Completed');
+            showToast(isEn ? '✅ Delivery completed!' : '✅ បានបញ្ចប់ការដឹកជញ្ជូន!');
+            const nextRemaining = orders.find(
+              (o) => o.type === 'delivery' && o.status !== 'Completed' && o.id !== id
+            );
+            setActiveDriverOrderId(nextRemaining ? nextRemaining.id : null);
           }}
           onToast={showToast}
         />
       )}
 
-      {viewMode === 'driver' && !activeDriverOrder && (
-        <div className="min-h-screen flex items-center justify-center p-4">
-          <div className="bg-white max-w-sm w-full rounded-3xl border border-slate-200 p-6 text-center space-y-3 shadow-lg">
-            <p className="text-3xl">🛵</p>
-            <h2 className="font-bold text-base text-slate-900">
-              {ordersLoadedOnce
-                ? `រកមិនឃើញការកម្ម៉ង់ ${activeDriverOrderId || ''} ទេ`
-                : 'កំពុងទាញយកព័ត៌មានដឹកជញ្ជូន...'}
-            </h2>
-            <p className="text-xs text-slate-500">
-              {ordersLoadedOnce
-                ? 'ការកម្ម៉ង់នេះប្រហែលត្រូវបានលុប ឬផុតកំណត់ហើយ។'
-                : 'សូមរង់ចាំបន្តិច...'}
-            </p>
-            <button
-              type="button"
-              onClick={() => setViewMode(isAdminUnlocked ? 'admin' : 'customer')}
-              className="w-full bg-[#0D4A3E] text-white font-bold py-2.5 rounded-xl text-xs"
-            >
-              ត្រឡប់ទៅទំព័រដើម
-            </button>
-          </div>
-        </div>
-      )}
-
       {viewMode === 'admin' && (
         <AdminDashboard
+          lang={lang}
+          onChangeLang={setLang}
           adminToken={adminToken}
           serverPersistent={serverPersistent}
           menuItems={menuItems}
@@ -823,7 +963,11 @@ export default function App() {
             setShopSettings(next);
             const res = await syncShopEverywhere(menuItems, toppings, next);
             if (!res.ok && !res.reauth) {
-              showToast('⚠️ មិនអាចផ្ទុកទិន្នន័យទៅ Server បានទេ (រក្សាទុកតែក្នុងទូរស័ព្ទនេះ)');
+              showToast(
+                isEn
+                  ? '⚠️ Cannot reach server (saved locally only)'
+                  : '⚠️ មិនអាចផ្ទុកទិន្នន័យទៅ Server បានទេ (រក្សាទុកតែក្នុងទូរស័ព្ទនេះ)'
+              );
             }
             return res;
           }}
@@ -831,7 +975,11 @@ export default function App() {
             setMenuItems(next);
             const res = await syncShopEverywhere(next, toppings, shopSettings);
             if (!res.ok && !res.reauth) {
-              showToast('⚠️ មិនអាចផ្ទុកម៉ឺនុយទៅ Server បានទេ (សូមពិនិត្យការតភ្ជាប់)');
+              showToast(
+                isEn
+                  ? '⚠️ Cannot upload menu to server (check connection)'
+                  : '⚠️ មិនអាចផ្ទុកម៉ឺនុយទៅ Server បានទេ (សូមពិនិត្យការតភ្ជាប់)'
+              );
             }
             return res;
           }}
@@ -840,6 +988,7 @@ export default function App() {
             return syncShopEverywhere(menuItems, next, shopSettings);
           }}
           onUpdateOrderStatus={handleUpdateOrderStatus}
+          onUpdateOrderDriverInfo={handleUpdateDriverInfo}
           onClearCompletedOrders={async () => {
             const completed = orders.filter((o) => o.status === 'Completed');
             const remaining = orders.filter((o) => o.status !== 'Completed');
@@ -864,9 +1013,10 @@ export default function App() {
             } finally {
               clearingOrdersRef.current = false;
             }
-            showToast('បានសម្អាត Order ដែលរួចរាល់!');
+            showToast(isEn ? 'Cleared completed orders!' : 'បានសម្អាត Order ដែលរួចរាល់!');
           }}
           onOpenDriverConsole={handleOpenDriverConsole}
+          onOpenDriverPortal={handleOpenDriverPortal}
           onOpenShopMapPicker={() => setLocationPickerState({ open: true, purpose: 'shop' })}
           onOpenTableView={(tNum) => {
             setTableNumberFromQR(tNum);
@@ -903,21 +1053,21 @@ export default function App() {
                     href="#menu-section"
                     className="hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
-                    ម៉ឺនុយ
+                    {t.menuNav}
                   </a>
                   <button
                     type="button"
                     onClick={() => setIsTrackerOpen(true)}
                     className="hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
-                    តាមដានកម្ម៉ង់
+                    {t.trackNav}
                   </button>
                   <button
                     type="button"
                     onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
                     className="hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
-                    ទីតាំងដឹកជញ្ជូន
+                    {t.locationNav}
                   </button>
                   <button
                     type="button"
@@ -927,16 +1077,26 @@ export default function App() {
                     }}
                     className="hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
-                    គ្រប់គ្រងហាង
+                    {t.adminNav}
                   </button>
                 </nav>
 
                 <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                   <motion.button
                     type="button"
+                    whileTap={shouldReduceMotion ? undefined : { scale: 0.92 }}
+                    onClick={() => setLang(isEn ? 'km' : 'en')}
+                    aria-label="Switch language"
+                    className="h-9 sm:min-h-[40px] px-2.5 flex items-center gap-1 rounded-xl border border-slate-200 text-slate-700 bg-white hover:bg-slate-50 text-[11px] sm:text-xs font-bold whitespace-nowrap shrink-0"
+                  >
+                    <Globe className="w-3.5 h-3.5 text-[#0D4A3E]" />
+                    <span>{isEn ? 'ខ្មែរ' : 'EN'}</span>
+                  </motion.button>
+                  <motion.button
+                    type="button"
                     whileTap={shouldReduceMotion ? undefined : { scale: 0.9 }}
                     onClick={() => setIsTrackerOpen(true)}
-                    aria-label="តាមដានកម្ម៉ង់"
+                    aria-label={t.trackNav}
                     className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-[#0D4A3E] bg-[#F4F8F6] hover:bg-[#E8F2EF]"
                   >
                     <ReceiptText className="w-4 h-4" />
@@ -948,7 +1108,7 @@ export default function App() {
                       if (isAdminUnlocked) setViewMode('admin');
                       else setIsPinOpen(true);
                     }}
-                    aria-label="សម្រាប់ម្ចាស់ហាង"
+                    aria-label={t.adminNav}
                     className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-700 bg-white hover:bg-slate-50"
                   >
                     <SlidersHorizontal className="w-4 h-4" />
@@ -961,12 +1121,12 @@ export default function App() {
                   >
                     <User className="w-3.5 h-3.5 text-amber-300 shrink-0" />
                     <span className="sm:hidden">
-                      {currentMember ? currentMember.name.split(' ')[0] : 'គណនី'}
+                      {currentMember ? currentMember.name.split(' ')[0] : t.accountShort}
                     </span>
                     <span className="hidden sm:inline">
                       {currentMember
                         ? `${currentMember.name.split(' ')[0]} · ★${currentMember.points || 0}`
-                        : 'គណនី / ភ្ជាប់ Telegram'}
+                        : t.accountFull}
                     </span>
                   </motion.button>
                 </div>
@@ -976,13 +1136,15 @@ export default function App() {
             <main id="top" className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 sm:pt-5 space-y-4 sm:space-y-6">
               {shopSettings.isOpen === false && (
                 <div className="bg-red-600 text-white px-4 py-3 rounded-2xl text-xs font-bold text-center">
-                  សូមអភ័យទោស! ហាងកំពុងបិទបណ្តោះអាសន្ន
+                  {t.shopClosedBanner}
                 </div>
               )}
 
               {tableNumberFromQR !== null && (
                 <div className="bg-amber-400 text-slate-900 px-3.5 py-2.5 rounded-2xl text-xs flex items-center justify-between gap-2 font-bold">
-                  <span>🪑 ញ៉ាំក្នុងហាង · តុលេខ {tableNumberFromQR}</span>
+                  <span>
+                    🪑 {t.dineInLabel} · {t.tableNumLabel} {tableNumberFromQR}
+                  </span>
                   <button
                     type="button"
                     onClick={() => {
@@ -991,7 +1153,7 @@ export default function App() {
                     }}
                     className="bg-slate-900 text-white px-3 py-1 rounded-lg text-[11px] shrink-0"
                   >
-                    ប្តូរទៅដឹកជញ្ជូន
+                    {t.switchToDelivery}
                   </button>
                 </div>
               )}
@@ -1006,7 +1168,9 @@ export default function App() {
                 >
                   <span className="flex items-center gap-2 min-w-0">
                     <DeliveryRiderIllustration />
-                    <span className="truncate">អ្នកដឹកកំពុងធ្វើដំណើរ! ចុចមើល Live Map ({activeLiveOrder.id})</span>
+                    <span className="truncate">
+                      {t.liveDriverBanner} ({activeLiveOrder.id})
+                    </span>
                   </span>
                   <ChevronRight className="w-4 h-4 shrink-0" />
                 </motion.button>
@@ -1028,9 +1192,9 @@ export default function App() {
                           }`}
                         />
                         <span className="truncate">
-                          {shopSettings.isOpen !== false ? 'កំពុងបើកលក់ · ដឹកជញ្ជូនរហ័ស' : 'បិទបណ្តោះអាសន្ន'}
+                          {shopSettings.isOpen !== false ? t.openFastDelivery : t.closedTemp}
                           {shopSettings.promoCode && shopSettings.promoPercent > 0
-                            ? ` · កូដ ${shopSettings.promoCode} (-${shopSettings.promoPercent}%)`
+                            ? ` · ${t.promoCodePrefix} ${shopSettings.promoCode} (-${shopSettings.promoPercent}%)`
                             : ''}
                         </span>
                       </p>
@@ -1040,7 +1204,7 @@ export default function App() {
                       <p className="text-xs sm:text-sm text-emerald-100/90 max-w-xl line-clamp-2">
                         {shopSettings.shopName} · {promoSummaryText}
                       </p>
-                      <SocialLinksBar shopSettings={shopSettings} variant="hero" />
+                      <SocialLinksBar lang={lang} shopSettings={shopSettings} variant="hero" />
                     </div>
 
                     <div className="sm:col-span-4 flex justify-center shrink-0">
@@ -1060,10 +1224,10 @@ export default function App() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="text-[10px] sm:text-[11px] text-emerald-200">
-                          {tableNumberFromQR ? 'ញ៉ាំក្នុងហាង' : 'ដឹកជញ្ជូនទៅ (ចុចបើកផែនទី)'}
+                          {tableNumberFromQR ? t.dineInLabel : t.deliverToMap}
                         </p>
                         <p className="text-xs font-bold truncate">
-                          {tableNumberFromQR ? `តុលេខ ${tableNumberFromQR}` : pickedAddressName}
+                          {tableNumberFromQR ? `${t.tableNumLabel} ${tableNumberFromQR}` : pickedAddressName}
                         </p>
                       </div>
                       <ChevronDown className="w-4 h-4 text-emerald-200 shrink-0" />
@@ -1075,7 +1239,7 @@ export default function App() {
                         type="text"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="ស្វែងរកកាហ្វេ មី នំ ឬភេសជ្ជៈ..."
+                        placeholder={t.searchPlaceholder}
                         className="w-full h-full min-h-[44px] sm:min-h-[48px] bg-white text-slate-900 placeholder-slate-400 text-base sm:text-sm pl-10 pr-4 py-2 rounded-xl sm:rounded-2xl focus:outline-none"
                       />
                     </div>
@@ -1101,17 +1265,59 @@ export default function App() {
                       {promoSummaryText}
                     </p>
                     <p className="text-white font-bold text-sm sm:text-lg mt-0.5 sm:mt-1 leading-snug">
-                      ឆុងថ្មីៗគ្រប់កែវ · ភ្ជាប់ Telegram ទទួលពិន្ទុបន្ថែម
+                      {t.bannerSubline}
                     </p>
                   </div>
                 </motion.div>
               </section>
 
+              {featuredMenu.length > 0 && selectedCategory === 'All' && !searchQuery.trim() && (
+                <section className="space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <Star className="w-4 h-4 fill-amber-400 text-amber-500" />
+                    <h2 className="font-bold text-slate-900 text-sm sm:text-base">{t.featuredHeading}</h2>
+                  </div>
+                  <div className="flex gap-3 overflow-x-auto hide-scrollbar pb-1">
+                    {featuredMenu.map((item) => {
+                      const fp = getDiscountedPrice(item);
+                      const displayName = getMenuName(item, lang);
+                      return (
+                        <button
+                          key={`feat-${item.id}`}
+                          type="button"
+                          onClick={() => setCustomizingItem(item)}
+                          className="shrink-0 w-56 sm:w-64 bg-white border border-amber-200/80 rounded-2xl p-2.5 flex items-center gap-3 text-left hover:shadow-md transition-shadow"
+                        >
+                          <img
+                            src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
+                            alt={displayName}
+                            referrerPolicy="no-referrer"
+                            onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
+                            className="w-14 h-14 rounded-xl object-cover shrink-0 bg-slate-100"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="font-bold text-xs text-slate-900 truncate">{displayName}</p>
+                            <p className="text-[11px] text-slate-500 truncate">
+                              {getMenuCategoryLabel(item.category, lang, item.categoryEn)}
+                            </p>
+                            <p className="font-bold text-xs font-mono-num text-[#0D4A3E] mt-0.5">
+                              ${fp.toFixed(2)}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
               <section id="menu-section" className="space-y-3 sm:space-y-4 pt-1 sm:pt-2">
                 <div className="flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
                   <div className="flex items-center gap-2.5 sm:gap-3">
-                    <h2 className="font-bold text-slate-900 text-base sm:text-xl">ម៉ឺនុយ (Menu)</h2>
-                    <span className="text-xs text-slate-500 font-mono-num">{filteredMenu.length} មុខ</span>
+                    <h2 className="font-bold text-slate-900 text-base sm:text-xl">{t.menuHeading}</h2>
+                    <span className="text-xs text-slate-500 font-mono-num">
+                      {filteredMenu.length} {t.itemsCountUnit}
+                    </span>
                   </div>
 
                   <div className="flex gap-1.5 overflow-x-auto hide-scrollbar pb-1 max-w-full">
@@ -1138,7 +1344,7 @@ export default function App() {
                           )}
                           <span className="relative z-10 flex items-center gap-1.5">
                             {getCategoryIcon(cat)}
-                            <span>{cat === 'All' ? 'ទាំងអស់' : cat}</span>
+                            <span>{cat === 'All' ? (isEn ? 'All' : 'ទាំងអស់') : getMenuCategoryLabel(cat, lang)}</span>
                           </span>
                         </motion.button>
                       );
@@ -1148,13 +1354,16 @@ export default function App() {
 
                 {!filteredMenu.length ? (
                   <div className="bg-white rounded-3xl border border-slate-200 py-14 text-center text-slate-400 text-sm">
-                    មិនមានទំនិញត្រូវនឹងការស្វែងរកទេ
+                    {t.noSearchResults}
                   </div>
                 ) : (
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5">
                     {filteredMenu.map((item, idx) => {
                       const finalPrice = getDiscountedPrice(item);
                       const hasDisc = item.discount > 0;
+                      const displayName = getMenuName(item, lang);
+                      const displayDesc = getMenuDesc(item, lang);
+                      const catLabel = getMenuCategoryLabel(item.category, lang, item.categoryEn);
                       return (
                         <motion.article
                           key={item.id}
@@ -1174,7 +1383,7 @@ export default function App() {
                             <div className="aspect-[4/3] w-full rounded-xl overflow-hidden bg-slate-100 mb-2.5 sm:mb-3 relative">
                               <img
                                 src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
-                                alt={item.name}
+                                alt={displayName}
                                 referrerPolicy="no-referrer"
                                 onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
@@ -1185,6 +1394,12 @@ export default function App() {
                                   -{item.discount}%
                                 </span>
                               )}
+                              {item.featured && !hasDisc && (
+                                <span className="absolute top-2 left-2 bg-[#0D4A3E]/90 text-amber-300 font-bold text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
+                                  <Star className="w-2.5 h-2.5 fill-amber-300" />
+                                  <span>{isEn ? 'Pick' : 'ពិសេស'}</span>
+                                </span>
+                              )}
                             </div>
                             <p className="text-[10px] sm:text-[11px] text-slate-500 truncate flex items-center gap-1">
                               {item.type === 'food' ? (
@@ -1193,13 +1408,18 @@ export default function App() {
                                 <Coffee className="w-3 h-3 text-[#0D4A3E] shrink-0" />
                               )}
                               <span className="truncate">
-                                {item.category}
-                                {!item.available ? ' · អស់ស្តុក' : ''}
+                                {catLabel}
+                                {!item.available ? ` · ${t.outOfStock}` : ''}
                               </span>
                             </p>
                             <h3 className="font-semibold text-xs sm:text-base text-slate-900 mt-0.5 line-clamp-1">
-                              {item.name}
+                              {displayName}
                             </h3>
+                            {displayDesc && (
+                              <p className="text-[10px] sm:text-[11px] text-slate-500 line-clamp-1 mt-0.5">
+                                {displayDesc}
+                              </p>
+                            )}
                           </div>
 
                           <div className="flex items-center justify-between mt-2.5 sm:mt-3 pt-2 border-t border-slate-100">
@@ -1221,7 +1441,7 @@ export default function App() {
                                 e.stopPropagation();
                                 setCustomizingItem(item);
                               }}
-                              aria-label={`កម្ម៉ង់ ${item.name}`}
+                              aria-label={`${isEn ? 'Order' : 'កម្ម៉ង់'} ${displayName}`}
                               className="min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl bg-[#0D4A3E] hover:bg-[#09352C] text-white flex items-center justify-center disabled:bg-slate-300 transition-colors shadow-sm"
                             >
                               <Plus className="w-4 h-4" />
@@ -1239,14 +1459,16 @@ export default function App() {
           <footer className="max-w-7xl mx-auto w-full px-3 sm:px-6 mt-10 pt-6 border-t border-slate-200 space-y-4">
             <div className="bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
               <div className="space-y-0.5">
-                <p className="font-bold text-sm text-[#0D4A3E]">ភ្ជាប់ទំនាក់ទំនងជាមួយ {shopSettings.brandTitle}</p>
-                <p className="text-xs text-slate-500">តាមដានប្រូម៉ូសិនថ្មីៗ ឬទាក់ទងមកកាន់ហាងដោយផ្ទាល់</p>
+                <p className="font-bold text-sm text-[#0D4A3E]">
+                  {t.connectWithShop} {shopSettings.brandTitle}
+                </p>
+                <p className="text-xs text-slate-500">{t.followPromo}</p>
               </div>
-              <SocialLinksBar shopSettings={shopSettings} variant="footer" />
+              <SocialLinksBar lang={lang} shopSettings={shopSettings} variant="footer" />
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 px-1">
               <span>{shopSettings.brandTitle}</span>
-              <span>សុវត្ថិភាពផ្លូវការ · Telegram & Phone OTP Verification</span>
+              <span>{t.footerSecurity}</span>
             </div>
           </footer>
 
@@ -1275,12 +1497,12 @@ export default function App() {
                     </motion.span>
                   </div>
                   <div className="text-left">
-                    <p className="text-[11px] text-emerald-200">កន្ត្រកទំនិញ</p>
+                    <p className="text-[11px] text-emerald-200">{t.cartTitle}</p>
                     <p className="font-bold font-mono-num text-sm">${cartSubtotal.toFixed(2)}</p>
                   </div>
                 </div>
                 <span className="bg-white text-[#0D4A3E] font-bold text-xs px-3.5 py-2 rounded-xl">
-                  កម្ម៉ង់ឥឡូវ →
+                  {t.orderNow}
                 </span>
               </motion.button>
             )}
@@ -1289,17 +1511,23 @@ export default function App() {
       )}
 
       <AuthModal
+        lang={lang}
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
         currentMember={currentMember}
         authToken={authToken}
         shopSettings={shopSettings}
+        orders={orders}
         onAuthenticated={handleAuthenticated}
         onLogout={handleLogout}
+        onReorder={handleReorder}
+        onSubmitFeedback={handleSubmitOrderFeedback}
+        onRefreshOrders={fetchOrdersFromSources}
         onToast={showToast}
       />
 
       <AdminPinModal
+        lang={lang}
         isOpen={isPinOpen}
         onClose={() => setIsPinOpen(false)}
         onSuccess={(token) => {
@@ -1311,6 +1539,7 @@ export default function App() {
       />
 
       <LocationPickerModal
+        lang={lang}
         isOpen={locationPickerState.open}
         purpose={locationPickerState.purpose}
         shopSettings={shopSettings}
@@ -1326,12 +1555,13 @@ export default function App() {
           const next = { ...shopSettings, lat: coords.lat, lng: coords.lng };
           setShopSettings(next);
           syncShopEverywhere(menuItems, toppings, next);
-          showToast('បានកំណត់ទីតាំងហាងរួចរាល់!');
+          showToast(isEn ? 'Shop location updated!' : 'បានកំណត់ទីតាំងហាងរួចរាល់!');
         }}
         onToast={showToast}
       />
 
       <ItemCustomizerModal
+        lang={lang}
         item={customizingItem}
         toppings={toppings}
         onClose={() => setCustomizingItem(null)}
@@ -1339,6 +1569,7 @@ export default function App() {
       />
 
       <CartModal
+        lang={lang}
         isOpen={isCartOpen}
         cart={cart}
         orderType={orderType}
@@ -1357,6 +1588,7 @@ export default function App() {
       />
 
       <ReceiptModal
+        lang={lang}
         order={receiptState.order}
         tgUrl={receiptState.tgUrl}
         shopSettings={shopSettings}
@@ -1368,6 +1600,7 @@ export default function App() {
       />
 
       <OrderTrackerModal
+        lang={lang}
         isOpen={isTrackerOpen}
         orders={orders}
         onClose={() => setIsTrackerOpen(false)}
@@ -1378,6 +1611,7 @@ export default function App() {
       />
 
       <LiveTrackModal
+        lang={lang}
         order={liveTrackOrder}
         shopSettings={shopSettings}
         onClose={() => setLiveTrackOrderId(null)}

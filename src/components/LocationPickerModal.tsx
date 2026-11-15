@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import L from 'leaflet';
 import { Crosshair, MapPin, Search, Store, X } from 'lucide-react';
-import type { Coords, ShopSettings } from '../types';
+import type { AppLang, Coords, ShopSettings } from '../types';
 import { computeDeliveryFee, extractCoordsFromMapText, fetchWithTimeout, getDistanceKm } from '../utils/cafeUtils';
 
 interface LocationPickerModalProps {
+  lang?: AppLang;
   isOpen: boolean;
   purpose: 'customer' | 'shop';
   shopSettings: ShopSettings;
@@ -91,6 +92,7 @@ export function makeResilientTileLayer(mode: 'street' | 'satellite') {
 }
 
 export function LocationPickerModal({
+  lang = 'km',
   isOpen,
   purpose,
   shopSettings,
@@ -102,6 +104,7 @@ export function LocationPickerModal({
   onConfirmShop,
   onToast,
 }: LocationPickerModalProps) {
+  const isEn = lang === 'en';
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const tileLayerRef = useRef<L.TileLayer | null>(null);
@@ -496,14 +499,20 @@ export function LocationPickerModal({
             <div className="px-4 py-3.5 bg-[#0D4A3E] text-white flex justify-between items-center shrink-0">
               <div className="min-w-0 pr-2">
                 <h3 className="font-bold text-sm truncate">
-                  {purpose === 'shop' ? 'កំណត់ទីតាំងហាងរបស់អ្នក' : 'ជ្រើសរើសទីតាំងដឹកជញ្ជូន'}
+                  {purpose === 'shop'
+                    ? isEn
+                      ? 'Set Your Shop Location'
+                      : 'កំណត់ទីតាំងហាងរបស់អ្នក'
+                    : isEn
+                      ? 'Choose Delivery Location'
+                      : 'ជ្រើសរើសទីតាំងដឹកជញ្ជូន'}
                 </h3>
                 <p className="text-[11px] text-emerald-200 truncate">{gpsNote}</p>
               </div>
               <button
                 type="button"
                 onClick={onClose}
-                aria-label="បិទ"
+                aria-label={isEn ? 'Close' : 'បិទ'}
                 className="min-h-[40px] min-w-[40px] flex items-center justify-center bg-white/15 rounded-full hover:bg-white/25 transition-colors shrink-0"
               >
                 <X className="w-4 h-4" />
@@ -524,7 +533,9 @@ export function LocationPickerModal({
                         runSearchOrResolve();
                       }
                     }}
-                    placeholder="វាយឈ្មោះតំបន់ ឬ Link Google Maps..."
+                    placeholder={
+                      isEn ? 'Search place or paste Google Maps link...' : 'វាយឈ្មោះតំបន់ ឬ Link Google Maps...'
+                    }
                     className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
                   />
                 </div>
@@ -534,7 +545,7 @@ export function LocationPickerModal({
                   onClick={() => runSearchOrResolve()}
                   className="bg-[#0D4A3E] disabled:opacity-60 text-white px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap shrink-0"
                 >
-                  {searching ? '...' : 'រក'}
+                  {searching ? '...' : isEn ? 'Search' : 'រក'}
                 </button>
                 <button
                   type="button"
@@ -579,7 +590,7 @@ export function LocationPickerModal({
               <div ref={mapContainerRef} style={{ position: 'absolute', inset: 0, zIndex: 1 }} />
               <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-full z-[450] flex flex-col items-center">
                 <div className="bg-[#0D4A3E] text-white text-[10px] font-bold px-2.5 py-0.5 rounded-lg shadow mb-1 whitespace-nowrap">
-                  {purpose === 'shop' ? 'ទីតាំងហាង' : 'ទីតាំងអ្នក'}
+                  {purpose === 'shop' ? (isEn ? 'Shop Pin' : 'ទីតាំងហាង') : isEn ? 'Your Pin' : 'ទីតាំងអ្នក'}
                 </div>
                 <MapPin className="w-8 h-8 text-[#0D4A3E] fill-amber-400 drop-shadow-md" />
               </div>
@@ -592,7 +603,7 @@ export function LocationPickerModal({
                     mapStyle === 'street' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
                   }`}
                 >
-                  ផែនទី
+                  {isEn ? 'Map' : 'ផែនទី'}
                 </button>
                 <button
                   type="button"
@@ -601,7 +612,7 @@ export function LocationPickerModal({
                     mapStyle === 'satellite' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
                   }`}
                 >
-                  ផ្កាយរណប
+                  {isEn ? 'Satellite' : 'ផ្កាយរណប'}
                 </button>
               </div>
 
@@ -612,7 +623,7 @@ export function LocationPickerModal({
                   className="absolute bottom-7 left-3 z-[400] bg-white/95 text-slate-800 font-bold text-[11px] px-2.5 py-2 rounded-xl shadow-md flex items-center gap-1 border border-slate-200"
                 >
                   <Store className="w-3.5 h-3.5 text-amber-600" />
-                  <span>ទីតាំងហាង</span>
+                  <span>{isEn ? 'Shop' : 'ទីតាំងហាង'}</span>
                 </button>
               )}
 
@@ -622,7 +633,7 @@ export function LocationPickerModal({
                 className="absolute bottom-6 right-3 z-[400] bg-white text-[#0D4A3E] font-bold text-xs px-3.5 py-2.5 rounded-xl shadow-lg flex items-center gap-1.5 border border-slate-200 active:scale-95 transition-transform"
               >
                 <Crosshair className="w-4 h-4" />
-                <span>ចាប់ទីតាំង GPS ខ្ញុំ</span>
+                <span>{isEn ? 'Use My GPS' : 'ចាប់ទីតាំង GPS ខ្ញុំ'}</span>
               </button>
             </div>
 
@@ -631,10 +642,10 @@ export function LocationPickerModal({
                 <p className="font-bold truncate">{addressText}</p>
                 <p className="text-[11px] font-mono-num mt-0.5">
                   {purpose === 'shop'
-                    ? `កូអរដោនេ៖ ${centerCoords.lat.toFixed(5)}, ${centerCoords.lng.toFixed(5)}`
-                    : `ចម្ងាយពីហាង៖ ${distKm.toFixed(2)} km · ថ្លៃដឹក៖ ${
-                        fee === 0 ? 'ឥតគិតថ្លៃ' : `$${fee.toFixed(2)}`
-                      }`}
+                    ? `${isEn ? 'Coords:' : 'កូអរដោនេ៖'} ${centerCoords.lat.toFixed(5)}, ${centerCoords.lng.toFixed(5)}`
+                    : `${isEn ? 'Distance:' : 'ចម្ងាយពីហាង៖'} ${distKm.toFixed(2)} km · ${
+                        isEn ? 'Delivery Fee:' : 'ថ្លៃដឹក៖'
+                      } ${fee === 0 ? (isEn ? 'Free' : 'ឥតគិតថ្លៃ') : `$${fee.toFixed(2)}`}`}
                 </p>
               </div>
               <button
@@ -642,7 +653,7 @@ export function LocationPickerModal({
                 onClick={handleConfirm}
                 className="w-full bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold py-3 rounded-2xl text-sm transition-colors"
               >
-                បញ្ជាក់ទីតាំងនេះ
+                {isEn ? 'Confirm This Location' : 'បញ្ជាក់ទីតាំងនេះ'}
               </button>
             </div>
           </motion.div>
