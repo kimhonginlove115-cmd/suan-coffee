@@ -1186,6 +1186,87 @@ app.delete('/api/orders/:id', (req, res) => {
   return res.json({ ok: true });
 });
 
+app.get('/api/resolve-map-link', async (req, res) => {
+  const rawUrl = String(req.query.url || '').trim();
+  if (!rawUrl || rawUrl.length > 1000) {
+    return res.status(400).json({ ok: false, error: 'តំណរ Google Maps មិនត្រឹមត្រូវ' });
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return res.status(400).json({ ok: false, error: 'តំណរ Google Maps មិនត្រឹមត្រូវ' });
+  }
+  const allowedHosts = new Set([
+    'maps.app.goo.gl',
+    'goo.gl',
+    'g.co',
+    'maps.google.com',
+    'google.com',
+    'www.google.com',
+  ]);
+  if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || !allowedHosts.has(parsed.hostname.toLowerCase())) {
+    return res.status(400).json({ ok: false, error: 'គាំទ្រតែតំណរ Google Maps ប៉ុណ្ណោះ' });
+  }
+
+  const extractFromString = (txt: string): { lat: number; lng: number } | null => {
+    let decoded = txt;
+    try {
+      decoded = decodeURIComponent(txt);
+    } catch {
+      // ignore
+    }
+    const patterns = [
+      /!3d(-?\d{1,2}\.\d{3,})!4d(-?\d{1,3}\.\d{3,})/,
+      /@(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/,
+      /[?&](?:q|ll|destination|center|sll)=(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/,
+      /https?:\/\/(?:www\.)?google\.[^"'\s]+\/@(-?\d{1,2}\.\d{3,}),(-?\d{1,3}\.\d{3,})/,
+    ];
+    for (const re of patterns) {
+      const m = decoded.match(re) || txt.match(re);
+      if (m) {
+        const lat = parseFloat(m[1]);
+        const lng = parseFloat(m[2]);
+        if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+          return { lat, lng };
+        }
+      }
+    }
+    return null;
+  };
+
+  const direct = extractFromString(rawUrl);
+  if (direct) {
+    return res.json({ ok: true, ...direct, resolvedUrl: rawUrl });
+  }
+
+  try {
+    const resp = await fetchWithTimeout(
+      parsed.toString(),
+      {
+        redirect: 'follow',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; SuanCoffeeBot/1.0)',
+        },
+      },
+      7000
+    );
+    const finalUrl = resp.url || rawUrl;
+    const fromFinalUrl = extractFromString(finalUrl);
+    if (fromFinalUrl) {
+      return res.json({ ok: true, ...fromFinalUrl, resolvedUrl: finalUrl });
+    }
+    const html = (await resp.text()).slice(0, 60000);
+    const fromHtml = extractFromString(html);
+    if (fromHtml) {
+      return res.json({ ok: true, ...fromHtml, resolvedUrl: finalUrl });
+    }
+    return res.status(404).json({ ok: false, error: 'រកមិនឃើញកូអរដោនេក្នុង Link នេះទេ' });
+  } catch {
+    return res.status(502).json({ ok: false, error: 'មិនអាចបើក Link Google Maps បានទេ' });
+  }
+});
+
 app.use(
   (
     err: unknown,

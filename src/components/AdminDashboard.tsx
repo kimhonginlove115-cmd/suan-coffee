@@ -1559,6 +1559,9 @@ export function AdminDashboard({
               >
                 សៀមរាប
               </button>
+              <span className="text-[11px] text-slate-500 font-mono-num">
+                ({Number(draft.lat).toFixed(5)}, {Number(draft.lng).toFixed(5)})
+              </span>
             </div>
           </div>
 

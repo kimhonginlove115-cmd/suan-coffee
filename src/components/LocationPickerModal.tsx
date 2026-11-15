@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import L from 'leaflet';
-import { Crosshair, MapPin, Search, X } from 'lucide-react';
+import { Crosshair, MapPin, Search, Store, X } from 'lucide-react';
 import type { Coords, ShopSettings } from '../types';
-import { computeDeliveryFee, fetchWithTimeout, getDistanceKm } from '../utils/cafeUtils';
+import { computeDeliveryFee, extractCoordsFromMapText, fetchWithTimeout, getDistanceKm } from '../utils/cafeUtils';
 
 interface LocationPickerModalProps {
   isOpen: boolean;
@@ -18,37 +18,58 @@ interface LocationPickerModalProps {
   onToast: (msg: string) => void;
 }
 
+interface SearchSuggestion {
+  label: string;
+  lat: number;
+  lng: number;
+}
+
 const LANDMARKS = [
   { lat: 11.5504, lng: 104.9225, label: 'BKK1 (បឹងកេងកង ១)', short: 'BKK1' },
-  { lat: 11.5761, lng: 104.8977, label: 'Toul Kork (ទួលគោក)', short: 'ទួលគោក' },
+  { lat: 11.5761, lng: 104.8977, label: 'ទួលគោក (Toul Kork)', short: 'ទួលគោក' },
+  { lat: 11.5944, lng: 104.8806, label: 'សែនសុខ (Sen Sok)', short: 'សែនសុខ' },
+  { lat: 11.5349, lng: 104.9372, label: 'ច្បារអំពៅ (Chbar Ampov)', short: 'ច្បារអំពៅ' },
   { lat: 11.5477, lng: 104.9333, label: 'Aeon Mall 1', short: 'Aeon 1' },
   { lat: 11.5997, lng: 104.8851, label: 'Aeon Mall 2', short: 'Aeon 2' },
   { lat: 11.5681, lng: 104.931, label: 'មាត់ទន្លេ (Riverside)', short: 'មាត់ទន្លេ' },
+  { lat: 11.4793, lng: 104.9482, label: 'ក្រុងតាខ្មៅ (Ta Khmau)', short: 'តាខ្មៅ' },
 ];
 
 export function makeResilientTileLayer(mode: 'street' | 'satellite') {
-  const url =
+  const urls =
     mode === 'satellite'
-      ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
-      : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
-  const fallbackUrl =
-    mode === 'satellite'
-      ? 'https://mt1.google.com/vt/lyrs=y&hl=km&x={x}&y={y}&z={z}'
-      : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+      ? [
+          'https://mt{s}.google.com/vt/lyrs=y&hl=km&x={x}&y={y}&z={z}',
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        ]
+      : [
+          'https://mt{s}.google.com/vt/lyrs=m&hl=km&x={x}&y={y}&z={z}',
+          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+        ];
 
-  const tl = L.tileLayer(url, { maxZoom: 20 });
+  let urlIndex = 0;
   let loadedAny = false;
-  let switched = false;
   let removed = false;
 
+  const tl = L.tileLayer(urls[0], {
+    maxZoom: 20,
+    subdomains: ['0', '1', '2', '3'],
+  });
+
+  const switchToNextProvider = () => {
+    if (removed || urlIndex >= urls.length - 1) return;
+    urlIndex += 1;
+    try {
+      tl.setUrl(urls[urlIndex]);
+    } catch {
+      // ignore if layer disposed
+    }
+  };
+
   const fallbackTimer = setTimeout(() => {
-    if (!loadedAny && !switched && !removed) {
-      switched = true;
-      try {
-        tl.setUrl(fallbackUrl);
-      } catch {
-        // ignore if layer disposed
-      }
+    if (!loadedAny && !removed) {
+      switchToNextProvider();
     }
   }, 3500);
 
@@ -57,14 +78,9 @@ export function makeResilientTileLayer(mode: 'street' | 'satellite') {
     clearTimeout(fallbackTimer);
   });
   tl.on('tileerror', () => {
-    if (!switched && !removed) {
-      switched = true;
+    if (!loadedAny && !removed) {
       clearTimeout(fallbackTimer);
-      try {
-        tl.setUrl(fallbackUrl);
-      } catch {
-        // ignore if layer disposed
-      }
+      switchToNextProvider();
     }
   });
   tl.on('remove', () => {
@@ -101,6 +117,7 @@ export function LocationPickerModal({
   const [mapStyle, setMapStyle] = useState<'street' | 'satellite'>('street');
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
+  const [suggestions, setSuggestions] = useState<SearchSuggestion[]>([]);
   const [gpsNote, setGpsNote] = useState('អូសផែនទីឱ្យចំទីតាំង');
   const [centerCoords, setCenterCoords] = useState<Coords>(initialCoords);
   const [addressText, setAddressText] = useState(initialAddress);
@@ -142,6 +159,7 @@ export function LocationPickerModal({
 
   useEffect(() => {
     if (!isOpen) {
+      setSuggestions([]);
       if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current);
       if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
       if (geoAbortRef.current) geoAbortRef.current.abort();
@@ -157,6 +175,7 @@ export function LocationPickerModal({
 
     const startCoords = purpose === 'shop' ? { lat: shopSettings.lat, lng: shopSettings.lng } : initialCoords;
     setCenterCoords(startCoords);
+    setSuggestions([]);
     if (purpose === 'shop') {
       setGpsNote('អូសផែនទីឱ្យចំទីតាំងហាងរបស់អ្នក');
       setAddressText(`ទីតាំងហាង (${startCoords.lat.toFixed(5)}, ${startCoords.lng.toFixed(5)})`);
@@ -181,6 +200,7 @@ export function LocationPickerModal({
 
       m.on('dragstart', () => {
         skipMoveEndRef.current = false;
+        setSuggestions([]);
       });
       m.on('moveend', () => {
         if (!mapRef.current) return;
@@ -232,6 +252,7 @@ export function LocationPickerModal({
   };
 
   const jumpTo = (lat: number, lng: number, label?: string) => {
+    setSuggestions([]);
     if (label) {
       skipMoveEndRef.current = true;
       setAddressText(label);
@@ -313,30 +334,106 @@ export function LocationPickerModal({
     );
   };
 
-  const handleSearch = async () => {
-    const q = searchQuery.trim();
+  const runSearchOrResolve = async (rawInput?: string) => {
+    const q = (rawInput ?? searchQuery).trim();
     if (!q || searching) return;
-    const coordMatch = q.match(/(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/);
-    if (coordMatch) {
-      jumpTo(parseFloat(coordMatch[1]), parseFloat(coordMatch[2]));
+
+    const directCoords = extractCoordsFromMapText(q);
+    if (directCoords) {
+      jumpTo(directCoords.lat, directCoords.lng);
+      onToast('✓ បាននាំទៅកាន់ទីតាំងកូអរដោនេ!');
       return;
     }
+
     if (searchAbortRef.current) searchAbortRef.current.abort();
     const ctrl = new AbortController();
     searchAbortRef.current = ctrl;
     setSearching(true);
+    setSuggestions([]);
+
     try {
-      const res = await fetchWithTimeout(
-        `https://nominatim.openstreetmap.org/search?format=json&accept-language=km,en&countrycodes=kh&limit=1&q=${encodeURIComponent(q)}`,
-        { signal: ctrl.signal },
-        7000
-      );
-      const d = await res.json();
+      // Handle Google Maps URLs (including short links like https://maps.app.goo.gl/...)
+      const urlMatch = q.match(/https?:\/\/\S+/i);
+      if (urlMatch) {
+        const res = await fetchWithTimeout(
+          `/api/resolve-map-link?url=${encodeURIComponent(urlMatch[0])}`,
+          { signal: ctrl.signal },
+          8000
+        );
+        const data = await res.json();
+        if (!isMountedRef.current) return;
+        if (res.ok && data?.ok && typeof data.lat === 'number' && typeof data.lng === 'number') {
+          jumpTo(data.lat, data.lng);
+          onToast('✓ បានបើកទីតាំងពី Link Google Maps!');
+          return;
+        }
+        onToast(data?.error || 'មិនអាចទាញកូអរដោនេពី Link នេះបានទេ!');
+        return;
+      }
+
+      // Primary place search via Nominatim (Cambodia bias)
+      let found: SearchSuggestion[] = [];
+      try {
+        const res = await fetchWithTimeout(
+          `https://nominatim.openstreetmap.org/search?format=json&accept-language=km,en&countrycodes=kh&limit=5&q=${encodeURIComponent(q)}`,
+          { signal: ctrl.signal },
+          6500
+        );
+        if (res.ok) {
+          const d = (await res.json()) as Array<{ lat: string; lon: string; display_name: string }>;
+          if (Array.isArray(d)) {
+            found = d
+              .map((item) => ({
+                label: item.display_name.split(',').slice(0, 3).join(', '),
+                lat: parseFloat(item.lat),
+                lng: parseFloat(item.lon),
+              }))
+              .filter((x) => Number.isFinite(x.lat) && Number.isFinite(x.lng));
+          }
+        }
+      } catch {
+        // Fallback to Photon below
+      }
+
+      // Fallback search via Photon if Nominatim returned empty
+      if (!found.length && !ctrl.signal.aborted) {
+        const pRes = await fetchWithTimeout(
+          `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${shopSettings.lat}&lon=${shopSettings.lng}&limit=5`,
+          { signal: ctrl.signal },
+          6500
+        );
+        if (pRes.ok) {
+          const pData = (await pRes.json()) as {
+            features?: Array<{
+              geometry?: { coordinates?: [number, number] };
+              properties?: { name?: string; city?: string; district?: string; country?: string };
+            }>;
+          };
+          found = (pData.features || [])
+            .map((f) => {
+              const coords = f.geometry?.coordinates;
+              const props = f.properties || {};
+              const parts = [props.name, props.district, props.city, props.country].filter(Boolean);
+              return coords && coords.length >= 2
+                ? {
+                    label: parts.join(', ') || q,
+                    lat: Number(coords[1]),
+                    lng: Number(coords[0]),
+                  }
+                : null;
+            })
+            .filter((x): x is SearchSuggestion => Boolean(x && Number.isFinite(x.lat) && Number.isFinite(x.lng)));
+        }
+      }
+
       if (!isMountedRef.current) return;
-      if (d && d.length > 0) {
-        jumpTo(parseFloat(d[0].lat), parseFloat(d[0].lon), d[0].display_name.split(',').slice(0, 2).join(', '));
+      if (found.length > 0) {
+        jumpTo(found[0].lat, found[0].lng, found[0].label);
+        if (found.length > 1) {
+          setSuggestions(found);
+        }
       } else {
-        onToast('រកមិនឃើញទីតាំងនេះទេ!');
+        onToast('រកមិនឃើញទីតាំងនេះទេ! សាកវាយជាភាសាអង់គ្លេស ឬអូសផែនទី');
       }
     } catch {
       if (isMountedRef.current) {
@@ -352,16 +449,14 @@ export function LocationPickerModal({
     try {
       text = await navigator.clipboard.readText();
     } catch {
-      // clipboard denied
+      // clipboard permission denied on some iOS browsers
     }
-    if (text) {
-      setSearchQuery(text);
-      const coordMatch = text.match(/(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/);
-      if (coordMatch) {
-        jumpTo(parseFloat(coordMatch[1]), parseFloat(coordMatch[2]));
-      }
+    if (text && text.trim()) {
+      const cleaned = text.trim();
+      setSearchQuery(cleaned);
+      await runSearchOrResolve(cleaned);
     } else {
-      onToast('សូម Paste Link ឬកូអរដោនេចូលក្នុងប្រអប់ស្វែងរក');
+      onToast('សូមចុច Paste ក្នុងប្រអប់ស្វែងរកខាងឆ្វេង រួចចុច «រក»');
     }
   };
 
@@ -396,30 +491,29 @@ export function LocationPickerModal({
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 36, opacity: 0 }}
             transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-            className="bg-white w-full max-w-lg rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl flex flex-col"
-            style={{ height: '90vh', maxHeight: '760px' }}
+            className="bg-white w-full max-w-lg rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl flex flex-col h-[92dvh] max-h-[780px]"
           >
-            <div className="p-4 bg-[#0D4A3E] text-white flex justify-between items-center shrink-0">
-              <div>
-                <h3 className="font-bold text-sm">
+            <div className="px-4 py-3.5 bg-[#0D4A3E] text-white flex justify-between items-center shrink-0">
+              <div className="min-w-0 pr-2">
+                <h3 className="font-bold text-sm truncate">
                   {purpose === 'shop' ? 'កំណត់ទីតាំងហាងរបស់អ្នក' : 'ជ្រើសរើសទីតាំងដឹកជញ្ជូន'}
                 </h3>
-                <p className="text-[11px] text-emerald-200">{gpsNote}</p>
+                <p className="text-[11px] text-emerald-200 truncate">{gpsNote}</p>
               </div>
               <button
                 type="button"
                 onClick={onClose}
                 aria-label="បិទ"
-                className="min-h-[40px] min-w-[40px] flex items-center justify-center bg-white/15 rounded-full hover:bg-white/25 transition-colors"
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center bg-white/15 rounded-full hover:bg-white/25 transition-colors shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-3 bg-slate-50 border-b border-slate-200 space-y-2 shrink-0">
+            <div className="relative p-3 bg-slate-50 border-b border-slate-200 space-y-2 shrink-0">
               <div className="flex gap-1.5">
-                <div className="relative flex-1">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <div className="relative flex-1 min-w-0">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={searchQuery}
@@ -427,29 +521,45 @@ export function LocationPickerModal({
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
                         e.preventDefault();
-                        handleSearch();
+                        runSearchOrResolve();
                       }
                     }}
-                    placeholder="វាយឈ្មោះតំបន់ ឬ Paste Link Google Maps..."
-                    className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-xl text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
+                    placeholder="វាយឈ្មោះតំបន់ ឬ Link Google Maps..."
+                    className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
                   />
                 </div>
                 <button
                   type="button"
                   disabled={searching}
-                  onClick={handleSearch}
-                  className="bg-[#0D4A3E] disabled:opacity-60 text-white px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap"
+                  onClick={() => runSearchOrResolve()}
+                  className="bg-[#0D4A3E] disabled:opacity-60 text-white px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap shrink-0"
                 >
                   {searching ? '...' : 'រក'}
                 </button>
                 <button
                   type="button"
                   onClick={handlePaste}
-                  className="bg-amber-400 text-slate-900 px-3 py-2 rounded-xl text-xs font-bold whitespace-nowrap"
+                  className="bg-amber-400 text-slate-900 px-3 py-2 rounded-xl text-xs font-bold whitespace-nowrap shrink-0"
                 >
                   Paste
                 </button>
               </div>
+
+              {suggestions.length > 1 && (
+                <div className="bg-white border border-slate-200 rounded-xl shadow-lg divide-y divide-slate-100 max-h-40 overflow-y-auto">
+                  {suggestions.map((sug, idx) => (
+                    <button
+                      key={`${sug.lat}-${sug.lng}-${idx}`}
+                      type="button"
+                      onClick={() => jumpTo(sug.lat, sug.lng, sug.label)}
+                      className="w-full text-left px-3 py-2 text-xs hover:bg-[#E8F2EF] flex items-center gap-2 transition-colors"
+                    >
+                      <MapPin className="w-3.5 h-3.5 text-[#0D4A3E] shrink-0" />
+                      <span className="truncate font-medium text-slate-800">{sug.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
 
               <div className="flex gap-1.5 overflow-x-auto hide-scrollbar">
                 {LANDMARKS.map((lm) => (
@@ -457,7 +567,7 @@ export function LocationPickerModal({
                     key={lm.short}
                     type="button"
                     onClick={() => jumpTo(lm.lat, lm.lng, lm.label)}
-                    className="text-[11px] bg-white border border-slate-200 hover:border-[#0D4A3E] px-3 py-1.5 rounded-lg font-medium whitespace-nowrap transition-colors"
+                    className="text-[11px] bg-white border border-slate-200 hover:border-[#0D4A3E] px-3 py-1.5 rounded-lg font-medium whitespace-nowrap transition-colors shrink-0"
                   >
                     {lm.short}
                   </button>
@@ -465,7 +575,7 @@ export function LocationPickerModal({
               </div>
             </div>
 
-            <div className="relative flex-1 bg-slate-200" style={{ minHeight: '260px' }}>
+            <div className="relative flex-1 bg-slate-200 min-h-[240px]">
               <div ref={mapContainerRef} style={{ position: 'absolute', inset: 0, zIndex: 1 }} />
               <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-full z-[450] flex flex-col items-center">
                 <div className="bg-[#0D4A3E] text-white text-[10px] font-bold px-2.5 py-0.5 rounded-lg shadow mb-1 whitespace-nowrap">
@@ -474,11 +584,11 @@ export function LocationPickerModal({
                 <MapPin className="w-8 h-8 text-[#0D4A3E] fill-amber-400 drop-shadow-md" />
               </div>
 
-              <div className="absolute top-3 right-3 z-[400] flex gap-1 bg-white/95 p-1 rounded-xl shadow">
+              <div className="absolute top-3 right-3 z-[400] flex gap-1 bg-white/95 p-1 rounded-xl shadow border border-slate-200/80">
                 <button
                   type="button"
                   onClick={() => switchStyle('street')}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors ${
                     mapStyle === 'street' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
                   }`}
                 >
@@ -487,7 +597,7 @@ export function LocationPickerModal({
                 <button
                   type="button"
                   onClick={() => switchStyle('satellite')}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors ${
                     mapStyle === 'satellite' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
                   }`}
                 >
@@ -495,23 +605,36 @@ export function LocationPickerModal({
                 </button>
               </div>
 
+              {purpose === 'customer' && (
+                <button
+                  type="button"
+                  onClick={() => jumpTo(shopSettings.lat, shopSettings.lng)}
+                  className="absolute bottom-7 left-3 z-[400] bg-white/95 text-slate-800 font-bold text-[11px] px-2.5 py-2 rounded-xl shadow-md flex items-center gap-1 border border-slate-200"
+                >
+                  <Store className="w-3.5 h-3.5 text-amber-600" />
+                  <span>ទីតាំងហាង</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => detectUserGPS(true)}
-                className="absolute bottom-3 right-3 z-[400] bg-white text-[#0D4A3E] font-bold text-xs px-3.5 py-2.5 rounded-xl shadow-lg flex items-center gap-1.5 border border-slate-200"
+                className="absolute bottom-6 right-3 z-[400] bg-white text-[#0D4A3E] font-bold text-xs px-3.5 py-2.5 rounded-xl shadow-lg flex items-center gap-1.5 border border-slate-200 active:scale-95 transition-transform"
               >
                 <Crosshair className="w-4 h-4" />
                 <span>ចាប់ទីតាំង GPS ខ្ញុំ</span>
               </button>
             </div>
 
-            <div className="p-4 bg-white border-t border-slate-200 space-y-2.5 shrink-0">
+            <div className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] bg-white border-t border-slate-200 space-y-2.5 shrink-0">
               <div className="bg-[#E8F2EF] text-[#0D4A3E] p-3 rounded-2xl text-xs">
                 <p className="font-bold truncate">{addressText}</p>
                 <p className="text-[11px] font-mono-num mt-0.5">
                   {purpose === 'shop'
-                    ? 'ចុចបញ្ជាក់ដើម្បីរក្សាទុកទីតាំងហាង'
-                    : `ចម្ងាយពីហាង៖ ${distKm.toFixed(2)} km · ថ្លៃដឹក៖ $${fee.toFixed(2)}`}
+                    ? `កូអរដោនេ៖ ${centerCoords.lat.toFixed(5)}, ${centerCoords.lng.toFixed(5)}`
+                    : `ចម្ងាយពីហាង៖ ${distKm.toFixed(2)} km · ថ្លៃដឹក៖ ${
+                        fee === 0 ? 'ឥតគិតថ្លៃ' : `$${fee.toFixed(2)}`
+                      }`}
                 </p>
               </div>
               <button

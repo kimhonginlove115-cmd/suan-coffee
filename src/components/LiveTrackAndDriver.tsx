@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import L from 'leaflet';
-import { MapPin, Navigation, Phone, X } from 'lucide-react';
+import { LocateFixed, MapPin, Navigation, Phone, X } from 'lucide-react';
 import type { Coords, Order, ShopSettings } from '../types';
 import { getDistanceKm } from '../utils/cafeUtils';
 import { makeResilientTileLayer } from './LocationPickerModal';
@@ -25,9 +25,12 @@ export function LiveTrackModal({
 }: LiveTrackModalProps) {
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const shopMarkerRef = useRef<L.Marker | null>(null);
   const custMarkerRef = useRef<L.Marker | null>(null);
   const driverMarkerRef = useRef<L.Marker | null>(null);
   const routeLineRef = useRef<L.Polyline | null>(null);
+  const [mapStyle, setMapStyle] = useState<'street' | 'satellite'>('street');
 
   const cLat = order?.customer?.coords?.lat ?? shopSettings.lat;
   const cLng = order?.customer?.coords?.lng ?? shopSettings.lng;
@@ -37,11 +40,29 @@ export function LiveTrackModal({
   const dist = order ? getDistanceKm(dLat, dLng, cLat, cLng) : 0;
   const mins = Math.max(1, Math.round(dist * 3));
 
+  const fitAllMarkers = () => {
+    if (!mapRef.current) return;
+    try {
+      mapRef.current.fitBounds(
+        [
+          [shopSettings.lat, shopSettings.lng],
+          [dLat, dLng],
+          [cLat, cLng],
+        ],
+        { padding: [45, 45], maxZoom: 16 }
+      );
+    } catch {
+      // ignore bounds error
+    }
+  };
+
   useEffect(() => {
     if (!order) {
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
+        tileLayerRef.current = null;
+        shopMarkerRef.current = null;
         custMarkerRef.current = null;
         driverMarkerRef.current = null;
         routeLineRef.current = null;
@@ -53,7 +74,7 @@ export function LiveTrackModal({
     const t = setTimeout(() => {
       if (!mapElRef.current || mapRef.current) return;
       const m = L.map(mapElRef.current, { zoomControl: true }).setView([dLat, dLng], 15);
-      makeResilientTileLayer('street').addTo(m);
+      tileLayerRef.current = makeResilientTileLayer(mapStyle).addTo(m);
       mapRef.current = m;
       resizeTimer = setTimeout(() => {
         try {
@@ -71,10 +92,23 @@ export function LiveTrackModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Boolean(order)]);
 
+  const switchStyle = (mode: 'street' | 'satellite') => {
+    setMapStyle(mode);
+    if (!mapRef.current) return;
+    if (tileLayerRef.current) mapRef.current.removeLayer(tileLayerRef.current);
+    tileLayerRef.current = makeResilientTileLayer(mode).addTo(mapRef.current);
+  };
+
   useEffect(() => {
     if (!order || !mapRef.current) return;
     const m = mapRef.current;
 
+    const sIcon = L.divIcon({
+      className: 'custom-gps-icon',
+      html: '<div style="background:#D99B26;color:#000;padding:2px 7px;border-radius:10px;font-weight:bold;font-size:10px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);white-space:nowrap;">☕ ហាង</div>',
+      iconSize: [52, 22],
+      iconAnchor: [26, 11],
+    });
     const cIcon = L.divIcon({
       className: 'custom-gps-icon',
       html: '<div style="background:#0D4A3E;color:#fff;width:30px;height:30px;border-radius:50%;border:3px solid #fff;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.4);">🏠</div>',
@@ -87,6 +121,10 @@ export function LiveTrackModal({
       iconSize: [36, 36],
       iconAnchor: [18, 18],
     });
+
+    if (!shopMarkerRef.current)
+      shopMarkerRef.current = L.marker([shopSettings.lat, shopSettings.lng], { icon: sIcon }).addTo(m);
+    else shopMarkerRef.current.setLatLng([shopSettings.lat, shopSettings.lng]);
 
     if (!custMarkerRef.current) custMarkerRef.current = L.marker([cLat, cLng], { icon: cIcon }).addTo(m);
     else custMarkerRef.current.setLatLng([cLat, cLng]);
@@ -102,24 +140,15 @@ export function LiveTrackModal({
         ],
         { color: '#0D4A3E', weight: 4, dashArray: '8,8' }
       ).addTo(m);
-      try {
-        m.fitBounds(
-          [
-            [dLat, dLng],
-            [cLat, cLng],
-          ],
-          { padding: [45, 45], maxZoom: 16 }
-        );
-      } catch {
-        // ignore bounds error
-      }
+      fitAllMarkers();
     } else {
       routeLineRef.current.setLatLngs([
         [dLat, dLng],
         [cLat, cLng],
       ]);
     }
-  }, [order, cLat, cLng, dLat, dLng]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order, cLat, cLng, dLat, dLng, shopSettings.lat, shopSettings.lng]);
 
   const handleShareLivePin = () => {
     if (!order || !navigator.geolocation) {
@@ -149,8 +178,7 @@ export function LiveTrackModal({
             initial={{ y: 36, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 36, opacity: 0 }}
-            className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl flex flex-col"
-            style={{ maxHeight: '90vh' }}
+            className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[92dvh]"
           >
             <div className="p-4 bg-[#0D4A3E] text-white flex justify-between items-center shrink-0">
               <div>
@@ -176,11 +204,39 @@ export function LiveTrackModal({
               <span className="font-bold font-mono-num text-[#0D4A3E]">{dist.toFixed(2)} km</span>
             </div>
 
-            <div className="relative flex-1 bg-slate-100" style={{ height: '320px', minHeight: '280px' }}>
+            <div className="relative flex-1 bg-slate-100 min-h-[280px] h-[320px]">
               <div ref={mapElRef} style={{ position: 'absolute', inset: 0, zIndex: 1 }} />
+              <div className="absolute top-3 right-3 z-[400] flex gap-1 bg-white/95 p-1 rounded-xl shadow border border-slate-200/80">
+                <button
+                  type="button"
+                  onClick={() => switchStyle('street')}
+                  className={`px-2 py-1 rounded-lg text-[10px] font-bold ${
+                    mapStyle === 'street' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
+                  }`}
+                >
+                  ផែនទី
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchStyle('satellite')}
+                  className={`px-2 py-1 rounded-lg text-[10px] font-bold ${
+                    mapStyle === 'satellite' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
+                  }`}
+                >
+                  ផ្កាយរណប
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={fitAllMarkers}
+                className="absolute bottom-6 right-3 z-[400] bg-white text-[#0D4A3E] font-bold text-[11px] px-2.5 py-2 rounded-xl shadow-md flex items-center gap-1 border border-slate-200"
+              >
+                <LocateFixed className="w-3.5 h-3.5" />
+                <span>មើលទាំងអស់</span>
+              </button>
             </div>
 
-            <div className="p-4 space-y-2 shrink-0 bg-white border-t border-slate-100">
+            <div className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] space-y-2 shrink-0 bg-white border-t border-slate-100">
               <button
                 type="button"
                 onClick={handleShareLivePin}
@@ -232,6 +288,7 @@ export function DriverConsole({
 }: DriverConsoleProps) {
   const mapElRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
   const custMarkerRef = useRef<L.Marker | null>(null);
   const driverMarkerRef = useRef<L.Marker | null>(null);
   const lineRef = useRef<L.Polyline | null>(null);
@@ -240,6 +297,7 @@ export function DriverConsole({
   const lastGpsSentAtRef = useRef(0);
   const lastGpsCoordsRef = useRef<Coords | null>(null);
   const [gpsActive, setGpsActive] = useState(false);
+  const [mapStyle, setMapStyle] = useState<'street' | 'satellite'>('street');
 
   const cLat = order.customer?.coords?.lat ?? shopSettings.lat;
   const cLng = order.customer?.coords?.lng ?? shopSettings.lng;
@@ -247,12 +305,27 @@ export function DriverConsole({
   const dLng = order.driverCoords?.lng ?? shopSettings.lng;
   const distKm = getDistanceKm(dLat, dLng, cLat, cLng);
 
+  const fitRoute = () => {
+    if (!mapRef.current) return;
+    try {
+      mapRef.current.fitBounds(
+        [
+          [dLat, dLng],
+          [cLat, cLng],
+        ],
+        { padding: [40, 40], maxZoom: 16 }
+      );
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const t = setTimeout(() => {
       if (!mapElRef.current || mapRef.current) return;
       const m = L.map(mapElRef.current, { zoomControl: true }).setView([dLat, dLng], 15);
-      makeResilientTileLayer('street').addTo(m);
+      tileLayerRef.current = makeResilientTileLayer(mapStyle).addTo(m);
       mapRef.current = m;
       resizeTimer = setTimeout(() => {
         try {
@@ -272,10 +345,18 @@ export function DriverConsole({
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
+        tileLayerRef.current = null;
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const switchStyle = (mode: 'street' | 'satellite') => {
+    setMapStyle(mode);
+    if (!mapRef.current) return;
+    if (tileLayerRef.current) mapRef.current.removeLayer(tileLayerRef.current);
+    tileLayerRef.current = makeResilientTileLayer(mode).addTo(mapRef.current);
+  };
 
   useEffect(() => {
     if (!mapRef.current) return;
@@ -307,23 +388,14 @@ export function DriverConsole({
         ],
         { color: '#F59E0B', weight: 4, dashArray: '8,8' }
       ).addTo(m);
-      try {
-        m.fitBounds(
-          [
-            [dLat, dLng],
-            [cLat, cLng],
-          ],
-          { padding: [40, 40], maxZoom: 16 }
-        );
-      } catch {
-        // ignore
-      }
+      fitRoute();
     } else {
       lineRef.current.setLatLngs([
         [dLat, dLng],
         [cLat, cLng],
       ]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cLat, cLng, dLat, dLng]);
 
   const toggleLiveGPS = () => {
@@ -384,14 +456,42 @@ export function DriverConsole({
         </button>
       </div>
 
-      <div className="relative w-full bg-slate-100" style={{ height: '360px' }}>
+      <div className="relative w-full bg-slate-100 h-[360px]">
         <div ref={mapElRef} style={{ position: 'absolute', inset: 0, zIndex: 1 }} />
-        <div className="absolute top-3 left-3 z-[400] bg-slate-900/85 text-white px-3 py-1.5 rounded-xl text-xs font-bold font-mono-num">
+        <div className="absolute top-3 left-12 z-[400] bg-slate-900/85 text-white px-3 py-1.5 rounded-xl text-xs font-bold font-mono-num">
           នៅសល់៖ {distKm.toFixed(2)} km
         </div>
+        <div className="absolute top-3 right-3 z-[400] flex gap-1 bg-white/95 p-1 rounded-xl shadow border border-slate-200/80">
+          <button
+            type="button"
+            onClick={() => switchStyle('street')}
+            className={`px-2 py-1 rounded-lg text-[10px] font-bold ${
+              mapStyle === 'street' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
+            }`}
+          >
+            ផែនទី
+          </button>
+          <button
+            type="button"
+            onClick={() => switchStyle('satellite')}
+            className={`px-2 py-1 rounded-lg text-[10px] font-bold ${
+              mapStyle === 'satellite' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
+            }`}
+          >
+            ផ្កាយរណប
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={fitRoute}
+          className="absolute bottom-6 right-3 z-[400] bg-white text-[#0D4A3E] font-bold text-[11px] px-2.5 py-2 rounded-xl shadow-md flex items-center gap-1 border border-slate-200"
+        >
+          <LocateFixed className="w-3.5 h-3.5" />
+          <span>មើលផ្លូវ</span>
+        </button>
       </div>
 
-      <div className="p-4 space-y-3">
+      <div className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] space-y-3">
         <div className="bg-[#E8F2EF] p-3.5 rounded-2xl flex items-center justify-between gap-2">
           <div className="min-w-0">
             <p className="font-bold text-sm text-slate-900 truncate">

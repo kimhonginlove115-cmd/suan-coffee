@@ -219,8 +219,7 @@ export function CartModal({
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 30, opacity: 0 }}
             transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-            className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 overflow-y-auto shadow-2xl"
-            style={{ maxHeight: '90vh' }}
+            className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] overflow-y-auto shadow-2xl max-h-[92dvh]"
           >
             <div className="flex justify-between items-center mb-3">
               <h3 className="font-bold text-lg text-[#0D4A3E]">បញ្ជាក់ការកម្ម៉ង់</h3>

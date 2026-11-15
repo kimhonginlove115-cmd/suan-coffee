@@ -424,6 +424,37 @@ export function compressImageFile(
   img.src = objectUrl;
 }
 
+export function extractCoordsFromMapText(raw: string): { lat: number; lng: number } | null {
+  const text = (raw || '').trim();
+  if (!text) return null;
+
+  let decoded = text;
+  try {
+    decoded = decodeURIComponent(text);
+  } catch {
+    // keep raw text if malformed URI escape
+  }
+
+  const patterns = [
+    /!3d(-?\d{1,2}\.\d{3,})!4d(-?\d{1,3}\.\d{3,})/,
+    /@(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/,
+    /[?&](?:q|ll|destination|center|sll)=(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/,
+    /(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/,
+  ];
+
+  for (const re of patterns) {
+    const m = decoded.match(re) || text.match(re);
+    if (m) {
+      const lat = parseFloat(m[1]);
+      const lng = parseFloat(m[2]);
+      if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+        return { lat, lng };
+      }
+    }
+  }
+  return null;
+}
+
 export function playDingSound(): void {
   try {
     const AudioCtx =
