@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
-import { Check, Download, MapPin, Send, X } from 'lucide-react';
+import { Check, Download, MapPin, Phone, Search, Send, X } from 'lucide-react';
 import type { AppLang, Order, ShopSettings } from '../types';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 import { getOrderStatusText } from '../utils/i18n';
@@ -202,11 +202,11 @@ interface OrderTrackerModalProps {
   onOpenLiveTrack: (orderId: string) => void;
 }
 
-const STATUS_CLS: Record<string, string> = {
-  Pending: 'text-amber-700',
-  Brewing: 'text-sky-700',
-  Ready: 'text-[#0D4A3E]',
-  Completed: 'text-slate-500',
+const STATUS_BADGE_CLS: Record<string, string> = {
+  Pending: 'bg-amber-100 text-amber-800',
+  Brewing: 'bg-sky-100 text-sky-800',
+  Ready: 'bg-emerald-100 text-[#0D4A3E]',
+  Completed: 'bg-slate-100 text-slate-600',
 };
 
 export function OrderTrackerModal({
@@ -217,6 +217,22 @@ export function OrderTrackerModal({
   onOpenLiveTrack,
 }: OrderTrackerModalProps) {
   const isEn = lang === 'en';
+  const [filterMode, setFilterMode] = useState<'active' | 'all'>('all');
+  const [query, setQuery] = useState('');
+
+  const filteredOrders = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return orders.filter((o) => {
+      if (filterMode === 'active' && o.status === 'Completed') return false;
+      if (!q) return true;
+      return (
+        o.id.toLowerCase().includes(q) ||
+        (o.customer?.name || '').toLowerCase().includes(q) ||
+        (o.customer?.phone || '').toLowerCase().includes(q)
+      );
+    });
+  }, [orders, filterMode, query]);
+
   return (
     <AnimatePresence>
       {isOpen && (
@@ -224,7 +240,7 @@ export function OrderTrackerModal({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-slate-950/55 backdrop-blur-sm z-[60] flex items-center justify-center p-4"
+          className="fixed inset-0 bg-slate-950/55 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center p-0 sm:p-4"
           onClick={(e) => {
             if (e.target === e.currentTarget) onClose();
           }}
@@ -233,13 +249,17 @@ export function OrderTrackerModal({
             initial={{ y: 24, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 24, opacity: 0 }}
-            className="bg-white w-full max-w-md rounded-3xl p-5 overflow-y-auto shadow-2xl"
-            style={{ maxHeight: '85vh' }}
+            className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 overflow-hidden shadow-2xl flex flex-col max-h-[88dvh]"
           >
-            <div className="flex justify-between items-center mb-3">
-              <h3 className="font-bold text-base text-[#0D4A3E]">
-                {isEn ? 'Order Tracking & Live Map' : 'តាមដានការកម្ម៉ង់ & Live Map'}
-              </h3>
+            <div className="flex justify-between items-center mb-3 shrink-0">
+              <div>
+                <h3 className="font-bold text-base text-[#0D4A3E]">
+                  {isEn ? 'Order Tracking & Live Map' : 'តាមដានការកម្ម៉ង់ & Live Map'}
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  {isEn ? 'Real-time order updates' : 'ពិនិត្យស្ថានភាពកម្ម៉ង់ភ្លាមៗ'}
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={onClose}
@@ -250,21 +270,60 @@ export function OrderTrackerModal({
               </button>
             </div>
 
-            {!orders.length ? (
-              <p className="text-center text-slate-400 py-10 text-sm">
-                {isEn ? 'No orders yet' : 'មិនទាន់មានការកម្ម៉ង់ទេ'}
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {orders.slice(0, 10).map((o) => {
-                  const statusCls = STATUS_CLS[o.status] || STATUS_CLS.Pending;
+            {orders.length > 0 && (
+              <div className="space-y-2 mb-3 shrink-0">
+                <div className="flex gap-1.5">
+                  <div className="relative flex-1">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder={isEn ? 'Search ORD-xxxx or phone...' : 'ស្វែងរក ORD-xxxx ឬលេខទូរស័ព្ទ...'}
+                      className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs bg-slate-50 focus:bg-white focus:outline-none focus:border-[#0D4A3E]"
+                    />
+                  </div>
+                  <div className="flex bg-slate-100 p-1 rounded-xl shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setFilterMode('all')}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${
+                        filterMode === 'all' ? 'bg-white text-[#0D4A3E] shadow-sm' : 'text-slate-600'
+                      }`}
+                    >
+                      {isEn ? 'All' : 'ទាំងអស់'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFilterMode('active')}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${
+                        filterMode === 'active' ? 'bg-white text-[#0D4A3E] shadow-sm' : 'text-slate-600'
+                      }`}
+                    >
+                      {isEn ? 'Active' : 'កំពុងដំណើរ'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="overflow-y-auto space-y-3 pr-0.5 flex-1">
+              {!filteredOrders.length ? (
+                <p className="text-center text-slate-400 py-10 text-sm">
+                  {isEn ? 'No orders found' : 'មិនទាន់មានការកម្ម៉ង់ទេ'}
+                </p>
+              ) : (
+                filteredOrders.slice(0, 12).map((o) => {
+                  const statusCls = STATUS_BADGE_CLS[o.status] || STATUS_BADGE_CLS.Pending;
                   return (
                     <div key={o.id} className="border border-slate-200 rounded-2xl p-3.5 text-xs space-y-2">
-                      <div className="flex justify-between items-center font-bold">
+                      <div className="flex justify-between items-center gap-2 font-bold">
                         <span className="font-mono-num text-slate-900">
                           {o.id} · {o.timestamp}
                         </span>
-                        <span className={statusCls}>{getOrderStatusText(o.status, lang)}</span>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg ${statusCls}`}>
+                          {getOrderStatusText(o.status, lang)}
+                        </span>
                       </div>
                       <div className="text-slate-600 space-y-0.5">
                         {o.items.map((i, idx) => (
@@ -274,23 +333,47 @@ export function OrderTrackerModal({
                         ))}
                       </div>
                       <div className="flex justify-between font-bold text-[#0D4A3E] pt-1.5 border-t border-slate-100">
-                        <span>{o.payment}</span>
+                        <span>
+                          {o.type === 'dinein'
+                            ? `${isEn ? 'Table' : 'តុ'} ${o.customer?.tableNum || 1} · ${o.payment}`
+                            : o.payment}
+                        </span>
                         <span className="font-mono-num">${Number(o.grandTotal || 0).toFixed(2)}</span>
                       </div>
-                      {o.type === 'delivery' && o.status !== 'Completed' && (
-                        <button
-                          type="button"
-                          onClick={() => onOpenLiveTrack(o.id)}
-                          className="w-full bg-amber-400 hover:bg-amber-500 text-slate-900 font-bold py-2 rounded-xl text-xs"
-                        >
-                          {isEn ? '🗺️ View Driver Live Map' : '🗺️ មើលទីតាំងអ្នកដឹក Live Map'}
-                        </button>
+                      {o.type === 'delivery' && (
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => onOpenLiveTrack(o.id)}
+                            className="flex-1 bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold py-2 rounded-xl text-xs flex items-center justify-center gap-1.5"
+                          >
+                            <MapPin className="w-3.5 h-3.5 text-amber-300" />
+                            <span>
+                              {o.status === 'Completed'
+                                ? isEn
+                                  ? 'View Delivery Details'
+                                  : 'មើលព័ត៌មានដឹកជញ្ជូន'
+                                : isEn
+                                  ? 'Track Live Map'
+                                  : 'តាមដានលើ Live Map'}
+                            </span>
+                          </button>
+                          {o.driverInfo?.phone && o.status !== 'Completed' && (
+                            <a
+                              href={`tel:${o.driverInfo.phone}`}
+                              className="px-3 py-2 bg-[#E8F2EF] text-[#0D4A3E] rounded-xl text-xs font-bold flex items-center gap-1 shrink-0"
+                            >
+                              <Phone className="w-3.5 h-3.5" />
+                              <span>{isEn ? 'Call' : 'តេ'}</span>
+                            </a>
+                          )}
+                        </div>
                       )}
                     </div>
                   );
-                })}
-              </div>
-            )}
+                })
+              )}
+            </div>
           </motion.div>
         </motion.div>
       )}

@@ -121,7 +121,9 @@ export function LocationPickerModal({
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [suggestions, setSuggestions] = useState<SearchSuggestion[]>([]);
-  const [gpsNote, setGpsNote] = useState('អូសផែនទីឱ្យចំទីតាំង');
+  const [gpsNote, setGpsNote] = useState(() =>
+    lang === 'en' ? 'Drag map to adjust pin location' : 'អូសផែនទីឱ្យចំទីតាំង'
+  );
   const [centerCoords, setCenterCoords] = useState<Coords>(initialCoords);
   const [addressText, setAddressText] = useState(initialAddress);
 
@@ -136,7 +138,11 @@ export function LocationPickerModal({
   }, []);
 
   const reverseGeocode = (lat: number, lng: number) => {
-    setAddressText(`ទីតាំង (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
+    setAddressText(
+      isEn
+        ? `Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`
+        : `ទីតាំង (${lat.toFixed(4)}, ${lng.toFixed(4)})`
+    );
     if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current);
     if (geoAbortRef.current) geoAbortRef.current.abort();
 
@@ -145,7 +151,7 @@ export function LocationPickerModal({
         const ctrl = new AbortController();
         geoAbortRef.current = ctrl;
         const r = await fetchWithTimeout(
-          `https://nominatim.openstreetmap.org/reverse?format=json&accept-language=km,en&lat=${lat}&lon=${lng}`,
+          `https://nominatim.openstreetmap.org/reverse?format=json&accept-language=${isEn ? 'en,km' : 'km,en'}&lat=${lat}&lon=${lng}`,
           { signal: ctrl.signal },
           6500
         );
@@ -180,10 +186,15 @@ export function LocationPickerModal({
     setCenterCoords(startCoords);
     setSuggestions([]);
     if (purpose === 'shop') {
-      setGpsNote('អូសផែនទីឱ្យចំទីតាំងហាងរបស់អ្នក');
-      setAddressText(`ទីតាំងហាង (${startCoords.lat.toFixed(5)}, ${startCoords.lng.toFixed(5)})`);
+      setGpsNote(isEn ? 'Drag map to set your shop pin' : 'អូសផែនទីឱ្យចំទីតាំងហាងរបស់អ្នក');
+      setAddressText(
+        isEn
+          ? `Shop Location (${startCoords.lat.toFixed(5)}, ${startCoords.lng.toFixed(5)})`
+          : `ទីតាំងហាង (${startCoords.lat.toFixed(5)}, ${startCoords.lng.toFixed(5)})`
+      );
     } else {
-      setAddressText(initialAddress || 'ភ្នំពេញ');
+      setGpsNote(isEn ? 'Drag map to adjust pin location' : 'អូសផែនទីឱ្យចំទីតាំង');
+      setAddressText(initialAddress || (isEn ? 'Phnom Penh' : 'ភ្នំពេញ'));
     }
 
     const initTimer = setTimeout(() => {
@@ -195,7 +206,7 @@ export function LocationPickerModal({
       const tl = makeResilientTileLayer(mapStyle).addTo(m);
       const shopIcon = L.divIcon({
         className: 'custom-gps-icon',
-        html: '<div style="background:#D99B26;color:#000;padding:3px 8px;border-radius:10px;font-weight:bold;font-size:10px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);white-space:nowrap;">☕ ហាង</div>',
+        html: `<div style="background:#D99B26;color:#000;padding:3px 8px;border-radius:10px;font-weight:bold;font-size:10px;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);white-space:nowrap;">☕ ${isEn ? 'Shop' : 'ហាង'}</div>`,
         iconSize: [54, 24],
         iconAnchor: [27, 12],
       });
@@ -210,7 +221,11 @@ export function LocationPickerModal({
         const c = m.getCenter();
         setCenterCoords({ lat: c.lat, lng: c.lng });
         if (purpose === 'shop') {
-          setAddressText(`ទីតាំងហាង (${c.lat.toFixed(5)}, ${c.lng.toFixed(5)})`);
+          setAddressText(
+            isEn
+              ? `Shop Location (${c.lat.toFixed(5)}, ${c.lng.toFixed(5)})`
+              : `ទីតាំងហាង (${c.lat.toFixed(5)}, ${c.lng.toFixed(5)})`
+          );
         } else {
           if (skipMoveEndRef.current) {
             skipMoveEndRef.current = false;
@@ -295,7 +310,7 @@ export function LocationPickerModal({
   };
 
   const detectUserGPS = (showAlert: boolean) => {
-    setGpsNote('កំពុងចាប់ទីតាំង GPS...');
+    setGpsNote(isEn ? 'Detecting GPS location...' : 'កំពុងចាប់ទីតាំង GPS...');
     let inIframe = false;
     try {
       inIframe = window.self !== window.top;
@@ -303,14 +318,14 @@ export function LocationPickerModal({
       inIframe = true;
     }
     if (!navigator.geolocation) {
-      setGpsNote('សូមអូសផែនទីដើម្បីរើសទីតាំង');
+      setGpsNote(isEn ? 'Drag map to select location' : 'សូមអូសផែនទីដើម្បីរើសទីតាំង');
       if (!hasPickedRef.current) fallbackIPLocation();
       return;
     }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         if (!isMountedRef.current) return;
-        setGpsNote('ចាប់ទីតាំង GPS បានជោគជ័យ!');
+        setGpsNote(isEn ? 'GPS locked successfully!' : 'ចាប់ទីតាំង GPS បានជោគជ័យ!');
         const lat = pos.coords.latitude;
         const lng = pos.coords.longitude;
         if (mapRef.current) {
@@ -326,11 +341,19 @@ export function LocationPickerModal({
         if (!hasPickedRef.current && purpose === 'customer') fallbackIPLocation();
         setGpsNote(
           inIframe
-            ? 'Iframe បិទ GPS! សូមអូសផែនទី ឬជ្រើសតំបន់ខាងលើ'
-            : 'សូមអូសផែនទី ឬចុចតំបន់ខាងលើ'
+            ? isEn
+              ? 'GPS blocked in preview — drag map or pick area above'
+              : 'Iframe បិទ GPS! សូមអូសផែនទី ឬជ្រើសតំបន់ខាងលើ'
+            : isEn
+              ? 'Drag map or pick area above'
+              : 'សូមអូសផែនទី ឬចុចតំបន់ខាងលើ'
         );
         if (showAlert) {
-          onToast('សូមបើក Location Services ឬអូសផែនទីដោយដៃ');
+          onToast(
+            isEn
+              ? 'Please enable Location Services or drag the map pin manually'
+              : 'សូមបើក Location Services ឬអូសផែនទីដោយដៃ'
+          );
         }
       },
       { enableHighAccuracy: true, timeout: 6000, maximumAge: 0 }

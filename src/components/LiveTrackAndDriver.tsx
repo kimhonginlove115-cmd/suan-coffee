@@ -6,13 +6,17 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Clock,
+  Coffee,
   Globe,
   LocateFixed,
   MapPin,
   Navigation,
+  PackageCheck,
   Phone,
   QrCode,
   Send,
+  ShoppingBag,
+  Store,
   Truck,
   UserCheck,
   X,
@@ -28,7 +32,6 @@ interface LiveTrackModalProps {
   shopSettings: ShopSettings;
   onClose: () => void;
   onUpdateCustomerCoords: (orderId: string, coords: Coords) => void;
-  onOpenDriverConsole: (orderId: string) => void;
   onToast: (msg: string) => void;
 }
 
@@ -45,7 +48,6 @@ export function LiveTrackModal({
   shopSettings,
   onClose,
   onUpdateCustomerCoords,
-  onOpenDriverConsole,
   onToast,
 }: LiveTrackModalProps) {
   const isEn = lang === 'en';
@@ -56,7 +58,9 @@ export function LiveTrackModal({
   const custMarkerRef = useRef<L.Marker | null>(null);
   const driverMarkerRef = useRef<L.Marker | null>(null);
   const routeLineRef = useRef<L.Polyline | null>(null);
+  const shopToDriverLineRef = useRef<L.Polyline | null>(null);
   const [mapStyle, setMapStyle] = useState<'street' | 'satellite'>('street');
+  const [updatingPin, setUpdatingPin] = useState(false);
 
   const cLat = order?.customer?.coords?.lat ?? shopSettings.lat;
   const cLng = order?.customer?.coords?.lng ?? shopSettings.lng;
@@ -68,7 +72,10 @@ export function LiveTrackModal({
   const currentStepIdx = order
     ? Math.max(0, TRACK_STEPS.findIndex((s) => s.status === order.status))
     : 0;
-  const driverArrived = Boolean(order?.driverInfo?.arrivedAt) || dist < 0.05;
+  const driverArrived =
+    order?.status === 'Ready' && (Boolean(order?.driverInfo?.arrivedAt) || dist < 0.05);
+  const totalItemCount = order ? order.items.reduce((sum, it) => sum + Math.max(1, it.qty || 1), 0) : 0;
+  const cleanShopTg = (shopSettings.tgUsername || '').replace(/^@+/, '').trim();
 
   const fitAllMarkers = () => {
     if (!mapRef.current) return;
@@ -79,7 +86,7 @@ export function LiveTrackModal({
           [dLat, dLng],
           [cLat, cLng],
         ],
-        { padding: [45, 45], maxZoom: 16 }
+        { padding: [44, 44], maxZoom: 16 }
       );
     } catch {
       // ignore bounds error
@@ -96,6 +103,7 @@ export function LiveTrackModal({
         custMarkerRef.current = null;
         driverMarkerRef.current = null;
         routeLineRef.current = null;
+        shopToDriverLineRef.current = null;
       }
       return;
     }
@@ -162,6 +170,21 @@ export function LiveTrackModal({
     if (!driverMarkerRef.current) driverMarkerRef.current = L.marker([dLat, dLng], { icon: dIcon }).addTo(m);
     else driverMarkerRef.current.setLatLng([dLat, dLng]);
 
+    if (!shopToDriverLineRef.current) {
+      shopToDriverLineRef.current = L.polyline(
+        [
+          [shopSettings.lat, shopSettings.lng],
+          [dLat, dLng],
+        ],
+        { color: '#94A3B8', weight: 3, dashArray: '4,6', opacity: 0.7 }
+      ).addTo(m);
+    } else {
+      shopToDriverLineRef.current.setLatLngs([
+        [shopSettings.lat, shopSettings.lng],
+        [dLat, dLng],
+      ]);
+    }
+
     if (!routeLineRef.current) {
       routeLineRef.current = L.polyline(
         [
@@ -181,18 +204,32 @@ export function LiveTrackModal({
   }, [order, cLat, cLng, dLat, dLng, shopSettings.lat, shopSettings.lng, isEn]);
 
   const handleShareLivePin = () => {
-    if (!order || !navigator.geolocation) {
+    if (!order || updatingPin) return;
+    if (!navigator.geolocation) {
       onToast(isEn ? 'Please enable GPS on your device!' : 'សូមបើក GPS លើទូរស័ព្ទ!');
       return;
     }
+    setUpdatingPin(true);
     navigator.geolocation.getCurrentPosition(
       (p) => {
+        setUpdatingPin(false);
         onUpdateCustomerCoords(order.id, { lat: p.coords.latitude, lng: p.coords.longitude });
-        onToast(isEn ? 'Live location updated!' : 'បានអាប់ដេតទីតាំង Live ហើយ!');
+        onToast(isEn ? '✓ Live location updated!' : '✓ បានអាប់ដេតទីតាំង Live ហើយ!');
       },
-      () => onToast(isEn ? 'Please enable GPS on your device!' : 'សូមបើក GPS លើទូរស័ព្ទ!'),
+      () => {
+        setUpdatingPin(false);
+        onToast(isEn ? 'Please enable GPS on your device!' : 'សូមបើក GPS លើទូរស័ព្ទ!');
+      },
       { enableHighAccuracy: true, timeout: 7000, maximumAge: 5000 }
     );
+  };
+
+  const renderStepIcon = (status: OrderStatus, active: boolean) => {
+    const cls = `w-3.5 h-3.5 ${active ? 'text-white' : 'text-slate-400'}`;
+    if (status === 'Pending') return <Clock className={cls} />;
+    if (status === 'Brewing') return <Coffee className={cls} />;
+    if (status === 'Ready') return <Truck className={cls} />;
+    return <PackageCheck className={cls} />;
   };
 
   return (
@@ -202,107 +239,128 @@ export function LiveTrackModal({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onClose();
+          }}
           className="fixed inset-0 bg-slate-950/65 backdrop-blur-sm z-[65] flex items-end sm:items-center justify-center"
         >
           <motion.div
             initial={{ y: 36, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 36, opacity: 0 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 320 }}
             className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[92dvh]"
           >
-            <div className="p-4 bg-[#0D4A3E] text-white flex justify-between items-center shrink-0">
-              <div>
-                <h3 className="font-bold text-base">
-                  {isEn ? '🛵 Live Delivery Tracking' : '🛵 តាមដានអ្នកដឹក Live'}
-                </h3>
-                <p className="text-[11px] text-emerald-200 font-mono-num">
-                  {order.id} · {getOrderStatusText(order.status, lang)}
-                </p>
+            {/* Official Header */}
+            <div className="px-4 py-3.5 bg-[#0D4A3E] text-white flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+                  <Truck className="w-5 h-5 text-amber-300" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <h3 className="font-bold text-sm sm:text-base truncate">
+                      {isEn ? 'Order & Delivery Status' : 'តាមដានការដឹកជញ្ជូន Live'}
+                    </h3>
+                    {order.status === 'Ready' && (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-emerald-400/20 text-emerald-200 text-[10px] font-bold shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 animate-pulse" />
+                        LIVE
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-emerald-100/90 font-mono-num truncate">
+                    {order.id} · {order.timestamp} · {getOrderStatusText(order.status, lang)}
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
                 onClick={onClose}
                 aria-label={isEn ? 'Close' : 'បិទ'}
-                className="min-h-[40px] min-w-[40px] flex items-center justify-center bg-white/15 rounded-full"
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center bg-white/15 hover:bg-white/25 rounded-full transition-colors shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Step progress bar */}
-            <div className="px-4 py-2 bg-[#F6F8F7] border-b border-slate-200 grid grid-cols-4 gap-1 shrink-0">
-              {TRACK_STEPS.map((st, idx) => {
-                const done = idx <= currentStepIdx;
-                return (
-                  <div key={st.status} className="text-center space-y-1">
-                    <div
-                      className={`h-1.5 rounded-full transition-colors ${
-                        done ? 'bg-[#0D4A3E]' : 'bg-slate-200'
-                      }`}
-                    />
-                    <p
-                      className={`text-[10px] font-bold truncate ${
-                        done ? 'text-[#0D4A3E]' : 'text-slate-400'
-                      }`}
-                    >
-                      {isEn ? st.en : st.km}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="bg-amber-50 border-b border-amber-100 px-4 py-2 flex items-center justify-between text-xs shrink-0">
-              <span className="font-bold text-slate-800">
-                {order.status === 'Completed'
-                  ? isEn
-                    ? '✅ Order delivered!'
-                    : '✅ បានដឹកដល់ដៃរួចរាល់!'
-                  : driverArrived
-                    ? isEn
-                      ? '🎉 Driver has arrived near you!'
-                      : '🎉 អ្នកដឹកមកដល់ទីតាំងអ្នកហើយ!'
-                    : isEn
-                      ? `🛵 Est. ${mins} min away`
-                      : `🛵 ប្រហែល ${mins} នាទីទៀតដល់`}
-              </span>
-              <span className="font-bold font-mono-num text-[#0D4A3E]">{dist.toFixed(2)} km</span>
-            </div>
-
-            {(order.driverInfo?.name || order.driverInfo?.phone) && (
-              <div className="px-4 py-2 bg-white border-b border-slate-100 flex items-center justify-between gap-2 text-xs shrink-0">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="w-7 h-7 rounded-full bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
-                    <UserCheck className="w-3.5 h-3.5" />
-                  </div>
-                  <div className="min-w-0">
-                    <p className="font-bold text-slate-900 truncate">
-                      {order.driverInfo.name || (isEn ? 'Delivery Driver' : 'អ្នកដឹកជញ្ជូន')}
-                    </p>
-                    {order.driverInfo.phone && (
-                      <p className="text-[11px] font-mono-num text-slate-500">{order.driverInfo.phone}</p>
-                    )}
-                  </div>
-                </div>
-                {order.driverInfo.phone && (
-                  <a
-                    href={`tel:${order.driverInfo.phone}`}
-                    className="bg-[#0D4A3E] text-white px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 shrink-0"
-                  >
-                    <Phone className="w-3 h-3" />
-                    <span>{isEn ? 'Call Driver' : 'តេទៅអ្នកដឹក'}</span>
-                  </a>
-                )}
+            {/* 4-Step Visual Milestone Timeline */}
+            <div className="px-4 py-3 bg-[#F6F8F7] border-b border-slate-200/80 shrink-0">
+              <div className="grid grid-cols-4 gap-1.5">
+                {TRACK_STEPS.map((st, idx) => {
+                  const done = idx <= currentStepIdx;
+                  const isCurrent = idx === currentStepIdx;
+                  return (
+                    <div key={st.status} className="flex flex-col items-center text-center gap-1">
+                      <div
+                        className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors ${
+                          done
+                            ? isCurrent
+                              ? 'bg-[#0D4A3E] ring-4 ring-[#0D4A3E]/15'
+                              : 'bg-[#0D4A3E]'
+                            : 'bg-slate-200'
+                        }`}
+                      >
+                        {renderStepIcon(st.status, done)}
+                      </div>
+                      <p
+                        className={`text-[10px] font-bold truncate max-w-full ${
+                          done ? 'text-[#0D4A3E]' : 'text-slate-400'
+                        }`}
+                      >
+                        {isEn ? st.en : st.km}
+                      </p>
+                    </div>
+                  );
+                })}
               </div>
-            )}
+            </div>
 
-            <div className="relative flex-1 bg-slate-100 min-h-[250px] h-[290px]">
+            {/* ETA & Distance Bar */}
+            <div
+              className={`px-4 py-2 border-b flex items-center justify-between text-xs shrink-0 ${
+                order.status === 'Completed'
+                  ? 'bg-emerald-50 border-emerald-200/70 text-[#0D4A3E]'
+                  : driverArrived
+                    ? 'bg-amber-400/25 border-amber-300 text-slate-900'
+                    : 'bg-amber-50/80 border-amber-100 text-slate-800'
+              }`}
+            >
+              <span className="font-bold flex items-center gap-1.5 truncate">
+                {order.status === 'Completed' ? (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 text-[#0D4A3E] shrink-0" />
+                    <span>{isEn ? 'Order delivered to you!' : 'បានដឹកដល់ដៃអ្នករួចរាល់!'}</span>
+                  </>
+                ) : driverArrived ? (
+                  <span>
+                    {isEn ? '🎉 Driver has arrived near you!' : '🎉 អ្នកដឹកមកដល់ទីតាំងអ្នកហើយ!'}
+                  </span>
+                ) : order.status === 'Pending' || order.status === 'Brewing' ? (
+                  <span>
+                    {isEn
+                      ? 'Preparing your order · Driver assigned soon'
+                      : 'ហាងកំពុងរៀបចំទំនិញ · ត្រៀមចេញដឹកជូន'}
+                  </span>
+                ) : (
+                  <span>
+                    {isEn ? `Est. ${mins} min away` : `ប្រហែល ${mins} នាទីទៀតដល់`}
+                  </span>
+                )}
+              </span>
+              <span className="font-bold font-mono-num text-[#0D4A3E] bg-white px-2 py-0.5 rounded-lg border border-slate-200/70 shrink-0">
+                {dist.toFixed(2)} km
+              </span>
+            </div>
+
+            {/* Live Map */}
+            <div className="relative bg-slate-100 min-h-[210px] h-[235px] sm:h-[260px] shrink-0">
               <div ref={mapElRef} style={{ position: 'absolute', inset: 0, zIndex: 1 }} />
               <div className="absolute top-3 right-3 z-[400] flex gap-1 bg-white/95 p-1 rounded-xl shadow border border-slate-200/80">
                 <button
                   type="button"
                   onClick={() => switchStyle('street')}
-                  className={`px-2 py-1 rounded-lg text-[10px] font-bold ${
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-colors ${
                     mapStyle === 'street' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
                   }`}
                 >
@@ -311,7 +369,7 @@ export function LiveTrackModal({
                 <button
                   type="button"
                   onClick={() => switchStyle('satellite')}
-                  className={`px-2 py-1 rounded-lg text-[10px] font-bold ${
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-colors ${
                     mapStyle === 'satellite' ? 'bg-[#0D4A3E] text-white' : 'text-slate-700'
                   }`}
                 >
@@ -321,42 +379,138 @@ export function LiveTrackModal({
               <button
                 type="button"
                 onClick={fitAllMarkers}
-                className="absolute bottom-6 right-3 z-[400] bg-white text-[#0D4A3E] font-bold text-[11px] px-2.5 py-2 rounded-xl shadow-md flex items-center gap-1 border border-slate-200"
+                className="absolute bottom-5 right-3 z-[400] bg-white text-[#0D4A3E] font-bold text-[11px] px-2.5 py-2 rounded-xl shadow-md flex items-center gap-1 border border-slate-200"
               >
                 <LocateFixed className="w-3.5 h-3.5" />
                 <span>{isEn ? 'Fit All' : 'មើលទាំងអស់'}</span>
               </button>
             </div>
 
-            <div className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] space-y-2 shrink-0 bg-white border-t border-slate-100">
+            {/* Official Contact + Order Summary Details */}
+            <div className="p-3.5 sm:p-4 space-y-2.5 overflow-y-auto flex-1 bg-white">
+              {/* Driver Assigned Card OR Official Shop Support Card */}
+              {order.driverInfo?.name || order.driverInfo?.phone ? (
+                <div className="bg-[#F4F8F6] border border-[#0D4A3E]/15 rounded-2xl p-3 flex items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                      <UserCheck className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
+                        {isEn ? 'Assigned Courier' : 'អ្នកដឹកជញ្ជូន'}
+                      </p>
+                      <p className="font-bold text-xs text-slate-900 truncate">
+                        {order.driverInfo.name || (isEn ? 'Shop Courier' : 'អ្នកដឹកប្រចាំហាង')}
+                      </p>
+                      {order.driverInfo.phone && (
+                        <p className="text-[11px] font-mono-num text-slate-600">{order.driverInfo.phone}</p>
+                      )}
+                    </div>
+                  </div>
+                  {order.driverInfo.phone && (
+                    <a
+                      href={`tel:${order.driverInfo.phone}`}
+                      className="bg-[#0D4A3E] hover:bg-[#09352C] text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shrink-0 transition-colors"
+                    >
+                      <Phone className="w-3.5 h-3.5" />
+                      <span>{isEn ? 'Call Driver' : 'តេទៅអ្នកដឹក'}</span>
+                    </a>
+                  )}
+                </div>
+              ) : (
+                <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 flex items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-[#E8F2EF] text-[#0D4A3E] flex items-center justify-center shrink-0">
+                      <Store className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="font-bold text-xs text-slate-900 truncate">{shopSettings.brandTitle}</p>
+                      <p className="text-[11px] text-slate-500 truncate">
+                        {isEn ? 'Need help with your order?' : 'ត្រូវការជំនួយទាក់ទងនឹងការកម្ម៉ង់?'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {shopSettings.phoneHotline && (
+                      <a
+                        href={`tel:${shopSettings.phoneHotline}`}
+                        className="bg-[#0D4A3E] text-white px-2.5 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1"
+                      >
+                        <Phone className="w-3 h-3" />
+                        <span>{isEn ? 'Call' : 'តេ'}</span>
+                      </a>
+                    )}
+                    {cleanShopTg && (
+                      <a
+                        href={`https://t.me/${encodeURIComponent(cleanShopTg)}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="bg-sky-600 text-white px-2.5 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1"
+                      >
+                        <Send className="w-3 h-3" />
+                        <span>Chat</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Order Destination & Total Pill */}
+              <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 space-y-1.5 text-xs">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="text-slate-600 flex items-center gap-1.5 min-w-0">
+                    <MapPin className="w-3.5 h-3.5 text-[#0D4A3E] shrink-0" />
+                    <span className="truncate font-medium text-slate-800">
+                      {order.customer?.addressName || (isEn ? 'Pinned Delivery Location' : 'ទីតាំងលើផែនទី')}
+                    </span>
+                  </span>
+                  <span className="font-bold font-mono-num text-[#0D4A3E] shrink-0">
+                    ${Number(order.grandTotal || 0).toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 pt-1 border-t border-slate-200/70">
+                  <span className="flex items-center gap-1 truncate">
+                    <ShoppingBag className="w-3 h-3 shrink-0" />
+                    <span className="truncate">
+                      {totalItemCount} {isEn ? 'items' : 'មុខ'} ·{' '}
+                      {order.items.map((it) => `${it.qty}x ${it.name}`).join(', ')}
+                    </span>
+                  </span>
+                  <span className="font-semibold text-slate-700 shrink-0">{order.payment}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Clean Customer-Only Footer (No Driver Mode Button!) */}
+            <div className="px-4 py-3 pb-[max(0.85rem,env(safe-area-inset-bottom))] bg-white border-t border-slate-100 shrink-0 flex items-center gap-2">
+              {order.status !== 'Completed' && (
+                <button
+                  type="button"
+                  disabled={updatingPin}
+                  onClick={handleShareLivePin}
+                  className="flex-1 bg-[#E8F2EF] hover:bg-[#dcebe6] disabled:opacity-60 text-[#0D4A3E] font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <MapPin className="w-4 h-4 shrink-0" />
+                  <span className="truncate">
+                    {updatingPin
+                      ? isEn
+                        ? 'Locating GPS...'
+                        : 'កំពុងចាប់ GPS...'
+                      : isEn
+                        ? 'Update My Live Pin'
+                        : 'អាប់ដេតទីតាំង Live ខ្ញុំ'}
+                  </span>
+                </button>
+              )}
               <button
                 type="button"
-                onClick={handleShareLivePin}
-                className="w-full bg-[#E8F2EF] text-[#0D4A3E] font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
+                onClick={onClose}
+                className={`${
+                  order.status !== 'Completed' ? 'px-6' : 'w-full'
+                } bg-slate-900 hover:bg-slate-800 text-white font-bold py-2.5 rounded-xl text-xs transition-colors`}
               >
-                <MapPin className="w-4 h-4" />
-                <span>
-                  {isEn
-                    ? 'Update My Live Pin for Driver'
-                    : 'អាប់ដេតទីតាំង Live ខ្ញុំឱ្យអ្នកដឹកឃើញ'}
-                </span>
+                {isEn ? 'Close' : 'បិទ'}
               </button>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => onOpenDriverConsole(order.id)}
-                  className="bg-amber-400 hover:bg-amber-500 text-slate-900 font-bold py-2.5 rounded-xl text-xs"
-                >
-                  {isEn ? '🛵 Driver Mode' : '🛵 ទម្រង់អ្នកដឹក'}
-                </button>
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="bg-slate-900 text-white font-bold py-2.5 rounded-xl text-xs"
-                >
-                  {isEn ? 'Close' : 'បិទ'}
-                </button>
-              </div>
             </div>
           </motion.div>
         </motion.div>

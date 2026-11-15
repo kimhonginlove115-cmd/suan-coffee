@@ -104,8 +104,9 @@ export function AuthModal({
   const [fbComment, setFbComment] = useState('');
   const [submittingFeedback, setSubmittingFeedback] = useState(false);
 
-  // Official Telegram Login Widget container
+  // Official Telegram Login Widget container (lazy-loaded only when user opens Web Widget fallback)
   const widgetContainerRef = useRef<HTMLDivElement | null>(null);
+  const [showWebWidget, setShowWebWidget] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -114,6 +115,7 @@ export function AuthModal({
     if (!isOpen) {
       setErrorMsg('');
       setLoading(false);
+      setShowWebWidget(false);
       setActiveFeedbackOrderId(null);
       setFbComment('');
       setFbRating(5);
@@ -169,9 +171,9 @@ export function AuthModal({
     [memberOrders]
   );
 
-  // Mount Official Telegram Login Widget when botUsername + botToken are configured on server
+  // Mount Official Telegram Login Widget only when explicitly opened by user
   useEffect(() => {
-    if (!isOpen || activeTab !== 'telegram' || currentMember) return;
+    if (!isOpen || !showWebWidget || activeTab !== 'telegram' || currentMember) return;
     if (!capabilities?.telegramWidgetReady || !capabilities.botUsername) return;
     const container = widgetContainerRef.current;
     if (!container) return;
@@ -219,7 +221,7 @@ export function AuthModal({
       container.innerHTML = '';
       delete window.onEmeraldTelegramAuth;
     };
-  }, [isOpen, activeTab, currentMember, capabilities, onAuthenticated, onToast, onClose]);
+  }, [isOpen, showWebWidget, activeTab, currentMember, capabilities, onAuthenticated, onToast, onClose]);
 
   // OTP Countdown Timer
   useEffect(() => {
@@ -883,32 +885,34 @@ export function AuthModal({
                       initial={{ opacity: 0, x: -8 }}
                       animate={{ opacity: 1, x: 0 }}
                       transition={{ duration: 0.18 }}
-                      className="space-y-4"
+                      className="space-y-3.5"
                     >
-                      {capabilities?.telegramWidgetReady ? (
+                      {capabilities?.telegramBotReady || capabilities?.telegramWidgetReady ? (
                         <>
-                          {/* Official Telegram Login Widget */}
-                          <div className="bg-[#F5F9FC] border border-sky-200 rounded-2xl p-4 text-center space-y-2.5">
-                            <p className="text-xs font-bold text-slate-900">
-                              ចូលដោយផ្ទាល់តាម Official Telegram Login (Free ១០០%)
-                            </p>
-                            <p className="text-[11px] text-slate-600">
-                              ផ្ទៀងផ្ទាត់គណនី Telegram របស់អ្នកដោយផ្ទាល់តាមហត្ថលេខាផ្លូវការរបស់ Telegram
-                            </p>
-                            <div ref={widgetContainerRef} className="flex justify-center min-h-[42px]" />
-                          </div>
-
-                          {/* Official Telegram Bot 1-Click Verification */}
-                          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
-                            <p className="text-xs font-bold text-slate-900">
-                              ឬ ភ្ជាប់តាម Telegram Bot (@{capabilities.botUsername})
-                            </p>
+                          {/* Primary Official 1-Click Telegram Bot Verification (Works on ALL domains & mobile) */}
+                          <div className="bg-[#F5F9FC] border border-sky-200 rounded-2xl p-4 space-y-3">
+                            <div>
+                              <p className="text-xs font-bold text-slate-900">
+                                {isEn
+                                  ? `Official Telegram Bot Login (@${capabilities.botUsername})`
+                                  : `ភ្ជាប់គណនីតាម Telegram Bot ផ្លូវការ (@${capabilities.botUsername})`}
+                              </p>
+                              <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                                {isEn
+                                  ? 'Instant 1-tap sign in using your official Telegram account. Earn points and track orders anywhere.'
+                                  : 'ចូលប្រើប្រាស់ភ្លាមៗ ១០០% តាម Telegram ផ្លូវការ ដើម្បីសន្សំពិន្ទុ និងតាមដានការកម្ម៉ង់។'}
+                              </p>
+                            </div>
                             <input
                               type="tel"
                               value={phone}
                               onChange={(e) => setPhone(e.target.value)}
-                              placeholder="លេខទូរស័ព្ទភ្ជាប់ជាមួយគណនី (ស្រេចចិត្ត)"
-                              className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-xs font-mono-num bg-white focus:outline-none focus:border-[#0D4A3E]"
+                              placeholder={
+                                isEn
+                                  ? 'Phone number for delivery (optional)'
+                                  : 'លេខទូរស័ព្ទភ្ជាប់ជាមួយគណនី (ស្រេចចិត្ត)'
+                              }
+                              className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num bg-white focus:outline-none focus:border-[#0D4A3E]"
                             />
                             <button
                               type="button"
@@ -919,8 +923,12 @@ export function AuthModal({
                               <Send className="w-3.5 h-3.5" />
                               <span>
                                 {isPollingTg && tgLinkMode === 'login'
-                                  ? 'កំពុងរង់ចាំការចុច Start លើ Telegram...'
-                                  : 'បើក Telegram Bot ដើម្បីផ្ទៀងផ្ទាត់'}
+                                  ? isEn
+                                    ? 'Waiting for Start in Telegram...'
+                                    : 'កំពុងរង់ចាំការចុច Start លើ Telegram...'
+                                  : isEn
+                                    ? 'Open Telegram Bot to Sign In'
+                                    : 'បើក Telegram Bot ដើម្បីផ្ទៀងផ្ទាត់'}
                               </span>
                             </button>
 
@@ -928,9 +936,12 @@ export function AuthModal({
                               <div className="bg-white border border-sky-200 rounded-xl p-3 text-[11px] text-slate-700 space-y-2">
                                 <div className="flex items-center justify-between">
                                   <span>
-                                    កូដ៖ <strong className="font-mono-num text-sky-700">{tgLinkNonce}</strong>
+                                    {isEn ? 'Code: ' : 'កូដ៖ '}
+                                    <strong className="font-mono-num text-sky-700">{tgLinkNonce}</strong>
                                   </span>
-                                  <span className="text-slate-400">សុពលភាព ១០ នាទី</span>
+                                  <span className="text-slate-400">
+                                    {isEn ? 'Valid 10 mins' : 'សុពលភាព ១០ នាទី'}
+                                  </span>
                                 </div>
                                 <a
                                   href={tgDeepLink}
@@ -938,19 +949,45 @@ export function AuthModal({
                                   rel="noreferrer"
                                   className="block w-full text-center bg-sky-50 hover:bg-sky-100 text-sky-700 font-bold py-2 rounded-lg border border-sky-200"
                                 >
-                                  ចុចទីនេះដើម្បីបើក Telegram Bot ↗
+                                  {isEn ? 'Tap here to open Telegram Bot ↗' : 'ចុចទីនេះដើម្បីបើក Telegram Bot ↗'}
                                 </a>
                               </div>
                             )}
                           </div>
+
+                          {/* Optional Web Widget Toggle (Only loaded if user opens it) */}
+                          {capabilities?.telegramWidgetReady && (
+                            <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 text-center space-y-2">
+                              <button
+                                type="button"
+                                onClick={() => setShowWebWidget((v) => !v)}
+                                className="text-[11px] font-bold text-slate-600 hover:text-[#0D4A3E] underline"
+                              >
+                                {showWebWidget
+                                  ? isEn
+                                    ? 'Hide Telegram Web Widget'
+                                    : 'បិទ Telegram Web Widget'
+                                  : isEn
+                                    ? 'Or sign in with Telegram Web Widget'
+                                    : 'ឬ ចូលតាម Telegram Web Widget'}
+                              </button>
+                              {showWebWidget && (
+                                <div ref={widgetContainerRef} className="flex justify-center min-h-[42px] pt-1" />
+                              )}
+                            </div>
+                          )}
                         </>
                       ) : (
                         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2 text-xs text-amber-950 leading-relaxed">
-                          <p className="font-bold">តម្រូវការភ្ជាប់ Telegram Bot ផ្លូវការ (Free ១០០%)</p>
+                          <p className="font-bold">
+                            {isEn
+                              ? 'Official Telegram Bot Setup Required (100% Free)'
+                              : 'តម្រូវការភ្ជាប់ Telegram Bot ផ្លូវការ (Free ១០០%)'}
+                          </p>
                           <p>
-                            ដើម្បីបើកការចូលគណនី Telegram ផ្លូវការដោយឥតគិតថ្លៃ សូមម្ចាស់ហាងចូលទៅ{' '}
-                            <strong>គ្រប់គ្រងហាង → ការកំណត់ហាង</strong> រួចបញ្ចូល{' '}
-                            <strong>Bot Username</strong> និង <strong>Bot Token</strong> (បង្កើត Free ពី @BotFather) ។
+                            {isEn
+                              ? 'Shop owner can enable free Telegram login in Shop Admin → Settings by adding Bot Username and Bot Token from @BotFather.'
+                              : 'ដើម្បីបើកការចូលគណនី Telegram ផ្លូវការដោយឥតគិតថ្លៃ សូមម្ចាស់ហាងចូលទៅ គ្រប់គ្រងហាង → ការកំណត់ហាង រួចបញ្ចូល Bot Username និង Bot Token (បង្កើត Free ពី @BotFather) ។'}
                           </p>
                         </div>
                       )}
@@ -968,10 +1005,14 @@ export function AuthModal({
                         <div className="bg-[#E8F2EF] border border-[#0D4A3E]/25 rounded-2xl p-4 space-y-3">
                           <div>
                             <p className="text-xs font-bold text-[#0D4A3E]">
-                              ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទពិត Free ១០០% តាម Telegram
+                              {isEn
+                                ? 'Verify Real Phone Number Free via Telegram'
+                                : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទពិត Free ១០០% តាម Telegram'}
                             </p>
                             <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                              មិនអស់ថ្លៃសេវា SMS ទេ! បើក Bot រួចចុចប៊ូតុង «ចែករំលែកលេខទូរស័ព្ទ» ដើម្បីផ្ទៀងផ្ទាត់លេខ SIM របស់អ្នកដោយផ្ទាល់។
+                              {isEn
+                                ? 'Zero SMS fees! Open the bot and tap Share Phone Number to verify your real SIM number.'
+                                : 'មិនអស់ថ្លៃសេវា SMS ទេ! បើក Bot រួចចុចប៊ូតុង «ចែករំលែកលេខទូរស័ព្ទ» ដើម្បីផ្ទៀងផ្ទាត់លេខ SIM របស់អ្នកដោយផ្ទាល់។'}
                             </p>
                           </div>
 
@@ -979,8 +1020,8 @@ export function AuthModal({
                             type="text"
                             value={name}
                             onChange={(e) => setName(e.target.value)}
-                            placeholder="ឈ្មោះរបស់អ្នក (ស្រេចចិត្ត)"
-                            className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
+                            placeholder={isEn ? 'Your name (optional)' : 'ឈ្មោះរបស់អ្នក (ស្រេចចិត្ត)'}
+                            className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
                           />
 
                           <button
@@ -993,9 +1034,15 @@ export function AuthModal({
                             <span>
                               {isPollingTg && tgLinkMode === 'contact'
                                 ? tgPollStep === 'awaiting_contact'
-                                  ? 'សូមចុចប៊ូតុងផ្ញើលេខទូរស័ព្ទក្នុង Telegram...'
-                                  : 'កំពុងរង់ចាំអ្នកចុច Start ក្នុង Telegram...'
-                                : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ Free តាម Telegram'}
+                                  ? isEn
+                                    ? 'Tap Share Phone Number in Telegram...'
+                                    : 'សូមចុចប៊ូតុងផ្ញើលេខទូរស័ព្ទក្នុង Telegram...'
+                                  : isEn
+                                    ? 'Waiting for Start in Telegram...'
+                                    : 'កំពុងរង់ចាំអ្នកចុច Start ក្នុង Telegram...'
+                                : isEn
+                                  ? 'Verify Phone Free via Telegram'
+                                  : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ Free តាម Telegram'}
                             </span>
                           </button>
 
@@ -1004,8 +1051,12 @@ export function AuthModal({
                               <div className="flex items-center justify-between gap-2">
                                 <span className="font-bold text-[#0D4A3E]">
                                   {tgPollStep === 'awaiting_contact'
-                                    ? 'ជំហាន ២/២៖ ចុច «📱 ចុចផ្ញើលេខទូរស័ព្ទផ្ទៀងផ្ទាត់» ក្នុង Bot'
-                                    : 'ជំហាន ១/២៖ ចុច Start ក្នុង Telegram Bot'}
+                                    ? isEn
+                                      ? 'Step 2/2: Tap "Share Phone Number" in Bot'
+                                      : 'ជំហាន ២/២៖ ចុច «📱 ចុចផ្ញើលេខទូរស័ព្ទផ្ទៀងផ្ទាត់» ក្នុង Bot'
+                                    : isEn
+                                      ? 'Step 1/2: Tap Start in Telegram Bot'
+                                      : 'ជំហាន ១/២៖ ចុច Start ក្នុង Telegram Bot'}
                                 </span>
                               </div>
                               <a
@@ -1014,11 +1065,11 @@ export function AuthModal({
                                 rel="noreferrer"
                                 className="block w-full text-center bg-emerald-50 hover:bg-emerald-100 text-[#0D4A3E] font-bold py-2 rounded-lg border border-emerald-200"
                               >
-                                ចុចទីនេះដើម្បីបើក Telegram Bot ↗
+                                {isEn ? 'Tap here to open Telegram Bot ↗' : 'ចុចទីនេះដើម្បីបើក Telegram Bot ↗'}
                               </a>
                               <p className="text-slate-500">
-                                Bot: <span className="font-semibold">@{capabilities.botUsername}</span> · កូដ{' '}
-                                <span className="font-mono-num">{tgLinkNonce}</span>
+                                Bot: <span className="font-semibold">@{capabilities.botUsername}</span> ·{' '}
+                                {isEn ? 'Code' : 'កូដ'} <span className="font-mono-num">{tgLinkNonce}</span>
                               </p>
                             </div>
                           )}
@@ -1031,25 +1082,25 @@ export function AuthModal({
                           <form onSubmit={handleSendPhoneOtp} className="space-y-3 pt-1">
                             {capabilities.telegramContactReady && (
                               <p className="text-[11px] font-bold text-slate-500 text-center">
-                                — ឬ ផ្ទៀងផ្ទាត់ដោយកូដ SMS OTP —
+                                {isEn ? '— Or verify by SMS OTP —' : '— ឬ ផ្ទៀងផ្ទាត់ដោយកូដ SMS OTP —'}
                               </p>
                             )}
                             <div>
                               <label className="text-[11px] font-semibold text-slate-600 block mb-1">
-                                ឈ្មោះពេញ *
+                                {isEn ? 'Full Name *' : 'ឈ្មោះពេញ *'}
                               </label>
                               <input
                                 type="text"
                                 required
                                 value={name}
                                 onChange={(e) => setName(e.target.value)}
-                                placeholder="ឧ. ចាន់ ដារ៉ា"
-                                className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-[#0D4A3E]"
+                                placeholder={isEn ? 'e.g. Dara Chan' : 'ឧ. ចាន់ ដារ៉ា'}
+                                className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-base sm:text-sm focus:outline-none focus:border-[#0D4A3E]"
                               />
                             </div>
                             <div>
                               <label className="text-[11px] font-semibold text-slate-600 block mb-1">
-                                លេខទូរស័ព្ទសម្រាប់ទទួល OTP *
+                                {isEn ? 'Phone Number for OTP *' : 'លេខទូរស័ព្ទសម្រាប់ទទួល OTP *'}
                               </label>
                               <div className="relative">
                                 <Phone className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -1059,7 +1110,7 @@ export function AuthModal({
                                   value={phone}
                                   onChange={(e) => setPhone(e.target.value)}
                                   placeholder="012 345 678"
-                                  className="w-full pl-10 pr-3.5 py-2.5 border border-slate-200 rounded-xl text-sm font-mono-num focus:outline-none focus:border-[#0D4A3E]"
+                                  className="w-full pl-10 pr-3.5 py-2.5 border border-slate-200 rounded-xl text-base sm:text-sm font-mono-num focus:outline-none focus:border-[#0D4A3E]"
                                 />
                               </div>
                             </div>
@@ -1069,27 +1120,36 @@ export function AuthModal({
                               className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 rounded-xl text-sm flex items-center justify-center gap-2 transition-colors active:scale-[0.98]"
                             >
                               <KeyRound className="w-4 h-4" />
-                              <span>{loading ? 'កំពុងផ្ញើលេខកូដ...' : 'ផ្ញើលេខកូដ OTP តាម SMS'}</span>
+                              <span>
+                                {loading
+                                  ? isEn
+                                    ? 'Sending OTP...'
+                                    : 'កំពុងផ្ញើលេខកូដ...'
+                                  : isEn
+                                    ? 'Send SMS OTP Code'
+                                    : 'ផ្ញើលេខកូដ OTP តាម SMS'}
+                              </span>
                             </button>
                           </form>
                         ) : (
                           <form onSubmit={handleVerifyPhoneOtp} className="space-y-4">
                             <div className="text-center space-y-1">
                               <p className="text-xs text-slate-600">
-                                សូមបញ្ចូលលេខកូដ ៦ ខ្ទង់ដែលបានផ្ញើទៅ{' '}
+                                {isEn ? 'Enter the 6-digit code sent to ' : 'សូមបញ្ចូលលេខកូដ ៦ ខ្ទង់ដែលបានផ្ញើទៅ '}
                                 <span className="font-mono-num font-bold text-slate-900">
                                   {normalizedPhone}
                                 </span>
                               </p>
                               <p className="text-[11px] text-slate-500">
-                                តាមរយៈ៖{' '}
+                                {isEn ? 'Channel: ' : 'តាមរយៈ៖ '}
                                 {deliveredChannel === 'telegram_gateway'
                                   ? 'Telegram Verification'
                                   : 'SMS Gateway'}
                               </p>
                               {otpCountdown > 0 && (
                                 <p className="text-[11px] text-[#0D4A3E] font-mono-num font-semibold">
-                                  ផុតកំណត់ក្នុង៖ {formatCountdown(otpCountdown)}
+                                  {isEn ? 'Expires in: ' : 'ផុតកំណត់ក្នុង៖ '}
+                                  {formatCountdown(otpCountdown)}
                                 </p>
                               )}
                             </div>
@@ -1121,25 +1181,35 @@ export function AuthModal({
                                 }}
                                 className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-colors"
                               >
-                                ប្តូរលេខ
+                                {isEn ? 'Change Number' : 'ប្តូរលេខ'}
                               </button>
                               <button
                                 type="submit"
                                 disabled={loading}
                                 className="flex-1 bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold py-2.5 rounded-xl text-sm transition-colors active:scale-[0.98]"
                               >
-                                {loading ? 'កំពុងផ្ទៀងផ្ទាត់...' : 'បញ្ជាក់លេខកូដ OTP'}
+                                {loading
+                                  ? isEn
+                                    ? 'Verifying...'
+                                    : 'កំពុងផ្ទៀងផ្ទាត់...'
+                                  : isEn
+                                    ? 'Verify OTP'
+                                    : 'បញ្ជាក់លេខកូដ OTP'}
                               </button>
                             </div>
                           </form>
                         )
                       ) : !capabilities?.telegramContactReady ? (
                         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2 text-xs text-amber-950 leading-relaxed">
-                          <p className="font-bold">របៀបបើកផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ Free ១០០%</p>
+                          <p className="font-bold">
+                            {isEn
+                              ? 'How to enable 100% Free Phone Verification'
+                              : 'របៀបបើកផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ Free ១០០%'}
+                          </p>
                           <p>
-                            ម្ចាស់ហាងគ្រាន់តែបង្កើត Bot <strong>Free</strong> ពី <strong>@BotFather</strong> ក្នុង Telegram
-                            រួចបញ្ចូល <strong>Bot Username</strong> និង <strong>Bot Token</strong> នៅក្នុង{' '}
-                            <strong>គ្រប់គ្រងហាង → ការកំណត់ហាង</strong> ដើម្បីផ្ទៀងផ្ទាត់លេខទូរស័ព្ទដោយអត់អស់លុយ SMS!
+                            {isEn
+                              ? 'Shop owner simply creates a free Bot from @BotFather on Telegram and enters Bot Username + Bot Token in Shop Admin → Settings.'
+                              : 'ម្ចាស់ហាងគ្រាន់តែបង្កើត Bot Free ពី @BotFather ក្នុង Telegram រួចបញ្ចូល Bot Username និង Bot Token នៅក្នុង គ្រប់គ្រងហាង → ការកំណត់ហាង ដើម្បីផ្ទៀងផ្ទាត់លេខទូរស័ព្ទដោយអត់អស់លុយ SMS!'}
                           </p>
                         </div>
                       ) : null}

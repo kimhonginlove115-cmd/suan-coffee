@@ -1169,7 +1169,11 @@ export default function App() {
                   <span className="flex items-center gap-2 min-w-0">
                     <DeliveryRiderIllustration />
                     <span className="truncate">
-                      {t.liveDriverBanner} ({activeLiveOrder.id})
+                      {activeLiveOrder.driverInfo?.arrivedAt
+                        ? isEn
+                          ? `🎉 Driver arrived! Tap to view (${activeLiveOrder.id})`
+                          : `🎉 អ្នកដឹកមកដល់ទីតាំងអ្នកហើយ! ចុចមើល (${activeLiveOrder.id})`
+                        : `${t.liveDriverBanner} (${activeLiveOrder.id})`}
                     </span>
                   </span>
                   <ChevronRight className="w-4 h-4 shrink-0" />
@@ -1616,7 +1620,6 @@ export default function App() {
         shopSettings={shopSettings}
         onClose={() => setLiveTrackOrderId(null)}
         onUpdateCustomerCoords={handleUpdateCustomerCoords}
-        onOpenDriverConsole={handleOpenDriverConsole}
         onToast={showToast}
       />
     </div>
