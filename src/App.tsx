@@ -3,13 +3,21 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import {
   ChevronDown,
   ChevronRight,
-  Lock,
+  Coffee,
+  Croissant,
+  CupSoda,
+  LayoutGrid,
+  Leaf,
   MapPin,
   Plus,
-  Receipt,
+  ReceiptText,
   Search,
   ShoppingBag,
+  SlidersHorizontal,
+  Sparkles,
+  Tag,
   User,
+  UtensilsCrossed,
 } from 'lucide-react';
 import type {
   CartItem,
@@ -53,6 +61,21 @@ import { CartModal } from './components/CartModal';
 import { OrderTrackerModal, ReceiptModal } from './components/ReceiptAndTrackerModals';
 import { DriverConsole, LiveTrackModal } from './components/LiveTrackAndDriver';
 import { AdminDashboard, AdminPinModal } from './components/AdminDashboard';
+import { TouchFeedbackLayer } from './components/TouchFeedbackLayer';
+import { SocialLinksBar } from './components/SocialLinksBar';
+
+function getCategoryIcon(cat: string) {
+  const c = cat.toLowerCase();
+  if (c === 'all') return <LayoutGrid className="w-3.5 h-3.5" />;
+  if (c.includes('coffee') || c.includes('espresso') || c.includes('latte')) return <Coffee className="w-3.5 h-3.5" />;
+  if (c.includes('matcha') || c.includes('tea') && !c.includes('milk')) return <Leaf className="w-3.5 h-3.5" />;
+  if (c.includes('milk') || c.includes('soda') || c.includes('juice') || c.includes('smoothie'))
+    return <CupSoda className="w-3.5 h-3.5" />;
+  if (c.includes('food') || c.includes('noodle') || c.includes('rice')) return <UtensilsCrossed className="w-3.5 h-3.5" />;
+  if (c.includes('bakery') || c.includes('cake') || c.includes('snack') || c.includes('croissant'))
+    return <Croissant className="w-3.5 h-3.5" />;
+  return <Tag className="w-3.5 h-3.5" />;
+}
 
 export default function App() {
   const shouldReduceMotion = useReducedMotion();
@@ -727,6 +750,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F6F8F7] text-slate-800 overflow-x-clip">
+      <TouchFeedbackLayer />
       <AnimatePresence>
         {toastMsg && (
           <motion.div
@@ -908,29 +932,32 @@ export default function App() {
                 </nav>
 
                 <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-                  <button
+                  <motion.button
                     type="button"
+                    whileTap={shouldReduceMotion ? undefined : { scale: 0.9 }}
                     onClick={() => setIsTrackerOpen(true)}
                     aria-label="តាមដានកម្ម៉ង់"
-                    className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-700 bg-white active:scale-95 transition-transform"
+                    className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-[#0D4A3E] bg-[#F4F8F6] hover:bg-[#E8F2EF]"
                   >
-                    <Receipt className="w-4 h-4" />
-                  </button>
-                  <button
+                    <ReceiptText className="w-4 h-4" />
+                  </motion.button>
+                  <motion.button
                     type="button"
+                    whileTap={shouldReduceMotion ? undefined : { scale: 0.9 }}
                     onClick={() => {
                       if (isAdminUnlocked) setViewMode('admin');
                       else setIsPinOpen(true);
                     }}
                     aria-label="សម្រាប់ម្ចាស់ហាង"
-                    className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-700 bg-white active:scale-95 transition-transform"
+                    className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-700 bg-white hover:bg-slate-50"
                   >
-                    <Lock className="w-4 h-4" />
-                  </button>
-                  <button
+                    <SlidersHorizontal className="w-4 h-4" />
+                  </motion.button>
+                  <motion.button
                     type="button"
+                    whileTap={shouldReduceMotion ? undefined : { scale: 0.94 }}
                     onClick={() => setIsAuthOpen(true)}
-                    className="h-9 sm:min-h-[40px] px-2.5 sm:px-4 bg-[#0D4A3E] hover:bg-[#09352C] text-white text-[11px] sm:text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 active:scale-95"
+                    className="h-9 sm:min-h-[40px] px-2.5 sm:px-4 bg-[#0D4A3E] hover:bg-[#09352C] text-white text-[11px] sm:text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 shadow-sm"
                   >
                     <User className="w-3.5 h-3.5 text-amber-300 shrink-0" />
                     <span className="sm:hidden">
@@ -941,7 +968,7 @@ export default function App() {
                         ? `${currentMember.name.split(' ')[0]} · ★${currentMember.points || 0}`
                         : 'គណនី / ភ្ជាប់ Telegram'}
                     </span>
-                  </button>
+                  </motion.button>
                 </div>
               </div>
             </header>
@@ -994,11 +1021,18 @@ export default function App() {
                 >
                   <div className="flex items-center justify-between gap-3 sm:grid sm:grid-cols-12 sm:gap-4">
                     <div className="sm:col-span-8 space-y-1.5 sm:space-y-3 min-w-0">
-                      <p className="text-[11px] sm:text-xs font-medium text-emerald-200 truncate">
-                        {shopSettings.isOpen !== false ? 'កំពុងបើកលក់ · ដឹកជញ្ជូនរហ័ស' : 'បិទបណ្តោះអាសន្ន'}
-                        {shopSettings.promoCode && shopSettings.promoPercent > 0
-                          ? ` · កូដ ${shopSettings.promoCode} (-${shopSettings.promoPercent}%)`
-                          : ''}
+                      <p className="text-[11px] sm:text-xs font-medium text-emerald-200 truncate flex items-center gap-1.5">
+                        <span
+                          className={`w-2 h-2 rounded-full shrink-0 ${
+                            shopSettings.isOpen !== false ? 'bg-emerald-300 animate-pulse' : 'bg-red-400'
+                          }`}
+                        />
+                        <span className="truncate">
+                          {shopSettings.isOpen !== false ? 'កំពុងបើកលក់ · ដឹកជញ្ជូនរហ័ស' : 'បិទបណ្តោះអាសន្ន'}
+                          {shopSettings.promoCode && shopSettings.promoPercent > 0
+                            ? ` · កូដ ${shopSettings.promoCode} (-${shopSettings.promoPercent}%)`
+                            : ''}
+                        </span>
                       </p>
                       <h1 className="text-xl sm:text-4xl font-bold leading-tight text-balance">
                         {shopSettings.brandTitle}
@@ -1006,6 +1040,7 @@ export default function App() {
                       <p className="text-xs sm:text-sm text-emerald-100/90 max-w-xl line-clamp-2">
                         {shopSettings.shopName} · {promoSummaryText}
                       </p>
+                      <SocialLinksBar shopSettings={shopSettings} variant="hero" />
                     </div>
 
                     <div className="sm:col-span-4 flex justify-center shrink-0">
@@ -1014,8 +1049,9 @@ export default function App() {
                   </div>
 
                   <div className="grid sm:grid-cols-2 gap-2.5 sm:gap-3 pt-1">
-                    <button
+                    <motion.button
                       type="button"
+                      whileTap={shouldReduceMotion ? undefined : { scale: 0.97 }}
                       onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
                       className="text-left bg-white/12 hover:bg-white/20 px-3 py-2 sm:px-3.5 sm:py-2.5 rounded-xl sm:rounded-2xl flex items-center gap-2.5 border border-white/15 transition-colors"
                     >
@@ -1031,7 +1067,7 @@ export default function App() {
                         </p>
                       </div>
                       <ChevronDown className="w-4 h-4 text-emerald-200 shrink-0" />
-                    </button>
+                    </motion.button>
 
                     <div className="relative flex items-center">
                       <Search className="w-4 h-4 text-slate-400 absolute left-3.5 pointer-events-none" />
@@ -1049,6 +1085,7 @@ export default function App() {
                 <motion.div
                   initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
+                  whileTap={shouldReduceMotion ? undefined : { scale: 0.985 }}
                   transition={{ duration: 0.4, delay: 0.05 }}
                   className="lg:col-span-5 relative rounded-2xl sm:rounded-3xl overflow-hidden h-44 sm:h-60 lg:h-full lg:min-h-[280px] bg-slate-900"
                 >
@@ -1081,25 +1118,29 @@ export default function App() {
                     {categories.map((cat) => {
                       const active = selectedCategory === cat;
                       return (
-                        <button
+                        <motion.button
                           key={cat}
                           type="button"
+                          whileTap={shouldReduceMotion ? undefined : { scale: 0.93 }}
                           onClick={() => setSelectedCategory(cat)}
-                          className={`relative px-3.5 sm:px-4 py-1.5 sm:py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+                          className={`relative px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1.5 ${
                             active
                               ? 'text-white'
-                              : 'bg-white text-slate-600 border border-slate-200 hover:border-slate-300'
+                              : 'bg-white text-slate-600 border border-slate-200 hover:border-[#0D4A3E]/40'
                           }`}
                         >
                           {active && (
                             <motion.span
                               layoutId="activeCategoryTab"
-                              transition={{ type: 'spring', stiffness: 360, damping: 30 }}
-                              className="absolute inset-0 bg-[#0D4A3E] rounded-xl -z-0"
+                              transition={{ type: 'spring', stiffness: 380, damping: 28 }}
+                              className="absolute inset-0 bg-[#0D4A3E] rounded-xl -z-0 shadow-sm"
                             />
                           )}
-                          <span className="relative z-10">{cat === 'All' ? 'ទាំងអស់' : cat}</span>
-                        </button>
+                          <span className="relative z-10 flex items-center gap-1.5">
+                            {getCategoryIcon(cat)}
+                            <span>{cat === 'All' ? 'ទាំងអស់' : cat}</span>
+                          </span>
+                        </motion.button>
                       );
                     })}
                   </div>
@@ -1120,9 +1161,13 @@ export default function App() {
                           initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ duration: 0.25, delay: Math.min(idx * 0.04, 0.25) }}
-                          whileHover={shouldReduceMotion ? undefined : { y: -3 }}
-                          className={`bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-md ${
-                            !item.available ? 'opacity-60' : ''
+                          whileHover={shouldReduceMotion ? undefined : { y: -4 }}
+                          whileTap={shouldReduceMotion || !item.available ? undefined : { scale: 0.965 }}
+                          onClick={() => {
+                            if (item.available) setCustomizingItem(item);
+                          }}
+                          className={`group bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-lg ${
+                            item.available ? 'cursor-pointer' : 'opacity-60'
                           }`}
                         >
                           <div>
@@ -1132,12 +1177,25 @@ export default function App() {
                                 alt={item.name}
                                 referrerPolicy="no-referrer"
                                 onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
-                                className="w-full h-full object-cover"
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                               />
+                              {hasDisc && (
+                                <span className="absolute top-2 left-2 bg-amber-400 text-slate-900 font-bold font-mono-num text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
+                                  <Sparkles className="w-3 h-3" />
+                                  -{item.discount}%
+                                </span>
+                              )}
                             </div>
-                            <p className="text-[10px] sm:text-[11px] text-slate-500 truncate">
-                              {item.type === 'food' ? 'អាហារ/នំ' : 'ភេសជ្ជៈ'} · {item.category}
-                              {!item.available ? ' · អស់ស្តុក' : hasDisc ? ` · បញ្ចុះ ${item.discount}%` : ''}
+                            <p className="text-[10px] sm:text-[11px] text-slate-500 truncate flex items-center gap-1">
+                              {item.type === 'food' ? (
+                                <UtensilsCrossed className="w-3 h-3 text-amber-600 shrink-0" />
+                              ) : (
+                                <Coffee className="w-3 h-3 text-[#0D4A3E] shrink-0" />
+                              )}
+                              <span className="truncate">
+                                {item.category}
+                                {!item.available ? ' · អស់ស្តុក' : ''}
+                              </span>
                             </p>
                             <h3 className="font-semibold text-xs sm:text-base text-slate-900 mt-0.5 line-clamp-1">
                               {item.name}
@@ -1157,11 +1215,14 @@ export default function App() {
                             </div>
                             <motion.button
                               type="button"
-                              whileTap={shouldReduceMotion ? undefined : { scale: 0.92 }}
+                              whileTap={shouldReduceMotion ? undefined : { scale: 0.88 }}
                               disabled={!item.available}
-                              onClick={() => setCustomizingItem(item)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCustomizingItem(item);
+                              }}
                               aria-label={`កម្ម៉ង់ ${item.name}`}
-                              className="min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl bg-[#0D4A3E] hover:bg-[#09352C] text-white flex items-center justify-center disabled:bg-slate-300 transition-colors"
+                              className="min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl bg-[#0D4A3E] hover:bg-[#09352C] text-white flex items-center justify-center disabled:bg-slate-300 transition-colors shadow-sm"
                             >
                               <Plus className="w-4 h-4" />
                             </motion.button>
@@ -1175,9 +1236,18 @@ export default function App() {
             </main>
           </div>
 
-          <footer className="max-w-7xl mx-auto w-full px-4 sm:px-6 mt-12 pt-6 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-            <span>{shopSettings.brandTitle}</span>
-            <span>សុវត្ថិភាពផ្លូវការ · Telegram & Phone OTP Verification</span>
+          <footer className="max-w-7xl mx-auto w-full px-3 sm:px-6 mt-10 pt-6 border-t border-slate-200 space-y-4">
+            <div className="bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
+              <div className="space-y-0.5">
+                <p className="font-bold text-sm text-[#0D4A3E]">ភ្ជាប់ទំនាក់ទំនងជាមួយ {shopSettings.brandTitle}</p>
+                <p className="text-xs text-slate-500">តាមដានប្រូម៉ូសិនថ្មីៗ ឬទាក់ទងមកកាន់ហាងដោយផ្ទាល់</p>
+              </div>
+              <SocialLinksBar shopSettings={shopSettings} variant="footer" />
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 px-1">
+              <span>{shopSettings.brandTitle}</span>
+              <span>សុវត្ថិភាពផ្លូវការ · Telegram & Phone OTP Verification</span>
+            </div>
           </footer>
 
           <AnimatePresence>
@@ -1187,6 +1257,7 @@ export default function App() {
                 initial={{ y: 24, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 exit={{ y: 24, opacity: 0 }}
+                whileTap={shouldReduceMotion ? undefined : { scale: 0.96 }}
                 transition={{ type: 'spring', damping: 24, stiffness: 320 }}
                 onClick={() => setIsCartOpen(true)}
                 className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 w-[92%] max-w-md bg-[#0D4A3E] hover:bg-[#09352C] text-white px-4 py-3 rounded-2xl shadow-xl flex items-center justify-between z-40 transition-colors"

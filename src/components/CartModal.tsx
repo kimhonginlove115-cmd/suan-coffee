@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
-import { Download, MapPin, Minus, Plus, Send, X } from 'lucide-react';
+import { Armchair, Banknote, Bike, Download, MapPin, Minus, Plus, QrCode, Send, X } from 'lucide-react';
 import type { CartItem, Coords, Member, OrderType, PaymentMethod, ShopSettings } from '../types';
 import { CAFE_ASSETS, computeDeliveryFee, handleImgFallback, resolveAssetUrl } from '../utils/cafeUtils';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
@@ -296,24 +296,26 @@ export function CartModal({
               <button
                 type="button"
                 onClick={() => onChangeOrderType('delivery')}
-                className={`py-2.5 rounded-xl text-xs font-bold border transition-colors ${
+                className={`py-2.5 rounded-xl text-xs font-bold border transition-colors flex items-center justify-center gap-1.5 ${
                   orderType === 'delivery'
                     ? 'border-[#0D4A3E] bg-[#E8F2EF] text-[#0D4A3E]'
                     : 'border-slate-200 text-slate-600'
                 }`}
               >
-                🛵 ដឹកជញ្ជូន
+                <Bike className="w-4 h-4" />
+                <span>ដឹកជញ្ជូន</span>
               </button>
               <button
                 type="button"
                 onClick={() => onChangeOrderType('dinein')}
-                className={`py-2.5 rounded-xl text-xs font-bold border transition-colors ${
+                className={`py-2.5 rounded-xl text-xs font-bold border transition-colors flex items-center justify-center gap-1.5 ${
                   orderType === 'dinein'
                     ? 'border-[#0D4A3E] bg-[#E8F2EF] text-[#0D4A3E]'
                     : 'border-slate-200 text-slate-600'
                 }`}
               >
-                🪑 ញ៉ាំក្នុងហាង
+                <Armchair className="w-4 h-4" />
+                <span>ញ៉ាំក្នុងហាង</span>
               </button>
             </div>
 
@@ -389,13 +391,23 @@ export function CartModal({
                   key={pm}
                   type="button"
                   onClick={() => setPayment(pm)}
-                  className={`border rounded-xl p-2.5 flex items-center justify-center gap-2 transition-colors ${
+                  className={`border rounded-xl p-2.5 flex items-center justify-center gap-1.5 transition-colors ${
                     payment === pm
                       ? 'border-[#0D4A3E] bg-[#E8F2EF] text-[#0D4A3E]'
                       : 'border-slate-200 text-slate-700'
                   }`}
                 >
-                  {pm === 'Cash' ? 'សាច់ប្រាក់ (Cash)' : 'KHQR / ABA'}
+                  {pm === 'Cash' ? (
+                    <>
+                      <Banknote className="w-4 h-4" />
+                      <span>សាច់ប្រាក់ (Cash)</span>
+                    </>
+                  ) : (
+                    <>
+                      <QrCode className="w-4 h-4 text-[#E1232E]" />
+                      <span>KHQR / ABA</span>
+                    </>
+                  )}
                 </button>
               ))}
             </div>

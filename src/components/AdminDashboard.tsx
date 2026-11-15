@@ -1,6 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
-import { Lock, Printer, Trash2, X } from 'lucide-react';
+import {
+  ClipboardList,
+  Coffee,
+  DollarSign,
+  Lock,
+  Printer,
+  QrCode,
+  Share2,
+  ShieldCheck,
+  ShoppingBag,
+  SlidersHorizontal,
+  Trash2,
+  Users,
+  X,
+} from 'lucide-react';
 import type {
   AdminSecretsConfig,
   DeliveryMode,
@@ -540,15 +554,23 @@ export function AdminDashboard({
     <div className="max-w-6xl mx-auto p-3 sm:p-4 md:p-6 pb-24 space-y-4 sm:space-y-5 overflow-x-clip">
       <div className="no-print bg-slate-900 text-white p-3 sm:p-4 rounded-2xl flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <span className="font-bold text-xs sm:text-sm truncate">🛡️ គ្រប់គ្រងហាង</span>
+          <span className="inline-flex items-center gap-1.5 font-bold text-xs sm:text-sm truncate">
+            <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>គ្រប់គ្រងហាង</span>
+          </span>
           <button
             type="button"
             onClick={() => onUpdateShopSettings({ ...shopSettings, isOpen: shopSettings.isOpen === false })}
-            className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold shrink-0 ${
+            className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold shrink-0 flex items-center gap-1.5 ${
               shopSettings.isOpen !== false ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
             }`}
           >
-            {shopSettings.isOpen !== false ? 'ហាងបើកលក់' : 'ហាងកំពុងបិទ'}
+            <span
+              className={`w-2 h-2 rounded-full ${
+                shopSettings.isOpen !== false ? 'bg-emerald-200 animate-pulse' : 'bg-red-200'
+              }`}
+            />
+            <span>{shopSettings.isOpen !== false ? 'ហាងបើកលក់' : 'ហាងកំពុងបិទ'}</span>
           </button>
         </div>
         <button
@@ -584,21 +606,36 @@ export function AdminDashboard({
 
       {/* KPIs */}
       <div className="no-print grid grid-cols-3 gap-2 sm:gap-3">
-        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200">
-          <p className="text-[11px] sm:text-xs text-slate-500 truncate">ចំណូលសរុប</p>
-          <p className="text-base sm:text-xl font-bold font-mono-num text-[#0D4A3E] mt-0.5 truncate">
-            ${totalRevenue.toFixed(2)}
-          </p>
+        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-[11px] sm:text-xs text-slate-500 truncate">ចំណូលសរុប</p>
+            <p className="text-base sm:text-xl font-bold font-mono-num text-[#0D4A3E] mt-0.5 truncate">
+              ${totalRevenue.toFixed(2)}
+            </p>
+          </div>
+          <div className="hidden sm:flex w-10 h-10 rounded-xl bg-[#E8F2EF] text-[#0D4A3E] items-center justify-center shrink-0">
+            <DollarSign className="w-5 h-5" />
+          </div>
         </div>
-        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200">
-          <p className="text-[11px] sm:text-xs text-slate-500 truncate">ការកម្ម៉ង់</p>
-          <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5">{orders.length}</p>
+        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-[11px] sm:text-xs text-slate-500 truncate">ការកម្ម៉ង់</p>
+            <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5">{orders.length}</p>
+          </div>
+          <div className="hidden sm:flex w-10 h-10 rounded-xl bg-amber-50 text-amber-600 items-center justify-center shrink-0">
+            <ShoppingBag className="w-5 h-5" />
+          </div>
         </div>
-        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200">
-          <p className="text-[11px] sm:text-xs text-slate-500 truncate">សមាជិក</p>
-          <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5">
-            {displayedMembers.length}
-          </p>
+        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-[11px] sm:text-xs text-slate-500 truncate">សមាជិក</p>
+            <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5">
+              {displayedMembers.length}
+            </p>
+          </div>
+          <div className="hidden sm:flex w-10 h-10 rounded-xl bg-sky-50 text-sky-600 items-center justify-center shrink-0">
+            <Users className="w-5 h-5" />
+          </div>
         </div>
       </div>
 
@@ -606,22 +643,23 @@ export function AdminDashboard({
       <div className="no-print flex gap-1.5 sm:gap-2 overflow-x-auto hide-scrollbar pb-2 border-b border-slate-200">
         {(
           [
-            ['orders', `ការកម្ម៉ង់${pendingCount > 0 ? ` (${pendingCount})` : ''}`],
-            ['menu', 'ម៉ឺនុយ & Topping'],
-            ['qr', 'QR បិទតាមតុ'],
-            ['members', 'សមាជិក'],
-            ['settings', 'កំណត់ហាង, KHQR & API'],
-          ] as Array<[AdminTab, string]>
-        ).map(([id, label]) => (
+            ['orders', `ការកម្ម៉ង់${pendingCount > 0 ? ` (${pendingCount})` : ''}`, <ClipboardList key="i-o" className="w-3.5 h-3.5" />],
+            ['menu', 'ម៉ឺនុយ & Topping', <Coffee key="i-m" className="w-3.5 h-3.5" />],
+            ['qr', 'QR បិទតាមតុ', <QrCode key="i-q" className="w-3.5 h-3.5" />],
+            ['members', 'សមាជិក', <Users key="i-u" className="w-3.5 h-3.5" />],
+            ['settings', 'កំណត់ហាង, KHQR & បណ្តាញសង្គម', <SlidersHorizontal key="i-s" className="w-3.5 h-3.5" />],
+          ] as Array<[AdminTab, string, React.ReactNode]>
+        ).map(([id, label, icon]) => (
           <button
             key={id}
             type="button"
             onClick={() => setActiveTab(id)}
-            className={`px-3 sm:px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors shrink-0 ${
-              activeTab === id ? 'bg-[#0D4A3E] text-white' : 'bg-white border border-slate-200 text-slate-600'
+            className={`px-3 sm:px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors shrink-0 flex items-center gap-1.5 ${
+              activeTab === id ? 'bg-[#0D4A3E] text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600'
             }`}
           >
-            {label}
+            {icon}
+            <span>{label}</span>
           </button>
         ))}
       </div>
@@ -1270,6 +1308,57 @@ export function AdminDashboard({
                 }}
                 className="text-xs w-full"
               />
+            </div>
+
+            <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2.5">
+              <label className="text-xs font-bold text-[#0D4A3E] flex items-center gap-1.5">
+                <Share2 className="w-3.5 h-3.5" />
+                <span>លីងបណ្តាញសង្គមហាង (បង្ហាញលើវេបសាយ)</span>
+              </label>
+              <div className="grid sm:grid-cols-2 gap-2">
+                <input
+                  type="url"
+                  value={draft.facebookUrl || ''}
+                  onChange={(e) => setDraft({ ...draft, facebookUrl: e.target.value })}
+                  placeholder="Facebook (https://facebook.com/...)"
+                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white"
+                />
+                <input
+                  type="text"
+                  value={draft.tiktokUrl || ''}
+                  onChange={(e) => setDraft({ ...draft, tiktokUrl: e.target.value })}
+                  placeholder="TikTok (https://tiktok.com/@...)"
+                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white"
+                />
+                <input
+                  type="text"
+                  value={draft.instagramUrl || ''}
+                  onChange={(e) => setDraft({ ...draft, instagramUrl: e.target.value })}
+                  placeholder="Instagram (https://instagram.com/...)"
+                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white"
+                />
+                <input
+                  type="text"
+                  value={draft.tgUsername || ''}
+                  onChange={(e) => setDraft({ ...draft, tgUsername: e.target.value })}
+                  placeholder="Telegram (@channel ឬ https://t.me/...)"
+                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white"
+                />
+                <input
+                  type="text"
+                  value={draft.youtubeUrl || ''}
+                  onChange={(e) => setDraft({ ...draft, youtubeUrl: e.target.value })}
+                  placeholder="YouTube (https://youtube.com/@...)"
+                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white"
+                />
+                <input
+                  type="tel"
+                  value={draft.phoneHotline || ''}
+                  onChange={(e) => setDraft({ ...draft, phoneHotline: e.target.value })}
+                  placeholder="លេខទូរស័ព្ទហាង (ឧ. 012 345 678)"
+                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white font-mono-num"
+                />
+              </div>
             </div>
           </div>
 

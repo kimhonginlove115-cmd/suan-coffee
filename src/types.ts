@@ -95,6 +95,11 @@ export interface ShopSettings {
   promoPercent: number;
   tgUsername: string;
   botUsername: string;
+  facebookUrl?: string;
+  tiktokUrl?: string;
+  instagramUrl?: string;
+  youtubeUrl?: string;
+  phoneHotline?: string;
   firebaseUrl: string;
   isOpen: boolean;
   deliveryMode: DeliveryMode;
