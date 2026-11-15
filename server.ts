@@ -24,6 +24,22 @@ app.use((_req, res, next) => {
   next();
 });
 
+const botUsernameCache = new Map<string, string>();
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 8000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---- Persistent Server File Database (data/db.json) ----
 const DATA_DIR = path.resolve(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
@@ -432,11 +448,15 @@ async function sendTelegramBotMessage(
   try {
     const body: Record<string, unknown> = { chat_id: chatId.trim(), text, parse_mode: 'HTML' };
     if (replyMarkup) body.reply_markup = replyMarkup;
-    const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const resp = await fetchWithTimeout(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      6000
+    );
     const data = (await resp.json()) as { ok?: boolean };
     return Boolean(data.ok);
   } catch {
@@ -444,22 +464,29 @@ async function sendTelegramBotMessage(
   }
 }
 
+async function resolveBotUsername(botToken: string): Promise<string> {
+  const explicit = getEffectiveBotUsername();
+  if (explicit) return explicit;
+  if (!botToken) return '';
+  const cached = botUsernameCache.get(botToken);
+  if (cached) return cached;
+  try {
+    const meRes = await fetchWithTimeout(`https://api.telegram.org/bot${botToken}/getMe`, {}, 3500);
+    const meData = (await meRes.json()) as { ok?: boolean; result?: { username?: string } };
+    if (meData.ok && meData.result?.username) {
+      botUsernameCache.set(botToken, meData.result.username);
+      return meData.result.username;
+    }
+  } catch {
+    // ignore timeout/network failure
+  }
+  return '';
+}
+
 // ---- Official Auth Capabilities ----
 app.get('/api/auth/capabilities', async (_req, res) => {
   const botToken = getEffectiveBotToken();
-  let botUsername = getEffectiveBotUsername();
-
-  if (botToken && !botUsername) {
-    try {
-      const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
-      const meData = (await meRes.json()) as { ok?: boolean; result?: { username?: string } };
-      if (meData.ok && meData.result?.username) {
-        botUsername = meData.result.username;
-      }
-    } catch {
-      // ignore
-    }
-  }
+  const botUsername = await resolveBotUsername(botToken);
 
   const phoneOtpChannel = detectPhoneOtpChannel();
   const botReady = Boolean(botToken && botUsername);
@@ -512,18 +539,22 @@ app.post('/api/auth/phone/send-otp', async (req, res) => {
   if (channel === 'telegram_gateway') {
     try {
       const gwToken = getEffectiveGatewayToken();
-      const gwRes = await fetch('https://gatewayapi.telegram.org/sendVerificationMessage', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${gwToken}`,
-          'Content-Type': 'application/json',
+      const gwRes = await fetchWithTimeout(
+        'https://gatewayapi.telegram.org/sendVerificationMessage',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${gwToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            phone_number: phone,
+            code: otp,
+            ttl: 300,
+          }),
         },
-        body: JSON.stringify({
-          phone_number: phone,
-          code: otp,
-          ttl: 300,
-        }),
-      });
+        8000
+      );
       const gwData = (await gwRes.json()) as {
         ok?: boolean;
         error?: string;
@@ -569,7 +600,7 @@ app.post('/api/auth/phone/send-otp', async (req, res) => {
         From: tw.from,
         Body: `Emerald Brew Cafe: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp} (សុពលភាព ៥ នាទី)`,
       });
-      const twRes = await fetch(
+      const twRes = await fetchWithTimeout(
         `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(tw.sid)}/Messages.json`,
         {
           method: 'POST',
@@ -578,7 +609,8 @@ app.post('/api/auth/phone/send-otp', async (req, res) => {
             'Content-Type': 'application/x-www-form-urlencoded',
           },
           body: params.toString(),
-        }
+        },
+        8000
       );
       if (!twRes.ok) {
         const errBody = await twRes.text();
@@ -606,18 +638,22 @@ app.post('/api/auth/phone/send-otp', async (req, res) => {
   // 3. Official Custom SMS Webhook (PlasGate / MekongSMS / Local Gateway)
   const wh = getEffectiveSmsWebhook();
   try {
-    const whRes = await fetch(wh.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(wh.apiKey ? { Authorization: `Bearer ${wh.apiKey}`, 'X-API-Key': wh.apiKey } : {}),
+    const whRes = await fetchWithTimeout(
+      wh.url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(wh.apiKey ? { Authorization: `Bearer ${wh.apiKey}`, 'X-API-Key': wh.apiKey } : {}),
+        },
+        body: JSON.stringify({
+          to: phone,
+          code: otp,
+          message: `Emerald Brew Cafe: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp}`,
+        }),
       },
-      body: JSON.stringify({
-        to: phone,
-        code: otp,
-        message: `Emerald Brew Cafe: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp}`,
-      }),
-    });
+      8000
+    );
     if (!whRes.ok) {
       return res.status(502).json({ ok: false, error: 'SMS Gateway Webhook បានបដិសេធការផ្ញើ' });
     }
@@ -743,7 +779,6 @@ app.post('/api/auth/telegram/init-link', async (req, res) => {
   }
 
   const botToken = getEffectiveBotToken();
-  let botUsername = getEffectiveBotUsername();
 
   if (!botToken) {
     return res.status(503).json({
@@ -753,18 +788,7 @@ app.post('/api/auth/telegram/init-link', async (req, res) => {
     });
   }
 
-  if (!botUsername) {
-    try {
-      const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
-      const meData = (await meRes.json()) as { ok?: boolean; result?: { username?: string } };
-      if (meData.ok && meData.result?.username) {
-        botUsername = meData.result.username;
-      }
-    } catch {
-      // ignore
-    }
-  }
-
+  const botUsername = await resolveBotUsername(botToken);
   if (!botUsername) {
     return res.status(503).json({
       ok: false,
@@ -833,8 +857,10 @@ app.post('/api/auth/telegram/poll-link', async (req, res) => {
   }
 
   try {
-    const updRes = await fetch(
-      `https://api.telegram.org/bot${botToken}/getUpdates?offset=${db.lastTelegramUpdateOffset}&limit=30&timeout=0`
+    const updRes = await fetchWithTimeout(
+      `https://api.telegram.org/bot${botToken}/getUpdates?offset=${db.lastTelegramUpdateOffset}&limit=30&timeout=0`,
+      {},
+      4500
     );
     const updData = (await updRes.json()) as {
       ok?: boolean;
@@ -1155,6 +1181,20 @@ app.delete('/api/orders/:id', (req, res) => {
   flushDb();
   return res.json({ ok: true });
 });
+
+app.use(
+  (
+    err: unknown,
+    _req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    if (err && typeof err === 'object' && ('type' in err || err instanceof SyntaxError)) {
+      return res.status(400).json({ ok: false, error: 'ទិន្នន័យសំណើមិនត្រឹមត្រូវ ឬធំពេក' });
+    }
+    return next(err);
+  }
+);
 
 // ---- Vite Dev Middleware / Production Static Serving ----
 async function startServer() {

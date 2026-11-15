@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import L from 'leaflet';
 import { Crosshair, MapPin, Search, X } from 'lucide-react';
 import type { Coords, ShopSettings } from '../types';
-import { computeDeliveryFee, getDistanceKm } from '../utils/cafeUtils';
+import { computeDeliveryFee, fetchWithTimeout, getDistanceKm } from '../utils/cafeUtils';
 
 interface LocationPickerModalProps {
   isOpen: boolean;
@@ -29,31 +29,48 @@ const LANDMARKS = [
 export function makeResilientTileLayer(mode: 'street' | 'satellite') {
   const url =
     mode === 'satellite'
-      ? 'https://mt1.google.com/vt/lyrs=y&hl=km&x={x}&y={y}&z={z}'
-      : 'https://mt1.google.com/vt/lyrs=m&hl=km&x={x}&y={y}&z={z}';
-  const fallbackUrl =
-    mode === 'satellite'
       ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
       : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+  const fallbackUrl =
+    mode === 'satellite'
+      ? 'https://mt1.google.com/vt/lyrs=y&hl=km&x={x}&y={y}&z={z}'
+      : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
   const tl = L.tileLayer(url, { maxZoom: 20 });
   let loadedAny = false;
   let switched = false;
-  tl.on('tileload', () => {
-    loadedAny = true;
-  });
-  tl.on('tileerror', () => {
-    if (!switched) {
+  let removed = false;
+
+  const fallbackTimer = setTimeout(() => {
+    if (!loadedAny && !switched && !removed) {
       switched = true;
-      tl.setUrl(fallbackUrl);
-    }
-  });
-  setTimeout(() => {
-    if (!loadedAny && !switched) {
-      switched = true;
-      tl.setUrl(fallbackUrl);
+      try {
+        tl.setUrl(fallbackUrl);
+      } catch {
+        // ignore if layer disposed
+      }
     }
   }, 3500);
+
+  tl.on('tileload', () => {
+    loadedAny = true;
+    clearTimeout(fallbackTimer);
+  });
+  tl.on('tileerror', () => {
+    if (!switched && !removed) {
+      switched = true;
+      clearTimeout(fallbackTimer);
+      try {
+        tl.setUrl(fallbackUrl);
+      } catch {
+        // ignore if layer disposed
+      }
+    }
+  });
+  tl.on('remove', () => {
+    removed = true;
+    clearTimeout(fallbackTimer);
+  });
   return tl;
 }
 
@@ -74,18 +91,29 @@ export function LocationPickerModal({
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const shopMarkerRef = useRef<L.Marker | null>(null);
   const geoAbortRef = useRef<AbortController | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const geocodeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipMoveEndRef = useRef(false);
   const hasPickedRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   const [mapStyle, setMapStyle] = useState<'street' | 'satellite'>('street');
   const [searchQuery, setSearchQuery] = useState('');
+  const [searching, setSearching] = useState(false);
   const [gpsNote, setGpsNote] = useState('អូសផែនទីឱ្យចំទីតាំង');
   const [centerCoords, setCenterCoords] = useState<Coords>(initialCoords);
   const [addressText, setAddressText] = useState(initialAddress);
 
   const distKm = getDistanceKm(shopSettings.lat, shopSettings.lng, centerCoords.lat, centerCoords.lng);
   const fee = computeDeliveryFee(shopSettings, distKm, cartSubtotal);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const reverseGeocode = (lat: number, lng: number) => {
     setAddressText(`ទីតាំង (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
@@ -96,22 +124,28 @@ export function LocationPickerModal({
       try {
         const ctrl = new AbortController();
         geoAbortRef.current = ctrl;
-        const r = await fetch(
+        const r = await fetchWithTimeout(
           `https://nominatim.openstreetmap.org/reverse?format=json&accept-language=km,en&lat=${lat}&lon=${lng}`,
-          { signal: ctrl.signal }
+          { signal: ctrl.signal },
+          6500
         );
+        if (!r.ok) return;
         const d = await r.json();
-        if (d && d.display_name) {
+        if (isMountedRef.current && d && d.display_name) {
           setAddressText(d.display_name.split(',').slice(0, 3).join(', '));
         }
       } catch {
-        // ignore abort or offline
+        // ignore abort, timeout, or offline
       }
     }, 450);
   };
 
   useEffect(() => {
     if (!isOpen) {
+      if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current);
+      if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
+      if (geoAbortRef.current) geoAbortRef.current.abort();
+      if (searchAbortRef.current) searchAbortRef.current.abort();
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
@@ -149,6 +183,7 @@ export function LocationPickerModal({
         skipMoveEndRef.current = false;
       });
       m.on('moveend', () => {
+        if (!mapRef.current) return;
         const c = m.getCenter();
         setCenterCoords({ lat: c.lat, lng: c.lng });
         if (purpose === 'shop') {
@@ -166,14 +201,26 @@ export function LocationPickerModal({
       mapRef.current = m;
       tileLayerRef.current = tl;
       shopMarkerRef.current = sm;
-      setTimeout(() => m.invalidateSize(), 260);
+      invalidateTimerRef.current = setTimeout(() => {
+        try {
+          if (mapRef.current === m) m.invalidateSize();
+        } catch {
+          // ignore if unmounted
+        }
+      }, 260);
 
       if (purpose === 'customer' && !hasPickedRef.current) {
         detectUserGPS(false);
       }
     }, 180);
 
-    return () => clearTimeout(initTimer);
+    return () => {
+      clearTimeout(initTimer);
+      if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
+      if (geocodeTimerRef.current) clearTimeout(geocodeTimerRef.current);
+      if (geoAbortRef.current) geoAbortRef.current.abort();
+      if (searchAbortRef.current) searchAbortRef.current.abort();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, purpose]);
 
@@ -191,17 +238,26 @@ export function LocationPickerModal({
     }
     setCenterCoords({ lat, lng });
     hasPickedRef.current = true;
-    if (mapRef.current) mapRef.current.setView([lat, lng], 16, { animate: true });
+    if (mapRef.current) {
+      try {
+        mapRef.current.setView([lat, lng], 16, { animate: true });
+      } catch {
+        // ignore if disposing
+      }
+    }
     if (!label && purpose === 'customer') reverseGeocode(lat, lng);
   };
 
   const fallbackIPLocation = async () => {
     try {
-      const res = await fetch('https://get.geojs.io/v1/ip/geo.json');
+      const res = await fetchWithTimeout('https://get.geojs.io/v1/ip/geo.json', {}, 5000);
+      if (!res.ok) return;
       const d = await res.json();
+      if (!isMountedRef.current) return;
       if (d?.latitude && d?.longitude) {
         const lat = parseFloat(d.latitude);
         const lng = parseFloat(d.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
         if (mapRef.current) {
           skipMoveEndRef.current = true;
           mapRef.current.setView([lat, lng], 14, { animate: true });
@@ -210,7 +266,7 @@ export function LocationPickerModal({
         if (purpose === 'customer') reverseGeocode(lat, lng);
       }
     } catch {
-      // ignore
+      // ignore timeout/offline
     }
   };
 
@@ -229,6 +285,7 @@ export function LocationPickerModal({
     }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        if (!isMountedRef.current) return;
         setGpsNote('ចាប់ទីតាំង GPS បានជោគជ័យ!');
         const lat = pos.coords.latitude;
         const lng = pos.coords.longitude;
@@ -241,6 +298,7 @@ export function LocationPickerModal({
         if (purpose === 'customer') reverseGeocode(lat, lng);
       },
       () => {
+        if (!isMountedRef.current) return;
         if (!hasPickedRef.current && purpose === 'customer') fallbackIPLocation();
         setGpsNote(
           inIframe
@@ -257,24 +315,35 @@ export function LocationPickerModal({
 
   const handleSearch = async () => {
     const q = searchQuery.trim();
-    if (!q) return;
+    if (!q || searching) return;
     const coordMatch = q.match(/(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})/);
     if (coordMatch) {
       jumpTo(parseFloat(coordMatch[1]), parseFloat(coordMatch[2]));
       return;
     }
+    if (searchAbortRef.current) searchAbortRef.current.abort();
+    const ctrl = new AbortController();
+    searchAbortRef.current = ctrl;
+    setSearching(true);
     try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&accept-language=km,en&countrycodes=kh&limit=1&q=${encodeURIComponent(q)}`
+      const res = await fetchWithTimeout(
+        `https://nominatim.openstreetmap.org/search?format=json&accept-language=km,en&countrycodes=kh&limit=1&q=${encodeURIComponent(q)}`,
+        { signal: ctrl.signal },
+        7000
       );
       const d = await res.json();
+      if (!isMountedRef.current) return;
       if (d && d.length > 0) {
         jumpTo(parseFloat(d[0].lat), parseFloat(d[0].lon), d[0].display_name.split(',').slice(0, 2).join(', '));
       } else {
         onToast('រកមិនឃើញទីតាំងនេះទេ!');
       }
     } catch {
-      onToast('មិនអាចស្វែងរកទីតាំងបានទេ សូមអូសផែនទី!');
+      if (isMountedRef.current) {
+        onToast('មិនអាចស្វែងរកទីតាំងបានទេ សូមអូសផែនទី!');
+      }
+    } finally {
+      if (isMountedRef.current) setSearching(false);
     }
   };
 
@@ -367,10 +436,11 @@ export function LocationPickerModal({
                 </div>
                 <button
                   type="button"
+                  disabled={searching}
                   onClick={handleSearch}
-                  className="bg-[#0D4A3E] text-white px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap"
+                  className="bg-[#0D4A3E] disabled:opacity-60 text-white px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap"
                 >
-                  រក
+                  {searching ? '...' : 'រក'}
                 </button>
                 <button
                   type="button"

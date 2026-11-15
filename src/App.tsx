@@ -28,10 +28,17 @@ import {
   DEFAULT_MENU,
   DEFAULT_SETTINGS,
   DEFAULT_TOPPINGS,
+  fetchWithTimeout,
   getDiscountedPrice,
   getDistanceKm,
   getFirebaseBase,
+  handleImgFallback,
+  normalizeMenuItems,
+  normalizeOrders,
+  normalizeShopSettings,
+  normalizeToppings,
   playDingSound,
+  resolveAssetUrl,
   safeGet,
   safeSessionDel,
   safeSessionGet,
@@ -50,27 +57,18 @@ import { AdminDashboard, AdminPinModal } from './components/AdminDashboard';
 export default function App() {
   const shouldReduceMotion = useReducedMotion();
 
-  const [menuItems, setMenuItems] = useState<MenuItem[]>(() => {
-    const stored = safeGet<MenuItem[]>('cafe_menu_v15', DEFAULT_MENU);
-    return Array.isArray(stored) ? stored : DEFAULT_MENU;
-  });
-  const [toppings, setToppings] = useState<Topping[]>(() => {
-    const stored = safeGet<Topping[]>('cafe_toppings_v15', DEFAULT_TOPPINGS);
-    return Array.isArray(stored) ? stored : DEFAULT_TOPPINGS;
-  });
-  const [shopSettings, setShopSettings] = useState<ShopSettings>(() => {
-    const stored = safeGet<Partial<ShopSettings>>('cafe_settings_v15', {});
-    return {
-      ...DEFAULT_SETTINGS,
-      ...stored,
-      lat: parseFloat(String(stored.lat)) || DEFAULT_SETTINGS.lat,
-      lng: parseFloat(String(stored.lng)) || DEFAULT_SETTINGS.lng,
-    };
-  });
-  const [orders, setOrders] = useState<Order[]>(() => {
-    const stored = safeGet<Order[]>('cafe_orders_v15', []);
-    return Array.isArray(stored) ? stored : [];
-  });
+  const [menuItems, setMenuItems] = useState<MenuItem[]>(() =>
+    normalizeMenuItems(safeGet<MenuItem[]>('cafe_menu_v15', DEFAULT_MENU))
+  );
+  const [toppings, setToppings] = useState<Topping[]>(() =>
+    normalizeToppings(safeGet<Topping[]>('cafe_toppings_v15', DEFAULT_TOPPINGS))
+  );
+  const [shopSettings, setShopSettings] = useState<ShopSettings>(() =>
+    normalizeShopSettings(safeGet<Partial<ShopSettings>>('cafe_settings_v15', {}), DEFAULT_SETTINGS)
+  );
+  const [orders, setOrders] = useState<Order[]>(() =>
+    normalizeOrders(safeGet<Order[]>('cafe_orders_v15', []))
+  );
   const [members, setMembers] = useState<Member[]>(() => {
     const stored = safeGet<Member[]>('cafe_members_v15', []);
     return Array.isArray(stored) ? stored : [];
@@ -87,6 +85,7 @@ export default function App() {
   );
   const [activeDriverOrderId, setActiveDriverOrderId] = useState<string | null>(null);
   const [liveTrackOrderId, setLiveTrackOrderId] = useState<string | null>(null);
+  const [ordersLoadedOnce, setOrdersLoadedOnce] = useState(false);
 
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
@@ -117,12 +116,27 @@ export default function App() {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastOrderCountRef = useRef(orders.length);
+  const isFetchingOrdersRef = useRef(false);
+  const clearingOrdersRef = useRef(false);
+  const lastOrdersSigRef = useRef('');
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToastMsg(null), 2800);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (cart.length === 0 && isCartOpen) {
+      setIsCartOpen(false);
+    }
+  }, [cart.length, isCartOpen]);
 
   useEffect(() => {
     safeSet('cafe_menu_v15', menuItems);
@@ -148,18 +162,22 @@ export default function App() {
     async (nextMenu: MenuItem[], nextToppings: Topping[], nextSettings: ShopSettings) => {
       if (adminToken) {
         try {
-          await fetch('/api/shop', {
-            method: 'PUT',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${adminToken}`,
+          await fetchWithTimeout(
+            '/api/shop',
+            {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${adminToken}`,
+              },
+              body: JSON.stringify({
+                menuItems: nextMenu,
+                toppings: nextToppings,
+                shopSettings: nextSettings,
+              }),
             },
-            body: JSON.stringify({
-              menuItems: nextMenu,
-              toppings: nextToppings,
-              shopSettings: nextSettings,
-            }),
-          });
+            10000
+          );
         } catch {
           // ignore
         }
@@ -167,15 +185,19 @@ export default function App() {
       const b = getFirebaseBase(nextSettings.firebaseUrl);
       if (b) {
         try {
-          await fetch(`${b}/shop.json`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              menuItems: nextMenu,
-              toppings: nextToppings,
-              shopSettings: nextSettings,
-            }),
-          });
+          await fetchWithTimeout(
+            `${b}/shop.json`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                menuItems: nextMenu,
+                toppings: nextToppings,
+                shopSettings: nextSettings,
+              }),
+            },
+            8000
+          );
         } catch {
           // ignore
         }
@@ -187,22 +209,30 @@ export default function App() {
   const syncOrderEverywhere = useCallback(
     async (order: Order) => {
       try {
-        await fetch('/api/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(order),
-        });
+        await fetchWithTimeout(
+          '/api/orders',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(order),
+          },
+          10000
+        );
       } catch {
         // ignore
       }
       const b = getFirebaseBase(shopSettings.firebaseUrl);
       if (b) {
         try {
-          await fetch(`${b}/orders/${encodeURIComponent(order.id)}.json`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(order),
-          });
+          await fetchWithTimeout(
+            `${b}/orders/${encodeURIComponent(order.id)}.json`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(order),
+            },
+            8000
+          );
         } catch {
           // ignore
         }
@@ -211,49 +241,67 @@ export default function App() {
     [shopSettings.firebaseUrl]
   );
 
+  const applyFetchedOrders = useCallback(
+    (incoming: Order[]) => {
+      const sorted = [...incoming].sort((a, b2) => (b2.createdAt || 0) - (a.createdAt || 0));
+      const sig = sorted
+        .map(
+          (o) =>
+            `${o.id}:${o.status}:${o.driverCoords?.lat ?? ''},${o.driverCoords?.lng ?? ''}:${o.customer?.coords?.lat ?? ''},${o.customer?.coords?.lng ?? ''}`
+        )
+        .join('|');
+      if (sorted.length > lastOrderCountRef.current && isAdminUnlocked) {
+        playDingSound();
+        showToast('🔔 មានការកម្ម៉ង់ថ្មីចូល!');
+      }
+      lastOrderCountRef.current = sorted.length;
+      if (sig !== lastOrdersSigRef.current) {
+        lastOrdersSigRef.current = sig;
+        setOrders(sorted);
+      }
+      setOrdersLoadedOnce(true);
+    },
+    [isAdminUnlocked, showToast]
+  );
+
   const fetchOrdersFromSources = useCallback(async () => {
-    const b = getFirebaseBase(shopSettings.firebaseUrl);
-    if (b) {
-      try {
-        const r = await fetch(`${b}/orders.json`);
-        if (r.ok) {
-          const d = await r.json();
-          if (d && typeof d === 'object') {
-            const list = (Object.values(d) as Order[])
-              .filter(Boolean)
-              .sort((a, b2) => (b2.createdAt || 0) - (a.createdAt || 0));
-            if (list.length > lastOrderCountRef.current && isAdminUnlocked) {
-              playDingSound();
-              showToast('🔔 មានការកម្ម៉ង់ថ្មីចូល!');
+    if (isFetchingOrdersRef.current || clearingOrdersRef.current) return;
+    isFetchingOrdersRef.current = true;
+    try {
+      const b = getFirebaseBase(shopSettings.firebaseUrl);
+      if (b) {
+        try {
+          const r = await fetchWithTimeout(`${b}/orders.json`, {}, 7000);
+          if (r.ok) {
+            const d = await r.json();
+            if (d && typeof d === 'object') {
+              const list = normalizeOrders(Object.values(d));
+              applyFetchedOrders(list);
+              return;
             }
-            lastOrderCountRef.current = list.length;
-            setOrders(list);
-            return;
+          }
+        } catch {
+          // fallback to server
+        }
+      }
+
+      try {
+        const r = await fetchWithTimeout('/api/orders', {}, 8000);
+        if (r.ok) {
+          const data = (await r.json()) as { ok?: boolean; orders?: Order[] };
+          if (data.ok && Array.isArray(data.orders)) {
+            applyFetchedOrders(normalizeOrders(data.orders));
           }
         }
       } catch {
-        // fallback to server
+        // ignore network hiccup
+      } finally {
+        setOrdersLoadedOnce(true);
       }
+    } finally {
+      isFetchingOrdersRef.current = false;
     }
-
-    try {
-      const r = await fetch('/api/orders');
-      if (r.ok) {
-        const data = (await r.json()) as { ok?: boolean; orders?: Order[] };
-        if (data.ok && Array.isArray(data.orders)) {
-          const sorted = [...data.orders].sort((a, b2) => (b2.createdAt || 0) - (a.createdAt || 0));
-          if (sorted.length > lastOrderCountRef.current && isAdminUnlocked) {
-            playDingSound();
-            showToast('🔔 មានការកម្ម៉ង់ថ្មីចូល!');
-          }
-          lastOrderCountRef.current = sorted.length;
-          if (sorted.length > 0) setOrders(sorted);
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }, [shopSettings.firebaseUrl, isAdminUnlocked, showToast]);
+  }, [shopSettings.firebaseUrl, applyFetchedOrders]);
 
   const handleAuthenticated = useCallback((member: Member, token: string | null) => {
     setCurrentMember(member);
@@ -295,25 +343,20 @@ export default function App() {
     }
 
     // Load shop menu/settings from persistent server DB
-    fetch('/api/shop')
+    fetchWithTimeout('/api/shop', {}, 9000)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!data?.ok) return;
-        if (Array.isArray(data.menuItems)) setMenuItems(data.menuItems);
-        if (Array.isArray(data.toppings)) setToppings(data.toppings);
+        if (Array.isArray(data.menuItems)) setMenuItems(normalizeMenuItems(data.menuItems));
+        if (Array.isArray(data.toppings)) setToppings(normalizeToppings(data.toppings));
         if (data.shopSettings) {
-          setShopSettings((prev) => ({
-            ...prev,
-            ...data.shopSettings,
-            lat: parseFloat(String(data.shopSettings.lat)) || prev.lat,
-            lng: parseFloat(String(data.shopSettings.lng)) || prev.lng,
-          }));
+          setShopSettings((prev) => normalizeShopSettings(data.shopSettings, prev));
         }
       })
       .catch(() => {});
 
     if (authToken) {
-      fetch('/api/auth/me', { headers: { Authorization: `Bearer ${authToken}` } })
+      fetchWithTimeout('/api/auth/me', { headers: { Authorization: `Bearer ${authToken}` } }, 8000)
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (data?.ok && data.member) setCurrentMember(data.member);
@@ -328,11 +371,15 @@ export default function App() {
     const tgWebApp = (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram
       ?.WebApp;
     if (tgWebApp?.initData) {
-      fetch('/api/auth/telegram/verify-webapp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData: tgWebApp.initData }),
-      })
+      fetchWithTimeout(
+        '/api/auth/telegram/verify-webapp',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initData: tgWebApp.initData }),
+        },
+        8000
+      )
         .then((r) => r.json())
         .then((data) => {
           if (data?.ok && data.member) handleAuthenticated(data.member, data.token || null);
@@ -347,8 +394,10 @@ export default function App() {
   useEffect(() => {
     if (!isAdminUnlocked && !liveTrackOrderId && viewMode !== 'driver') return;
     const timer = setInterval(() => {
-      fetchOrdersFromSources();
-    }, 3000);
+      if (document.visibilityState !== 'hidden') {
+        fetchOrdersFromSources();
+      }
+    }, 3500);
     return () => clearInterval(timer);
   }, [isAdminUnlocked, liveTrackOrderId, viewMode, fetchOrdersFromSources]);
 
@@ -420,10 +469,10 @@ export default function App() {
 
   const handleChangeCartQty = (idx: number, delta: number) => {
     setCart((prev) => {
+      if (!prev[idx]) return prev;
       const next = [...prev];
       next[idx] = { ...next[idx], qty: next[idx].qty + delta };
       if (next[idx].qty <= 0) next.splice(idx, 1);
-      if (!next.length) setIsCartOpen(false);
       return next;
     });
   };
@@ -466,7 +515,7 @@ export default function App() {
     setCart([]);
     setIsCartOpen(false);
 
-    syncOrderEverywhere(newOrder);
+    await syncOrderEverywhere(newOrder);
 
     const itemsTxt = newOrder.items
       .map((i) => `• ${i.qty}x ${i.name} (${i.options}) = $${(i.unitPrice * i.qty).toFixed(2)}`)
@@ -486,10 +535,13 @@ export default function App() {
         )}`
       : '';
 
+    setReceiptState({ order: newOrder, tgUrl });
     if (payload.sendTg && tgUrl) {
-      window.open(tgUrl, '_blank', 'noopener,noreferrer');
-    } else {
-      setReceiptState({ order: newOrder, tgUrl });
+      try {
+        window.open(tgUrl, '_blank', 'noopener,noreferrer');
+      } catch {
+        // receipt modal already provides direct <a> fallback
+      }
     }
   };
 
@@ -581,6 +633,31 @@ export default function App() {
         />
       )}
 
+      {viewMode === 'driver' && !activeDriverOrder && (
+        <div className="min-h-screen flex items-center justify-center p-4">
+          <div className="bg-white max-w-sm w-full rounded-3xl border border-slate-200 p-6 text-center space-y-3 shadow-lg">
+            <p className="text-3xl">🛵</p>
+            <h2 className="font-bold text-base text-slate-900">
+              {ordersLoadedOnce
+                ? `រកមិនឃើញការកម្ម៉ង់ ${activeDriverOrderId || ''} ទេ`
+                : 'កំពុងទាញយកព័ត៌មានដឹកជញ្ជូន...'}
+            </h2>
+            <p className="text-xs text-slate-500">
+              {ordersLoadedOnce
+                ? 'ការកម្ម៉ង់នេះប្រហែលត្រូវបានលុប ឬផុតកំណត់ហើយ។'
+                : 'សូមរង់ចាំបន្តិច...'}
+            </p>
+            <button
+              type="button"
+              onClick={() => setViewMode(isAdminUnlocked ? 'admin' : 'customer')}
+              className="w-full bg-[#0D4A3E] text-white font-bold py-2.5 rounded-xl text-xs"
+            >
+              ត្រឡប់ទៅទំព័រដើម
+            </button>
+          </div>
+        </div>
+      )}
+
       {viewMode === 'admin' && (
         <AdminDashboard
           adminToken={adminToken}
@@ -617,15 +694,26 @@ export default function App() {
           onClearCompletedOrders={async () => {
             const completed = orders.filter((o) => o.status === 'Completed');
             const remaining = orders.filter((o) => o.status !== 'Completed');
+            clearingOrdersRef.current = true;
             setOrders(remaining);
             lastOrderCountRef.current = remaining.length;
-            if (adminToken) {
-              for (const o of completed) {
-                fetch(`/api/orders/${encodeURIComponent(o.id)}`, {
-                  method: 'DELETE',
-                  headers: { Authorization: `Bearer ${adminToken}` },
-                }).catch(() => {});
+            try {
+              if (adminToken && completed.length > 0) {
+                await Promise.allSettled(
+                  completed.map((o) =>
+                    fetchWithTimeout(
+                      `/api/orders/${encodeURIComponent(o.id)}`,
+                      {
+                        method: 'DELETE',
+                        headers: { Authorization: `Bearer ${adminToken}` },
+                      },
+                      8000
+                    )
+                  )
+                );
               }
+            } finally {
+              clearingOrdersRef.current = false;
             }
             showToast('បានសម្អាត Order ដែលរួចរាល់!');
           }}
@@ -652,12 +740,10 @@ export default function App() {
                   className="flex items-center gap-2.5 text-base sm:text-lg font-bold tracking-tight text-[#0D4A3E] whitespace-nowrap shrink-0"
                 >
                   <img
-                    src={shopSettings.logoImg || CAFE_ASSETS.logoEmblem}
+                    src={resolveAssetUrl(shopSettings.logoImg, CAFE_ASSETS.logoEmblem)}
                     alt={shopSettings.brandTitle}
                     referrerPolicy="no-referrer"
-                    onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).src = CAFE_ASSETS.logoEmblem;
-                    }}
+                    onError={(e) => handleImgFallback(e, CAFE_ASSETS.logoEmblem)}
                     className="w-9 h-9 rounded-full object-cover border border-amber-400/70 bg-[#0D4A3E]"
                   />
                   <span>{shopSettings.brandTitle}</span>
@@ -839,12 +925,10 @@ export default function App() {
                   className="lg:col-span-5 relative rounded-3xl overflow-hidden min-h-[220px] lg:h-full bg-slate-900"
                 >
                   <img
-                    src={shopSettings.bannerImg || CAFE_ASSETS.heroBanner}
+                    src={resolveAssetUrl(shopSettings.bannerImg, CAFE_ASSETS.heroBanner)}
                     alt={shopSettings.brandTitle}
                     referrerPolicy="no-referrer"
-                    onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).src = CAFE_ASSETS.heroBanner;
-                    }}
+                    onError={(e) => handleImgFallback(e, CAFE_ASSETS.heroBanner)}
                     className="w-full h-full object-cover"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/35 to-transparent p-6 flex flex-col justify-end">
@@ -914,12 +998,10 @@ export default function App() {
                           <div>
                             <div className="aspect-[4/3] w-full rounded-xl overflow-hidden bg-slate-100 mb-3 relative">
                               <img
-                                src={item.img || CAFE_ASSETS.icedLatte}
+                                src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
                                 alt={item.name}
                                 referrerPolicy="no-referrer"
-                                onError={(e) => {
-                                  (e.currentTarget as HTMLImageElement).src = CAFE_ASSETS.icedLatte;
-                                }}
+                                onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
                                 className="w-full h-full object-cover"
                               />
                             </div>

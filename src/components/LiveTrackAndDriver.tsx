@@ -49,15 +49,25 @@ export function LiveTrackModal({
       return;
     }
 
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const t = setTimeout(() => {
       if (!mapElRef.current || mapRef.current) return;
       const m = L.map(mapElRef.current, { zoomControl: true }).setView([dLat, dLng], 15);
       makeResilientTileLayer('street').addTo(m);
       mapRef.current = m;
-      m.invalidateSize();
+      resizeTimer = setTimeout(() => {
+        try {
+          if (mapRef.current === m) m.invalidateSize();
+        } catch {
+          // ignore
+        }
+      }, 150);
     }, 180);
 
-    return () => clearTimeout(t);
+    return () => {
+      clearTimeout(t);
+      if (resizeTimer) clearTimeout(resizeTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Boolean(order)]);
 
@@ -121,7 +131,8 @@ export function LiveTrackModal({
         onUpdateCustomerCoords(order.id, { lat: p.coords.latitude, lng: p.coords.longitude });
         onToast('បានអាប់ដេតទីតាំង Live ហើយ!');
       },
-      () => onToast('សូមបើក GPS លើទូរស័ព្ទ!')
+      () => onToast('សូមបើក GPS លើទូរស័ព្ទ!'),
+      { enableHighAccuracy: true, timeout: 7000, maximumAge: 5000 }
     );
   };
 
@@ -226,6 +237,8 @@ export function DriverConsole({
   const lineRef = useRef<L.Polyline | null>(null);
 
   const watchIdRef = useRef<number | null>(null);
+  const lastGpsSentAtRef = useRef(0);
+  const lastGpsCoordsRef = useRef<Coords | null>(null);
   const [gpsActive, setGpsActive] = useState(false);
 
   const cLat = order.customer?.coords?.lat ?? shopSettings.lat;
@@ -235,16 +248,24 @@ export function DriverConsole({
   const distKm = getDistanceKm(dLat, dLng, cLat, cLng);
 
   useEffect(() => {
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const t = setTimeout(() => {
       if (!mapElRef.current || mapRef.current) return;
       const m = L.map(mapElRef.current, { zoomControl: true }).setView([dLat, dLng], 15);
       makeResilientTileLayer('street').addTo(m);
       mapRef.current = m;
-      m.invalidateSize();
+      resizeTimer = setTimeout(() => {
+        try {
+          if (mapRef.current === m) m.invalidateSize();
+        } catch {
+          // ignore
+        }
+      }, 150);
     }, 150);
 
     return () => {
       clearTimeout(t);
+      if (resizeTimer) clearTimeout(resizeTimer);
       if (watchIdRef.current !== null && navigator.geolocation) {
         navigator.geolocation.clearWatch(watchIdRef.current);
       }
@@ -319,7 +340,16 @@ export function DriverConsole({
     setGpsActive(true);
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
-        onUpdateDriverCoords(order.id, { lat: pos.coords.latitude, lng: pos.coords.longitude }, 'Ready');
+        const now = Date.now();
+        const nextCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        const prev = lastGpsCoordsRef.current;
+        const movedKm = prev ? getDistanceKm(prev.lat, prev.lng, nextCoords.lat, nextCoords.lng) : 999;
+        if (now - lastGpsSentAtRef.current < 3000 && movedKm < 0.008) {
+          return;
+        }
+        lastGpsSentAtRef.current = now;
+        lastGpsCoordsRef.current = nextCoords;
+        onUpdateDriverCoords(order.id, nextCoords, 'Ready');
       },
       () => {
         onToast('មិនអាចចាប់សញ្ញា GPS បានទេ! សូមបើក Location Services លើទូរស័ព្ទ');
@@ -329,7 +359,7 @@ export function DriverConsole({
           watchIdRef.current = null;
         }
       },
-      { enableHighAccuracy: true }
+      { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 }
     );
   };
 

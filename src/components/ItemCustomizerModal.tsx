@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Minus, Plus, X } from 'lucide-react';
 import type { MenuItem, Topping } from '../types';
-import { CAFE_ASSETS, getDiscountedPrice } from '../utils/cafeUtils';
+import { CAFE_ASSETS, getDiscountedPrice, handleImgFallback, resolveAssetUrl } from '../utils/cafeUtils';
 
 interface ItemCustomizerModalProps {
   item: MenuItem | null;
@@ -39,10 +39,8 @@ export function ItemCustomizerModal({ item, toppings, onClose, onAddToCart }: It
     setNote('');
   }, [item]);
 
-  if (!item) return null;
-
-  const isDrink = item.type !== 'food';
-  const basePrice = getDiscountedPrice(item);
+  const isDrink = item ? item.type !== 'food' : true;
+  const basePrice = item ? getDiscountedPrice(item) : 0;
   const sizeExtra = isDrink ? parseFloat(size.split('|')[1]) || 0 : 0;
   const availableToppings = toppings.filter((t) => t.available);
   const toppingsExtra = isDrink
@@ -57,6 +55,7 @@ export function ItemCustomizerModal({ item, toppings, onClose, onAddToCart }: It
   };
 
   const handleConfirm = () => {
+    if (!item) return;
     let options = '';
     if (isDrink) {
       const szLabel = size.split('|')[0];
@@ -72,8 +71,8 @@ export function ItemCustomizerModal({ item, toppings, onClose, onAddToCart }: It
     if (note.trim()) options += ` (${note.trim()})`;
     onAddToCart({
       name: item.name,
-      img: item.img,
-      qty,
+      img: resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte),
+      qty: Math.min(99, Math.max(1, qty)),
       unitPrice,
       options,
     });
@@ -82,43 +81,44 @@ export function ItemCustomizerModal({ item, toppings, onClose, onAddToCart }: It
 
   return (
     <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-slate-950/55 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
-        onClick={(e) => {
-          if (e.target === e.currentTarget) onClose();
-        }}
-      >
+      {item && (
         <motion.div
-          initial={{ y: 40, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          exit={{ y: 30, opacity: 0 }}
-          transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-          className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 overflow-y-auto shadow-2xl"
-          style={{ maxHeight: '88vh' }}
+          key="customizer-backdrop"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-slate-950/55 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onClose();
+          }}
         >
-          <div className="flex justify-between items-start gap-3 mb-4">
-            <div className="flex gap-3 items-center min-w-0">
-              <img
-                src={item.img || CAFE_ASSETS.icedLatte}
-                alt={item.name}
-                referrerPolicy="no-referrer"
-                onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).src = CAFE_ASSETS.icedLatte;
-                }}
-                className="w-16 h-16 rounded-2xl object-cover bg-slate-100 shrink-0"
-              />
-              <div className="min-w-0">
-                <h3 className="font-bold text-base text-slate-900 truncate">{item.name}</h3>
-                <p className="text-xs text-slate-500 line-clamp-2">{item.desc}</p>
-                <p className="text-sm font-bold font-mono-num text-[#0D4A3E] mt-0.5">
-                  ${basePrice.toFixed(2)}
-                  {item.discount > 0 ? ` (-${item.discount}%)` : ''}
-                </p>
+          <motion.div
+            key={item.id}
+            initial={{ y: 40, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 30, opacity: 0 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 320 }}
+            className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 overflow-y-auto shadow-2xl"
+            style={{ maxHeight: '88vh' }}
+          >
+            <div className="flex justify-between items-start gap-3 mb-4">
+              <div className="flex gap-3 items-center min-w-0">
+                <img
+                  src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
+                  alt={item.name}
+                  referrerPolicy="no-referrer"
+                  onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
+                  className="w-16 h-16 rounded-2xl object-cover bg-slate-100 shrink-0"
+                />
+                <div className="min-w-0">
+                  <h3 className="font-bold text-base text-slate-900 truncate">{item.name}</h3>
+                  <p className="text-xs text-slate-500 line-clamp-2">{item.desc}</p>
+                  <p className="text-sm font-bold font-mono-num text-[#0D4A3E] mt-0.5">
+                    ${basePrice.toFixed(2)}
+                    {item.discount > 0 ? ` (-${item.discount}%)` : ''}
+                  </p>
+                </div>
               </div>
-            </div>
             <button
               type="button"
               onClick={onClose}
@@ -298,8 +298,9 @@ export function ItemCustomizerModal({ item, toppings, onClose, onAddToCart }: It
               ដាក់កន្ត្រក · ${(unitPrice * qty).toFixed(2)}
             </button>
           </div>
+          </motion.div>
         </motion.div>
-      </motion.div>
+      )}
     </AnimatePresence>
   );
 }

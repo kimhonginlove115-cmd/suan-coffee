@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { CheckCircle2, KeyRound, LogOut, Phone, Send, ShieldCheck, Smartphone, X } from 'lucide-react';
 import type { AuthCapabilities, Member, ShopSettings } from '../types';
+import { fetchWithTimeout } from '../utils/cafeUtils';
 import { SecurityShieldIllustration } from './AnimatedIllustrations';
 
 interface AuthModalProps {
@@ -46,6 +47,7 @@ export function AuthModal({
   const [normalizedPhone, setNormalizedPhone] = useState('');
   const [deliveredChannel, setDeliveredChannel] = useState('');
   const otpInputsRef = useRef<Array<HTMLInputElement | null>>([]);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Telegram Bot 1-click link & Share Contact state
   const [tgLinkNonce, setTgLinkNonce] = useState<string | null>(null);
@@ -63,14 +65,18 @@ export function AuthModal({
   useEffect(() => {
     if (!isOpen) {
       setErrorMsg('');
+      setLoading(false);
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
       return;
     }
-    fetch('/api/auth/capabilities')
-      .then((r) => r.json())
+    const ctrl = new AbortController();
+    fetchWithTimeout('/api/auth/capabilities', { signal: ctrl.signal }, 8000)
+      .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.ok) setCapabilities(data);
       })
       .catch(() => {});
+    return () => ctrl.abort();
   }, [isOpen]);
 
   // Mount Official Telegram Login Widget when botUsername + botToken are configured on server
@@ -84,11 +90,15 @@ export function AuthModal({
       setErrorMsg('');
       setLoading(true);
       try {
-        const res = await fetch('/api/auth/telegram/verify-widget', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(tgUser),
-        });
+        const res = await fetchWithTimeout(
+          '/api/auth/telegram/verify-widget',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(tgUser),
+          },
+          10000
+        );
         const data = await res.json();
         if (!data.ok || !data.member) {
           setErrorMsg(data.error || 'ការផ្ទៀងផ្ទាត់ Telegram មិនជោគជ័យទេ');
@@ -134,14 +144,33 @@ export function AuthModal({
   useEffect(() => {
     if (!isOpen || !tgLinkNonce || currentMember) return;
     setIsPollingTg(true);
+    let inFlight = false;
+    let consecutiveErrors = 0;
+    const ctrl = new AbortController();
+
     const interval = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
-        const res = await fetch('/api/auth/telegram/poll-link', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nonce: tgLinkNonce }),
-        });
+        const res = await fetchWithTimeout(
+          '/api/auth/telegram/poll-link',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nonce: tgLinkNonce }),
+            signal: ctrl.signal,
+          },
+          8000
+        );
+        if (res.status === 404) {
+          clearInterval(interval);
+          setIsPollingTg(false);
+          setTgLinkNonce(null);
+          setErrorMsg('តំណភ្ជាប់ Telegram ផុតកំណត់ហើយ សូមចុចបង្កើតថ្មី');
+          return;
+        }
         const data = await res.json();
+        consecutiveErrors = 0;
         if (data.step === 'awaiting_contact' || data.step === 'awaiting_start') {
           setTgPollStep(data.step);
         }
@@ -158,29 +187,42 @@ export function AuthModal({
           onClose();
         }
       } catch {
-        // ignore transient poll error
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= 10) {
+          clearInterval(interval);
+          setIsPollingTg(false);
+          setErrorMsg('ការតភ្ជាប់ Telegram យឺតពេក សូមសាកល្បងម្តងទៀត');
+        }
+      } finally {
+        inFlight = false;
       }
-    }, 2000);
+    }, 2200);
 
     return () => {
+      ctrl.abort();
       clearInterval(interval);
       setIsPollingTg(false);
     };
   }, [isOpen, tgLinkNonce, tgLinkMode, currentMember, onAuthenticated, onToast, onClose]);
 
   const handleInitBotDeepLink = async (mode: 'login' | 'contact' = 'login') => {
+    if (loading) return;
     setErrorMsg('');
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/telegram/init-link', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode,
-          name: name.trim(),
-          phone: mode === 'login' ? phone.trim() : '',
-        }),
-      });
+      const res = await fetchWithTimeout(
+        '/api/auth/telegram/init-link',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode,
+            name: name.trim(),
+            phone: mode === 'login' ? phone.trim() : '',
+          }),
+        },
+        10000
+      );
       const data = await res.json();
       if (!data.ok) {
         setErrorMsg(data.error || 'មិនអាចបង្កើតតំណភ្ជាប់ Bot បានទេ');
@@ -190,11 +232,8 @@ export function AuthModal({
       setTgPollStep('awaiting_start');
       setTgLinkNonce(data.nonce);
       setTgDeepLink(data.deepLink);
-      if (data.deepLink) {
-        window.open(data.deepLink, '_blank', 'noopener,noreferrer');
-      }
     } catch {
-      setErrorMsg('មានបញ្ហាភ្ជាប់ទៅ Server');
+      setErrorMsg('មានបញ្ហាភ្ជាប់ទៅ Server (Timeout)');
     } finally {
       setLoading(false);
     }
@@ -202,6 +241,7 @@ export function AuthModal({
 
   const handleSendPhoneOtp = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setErrorMsg('');
     if (!phone.trim()) {
       setErrorMsg('សូមបញ្ចូលលេខទូរស័ព្ទរបស់អ្នក');
@@ -209,14 +249,18 @@ export function AuthModal({
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/phone/send-otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          phone: phone.trim(),
-        }),
-      });
+      const res = await fetchWithTimeout(
+        '/api/auth/phone/send-otp',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: name.trim(),
+            phone: phone.trim(),
+          }),
+        },
+        12000
+      );
       const data = await res.json();
       if (!data.ok) {
         setErrorMsg(data.error || 'មិនអាចផ្ញើលេខកូដ OTP បានទេ');
@@ -228,7 +272,8 @@ export function AuthModal({
       setOtpCountdown(data.expiresInSeconds || 300);
       setOtpDigits(['', '', '', '', '', '']);
       onToast('បានផ្ញើលេខកូដ OTP ៦ ខ្ទង់រួចរាល់!');
-      setTimeout(() => otpInputsRef.current[0]?.focus(), 120);
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+      focusTimerRef.current = setTimeout(() => otpInputsRef.current[0]?.focus(), 120);
     } catch {
       setErrorMsg('មានបញ្ហាភ្ជាប់ទៅ Server សូមព្យាយាមម្តងទៀត');
     } finally {
@@ -254,6 +299,7 @@ export function AuthModal({
 
   const handleVerifyPhoneOtp = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setErrorMsg('');
     const code = otpDigits.join('');
     if (code.length !== 6) {
@@ -262,15 +308,19 @@ export function AuthModal({
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/phone/verify-otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phone: normalizedPhone || phone.trim(),
-          code,
-          name: name.trim(),
-        }),
-      });
+      const res = await fetchWithTimeout(
+        '/api/auth/phone/verify-otp',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone: normalizedPhone || phone.trim(),
+            code,
+            name: name.trim(),
+          }),
+        },
+        10000
+      );
       const data = await res.json();
       if (!data.ok) {
         setErrorMsg(data.error || 'លេខកូដ OTP មិនត្រឹមត្រូវទេ');
@@ -491,17 +541,20 @@ export function AuthModal({
                             </button>
 
                             {tgLinkNonce && tgLinkMode === 'login' && tgDeepLink && (
-                              <div className="bg-white border border-sky-200 rounded-xl p-2.5 text-[11px] text-slate-700 flex items-center justify-between gap-2">
-                                <span>
-                                  កូដ៖ <strong className="font-mono-num text-sky-700">{tgLinkNonce}</strong>
-                                </span>
+                              <div className="bg-white border border-sky-200 rounded-xl p-3 text-[11px] text-slate-700 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span>
+                                    កូដ៖ <strong className="font-mono-num text-sky-700">{tgLinkNonce}</strong>
+                                  </span>
+                                  <span className="text-slate-400">សុពលភាព ១០ នាទី</span>
+                                </div>
                                 <a
                                   href={tgDeepLink}
                                   target="_blank"
                                   rel="noreferrer"
-                                  className="text-sky-600 font-bold underline whitespace-nowrap"
+                                  className="block w-full text-center bg-sky-50 hover:bg-sky-100 text-sky-700 font-bold py-2 rounded-lg border border-sky-200"
                                 >
-                                  បើក Bot ម្តងទៀត
+                                  ចុចទីនេះដើម្បីបើក Telegram Bot ↗
                                 </a>
                               </div>
                             )}
@@ -563,22 +616,22 @@ export function AuthModal({
                           </button>
 
                           {tgLinkNonce && tgLinkMode === 'contact' && tgDeepLink && (
-                            <div className="bg-white border border-emerald-200 rounded-xl p-3 space-y-1.5 text-[11px] text-slate-700">
+                            <div className="bg-white border border-emerald-200 rounded-xl p-3 space-y-2 text-[11px] text-slate-700">
                               <div className="flex items-center justify-between gap-2">
                                 <span className="font-bold text-[#0D4A3E]">
                                   {tgPollStep === 'awaiting_contact'
                                     ? 'ជំហាន ២/២៖ ចុច «📱 ចុចផ្ញើលេខទូរស័ព្ទផ្ទៀងផ្ទាត់» ក្នុង Bot'
                                     : 'ជំហាន ១/២៖ ចុច Start ក្នុង Telegram Bot'}
                                 </span>
-                                <a
-                                  href={tgDeepLink}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-sky-600 font-bold underline whitespace-nowrap"
-                                >
-                                  បើក Bot
-                                </a>
                               </div>
+                              <a
+                                href={tgDeepLink}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="block w-full text-center bg-emerald-50 hover:bg-emerald-100 text-[#0D4A3E] font-bold py-2 rounded-lg border border-emerald-200"
+                              >
+                                ចុចទីនេះដើម្បីបើក Telegram Bot ↗
+                              </a>
                               <p className="text-slate-500">
                                 Bot: <span className="font-semibold">@{capabilities.botUsername}</span> · កូដ{' '}
                                 <span className="font-mono-num">{tgLinkNonce}</span>

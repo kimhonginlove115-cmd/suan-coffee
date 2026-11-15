@@ -12,7 +12,15 @@ import type {
   ShopSettings,
   Topping,
 } from '../types';
-import { CAFE_ASSETS, compressImageFile, getDiscountedPrice, getFirebaseBase } from '../utils/cafeUtils';
+import {
+  CAFE_ASSETS,
+  compressImageFile,
+  fetchWithTimeout,
+  getDiscountedPrice,
+  getFirebaseBase,
+  handleImgFallback,
+  resolveAssetUrl,
+} from '../utils/cafeUtils';
 import {
   buildDynamicKhqr,
   decodeKhqrFromImageFile,
@@ -35,6 +43,7 @@ export function AdminPinModal({ isOpen, onClose, onSuccess }: PinModalProps) {
     if (isOpen) {
       setPin('');
       setError('');
+      setLoading(false);
     }
   }, [isOpen]);
 
@@ -42,14 +51,19 @@ export function AdminPinModal({ isOpen, onClose, onSuccess }: PinModalProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setError('');
     setLoading(true);
     try {
-      const res = await fetch('/api/admin/verify-pin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: pin.trim() }),
-      });
+      const res = await fetchWithTimeout(
+        '/api/admin/verify-pin',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: pin.trim() }),
+        },
+        10000
+      );
       const data = await res.json();
       if (data.ok && data.adminToken) {
         onSuccess(data.adminToken);
@@ -192,6 +206,9 @@ export function AdminDashboard({
   const [serverMembers, setServerMembers] = useState<Member[]>(members);
   const [savingSettings, setSavingSettings] = useState(false);
   const [khqrPreviewUrl, setKhqrPreviewUrl] = useState('');
+  const [generatingQRs, setGeneratingQRs] = useState(false);
+  const [confirmClearMenu, setConfirmClearMenu] = useState(false);
+  const [decodingKhqr, setDecodingKhqr] = useState(false);
 
   useEffect(() => {
     setDraft(shopSettings);
@@ -212,20 +229,34 @@ export function AdminDashboard({
       setKhqrPreviewUrl('');
       return;
     }
+    let cancelled = false;
     QRCode.toDataURL(sampleDynamicKhqr.payload, {
       width: 140,
       margin: 1,
       errorCorrectionLevel: 'M',
     })
-      .then(setKhqrPreviewUrl)
-      .catch(() => setKhqrPreviewUrl(''));
+      .then((url) => {
+        if (!cancelled) setKhqrPreviewUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setKhqrPreviewUrl('');
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [sampleDynamicKhqr.isOfficialEmv, sampleDynamicKhqr.payload]);
 
   useEffect(() => {
     if (!adminToken) return;
-    fetch('/api/admin/config', {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    })
+    const ctrl = new AbortController();
+    fetchWithTimeout(
+      '/api/admin/config',
+      {
+        headers: { Authorization: `Bearer ${adminToken}` },
+        signal: ctrl.signal,
+      },
+      10000
+    )
       .then((r) => {
         if (r.status === 401) {
           onRequireReauth();
@@ -240,6 +271,7 @@ export function AdminDashboard({
         }
       })
       .catch(() => {});
+    return () => ctrl.abort();
   }, [adminToken, onRequireReauth]);
 
   const displayedMembers = serverMembers.length > 0 ? serverMembers : members;
@@ -248,20 +280,27 @@ export function AdminDashboard({
   const filteredOrders = orderFilter === 'All' ? orders : orders.filter((o) => o.status === orderFilter);
 
   const generateQRs = async () => {
+    if (generatingQRs) return;
+    const count = Math.min(50, Math.max(1, Number(qrTableCount) || 6));
     const base = qrBaseUrl.trim().split('?')[0].split('#')[0] || 'https://emerald-brew.cafe';
-    const next: Record<number, string> = {};
-    for (let i = 1; i <= qrTableCount; i++) {
-      try {
-        next[i] = await QRCode.toDataURL(`${base}?table=${i}`, {
-          width: 160,
-          margin: 1,
-          color: { dark: '#0D4A3E', light: '#FFFFFF' },
-        });
-      } catch {
-        // ignore
+    setGeneratingQRs(true);
+    try {
+      const next: Record<number, string> = {};
+      for (let i = 1; i <= count; i++) {
+        try {
+          next[i] = await QRCode.toDataURL(`${base}?table=${i}`, {
+            width: 160,
+            margin: 1,
+            color: { dark: '#0D4A3E', light: '#FFFFFF' },
+          });
+        } catch {
+          // ignore
+        }
       }
+      setQrDataUrls(next);
+    } finally {
+      setGeneratingQRs(false);
     }
-    setQrDataUrls(next);
   };
 
   useEffect(() => {
@@ -383,17 +422,22 @@ export function AdminDashboard({
   };
 
   const handleSaveAllSettings = async () => {
+    if (savingSettings) return;
     setSavingSettings(true);
     try {
       if (adminToken) {
-        const res = await fetch('/api/admin/config', {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${adminToken}`,
+        const res = await fetchWithTimeout(
+          '/api/admin/config',
+          {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({ secrets }),
           },
-          body: JSON.stringify({ secrets }),
-        });
+          12000
+        );
         if (res.status === 401) {
           onRequireReauth();
           return;
@@ -408,19 +452,40 @@ export function AdminDashboard({
     }
   };
 
+  const escapeHtml = (str: unknown) =>
+    String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
   const printOrderReceipt = (o: Order) => {
-    const w = window.open('', '', 'width=340,height=480');
-    if (!w) {
-      onToast('សូមអនុញ្ញាត Pop-up ដើម្បី Print');
-      return;
-    }
     const cust = o.customer || { name: '-', phone: '-' };
-    w.document.write(
-      `<div style="font-family:monospace;padding:12px;"><h3 style="text-align:center;margin:0;">${shopSettings.brandTitle}</h3><p style="text-align:center;font-size:11px;">${o.id} | ${o.timestamp}</p><hr><p style="font-size:12px;">ភ្ញៀវ: ${cust.name} (${cust.phone})<br>${o.type === 'dinein' ? 'តុលេខ: ' + (cust.tableNum || 1) : cust.addressName || ''}</p><hr>${o.items.map((i) => `<div style="font-size:12px;margin-bottom:4px;">${i.qty}x ${i.name} - $${(i.unitPrice * i.qty).toFixed(2)}<br><small>${i.options}</small></div>`).join('')}<hr><p style="font-weight:bold;text-align:right;">សរុប: $${Number(o.grandTotal || 0).toFixed(2)} (${o.payment})</p></div>`
-    );
-    w.document.close();
-    w.focus();
-    w.print();
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(o.id)}</title></head><body style="font-family:monospace;padding:12px;margin:0;"><h3 style="text-align:center;margin:0;">${escapeHtml(shopSettings.brandTitle)}</h3><p style="text-align:center;font-size:11px;">${escapeHtml(o.id)} | ${escapeHtml(o.timestamp)}</p><hr><p style="font-size:12px;">ភ្ញៀវ: ${escapeHtml(cust.name)} (${escapeHtml(cust.phone)})<br>${o.type === 'dinein' ? 'តុលេខ: ' + escapeHtml(cust.tableNum || 1) : escapeHtml(cust.addressName || '')}</p><hr>${o.items.map((i) => `<div style="font-size:12px;margin-bottom:4px;">${i.qty}x ${escapeHtml(i.name)} - $${(i.unitPrice * i.qty).toFixed(2)}<br><small>${escapeHtml(i.options)}</small></div>`).join('')}<hr><p style="font-weight:bold;text-align:right;">សរុប: $${Number(o.grandTotal || 0).toFixed(2)} (${escapeHtml(o.payment)})</p></body></html>`;
+
+    try {
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+      const doc = iframe.contentWindow?.document;
+      if (doc) {
+        doc.open();
+        doc.write(html);
+        doc.close();
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+        setTimeout(() => iframe.remove(), 1500);
+        return;
+      }
+      iframe.remove();
+    } catch {
+      // ignore and notify user
+    }
+    onToast('មិនអាចបើកផ្ទាំង Print លើឧបករណ៍នេះបានទេ');
   };
 
   const deliveryPreview = (() => {
@@ -823,17 +888,38 @@ export function AdminDashboard({
           </div>
 
           <div className="lg:col-span-2 bg-white p-4 rounded-2xl border border-slate-200 h-fit">
-            <div className="flex justify-between items-center mb-3">
+            <div className="flex justify-between items-center mb-3 gap-2">
               <h3 className="font-bold text-sm">បញ្ជីទំនិញទាំងអស់ ({menuItems.length})</h3>
-              <button
-                type="button"
-                onClick={() => {
-                  if (confirm('លុបមុខទំនិញទាំងអស់ចេញពីហាង?')) onUpdateMenu([]);
-                }}
-                className="text-xs bg-red-50 text-red-600 font-bold px-3 py-1 rounded-xl"
-              >
-                លុបទាំងអស់
-              </button>
+              {confirmClearMenu ? (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUpdateMenu([]);
+                      setConfirmClearMenu(false);
+                      onToast('បានលុបម៉ឺនុយទាំងអស់!');
+                    }}
+                    className="text-xs bg-red-600 text-white font-bold px-3 py-1 rounded-xl"
+                  >
+                    បញ្ជាក់លុប
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClearMenu(false)}
+                    className="text-xs bg-slate-100 text-slate-600 font-bold px-2.5 py-1 rounded-xl"
+                  >
+                    បោះបង់
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmClearMenu(true)}
+                  className="text-xs bg-red-50 text-red-600 font-bold px-3 py-1 rounded-xl"
+                >
+                  លុបទាំងអស់
+                </button>
+              )}
             </div>
             <div className="space-y-2.5">
               {menuItems.map((i) => (
@@ -843,8 +929,9 @@ export function AdminDashboard({
                 >
                   <div className="flex items-center gap-2.5">
                     <img
-                      src={i.img || CAFE_ASSETS.icedLatte}
+                      src={resolveAssetUrl(i.img, CAFE_ASSETS.icedLatte)}
                       alt={i.name}
+                      onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
                       className="w-11 h-11 rounded-xl object-cover bg-slate-100"
                     />
                     <div>
@@ -913,7 +1000,7 @@ export function AdminDashboard({
                 min={1}
                 max={50}
                 value={qrTableCount}
-                onChange={(e) => setQrTableCount(Math.max(1, Number(e.target.value) || 6))}
+                onChange={(e) => setQrTableCount(Math.min(50, Math.max(1, Number(e.target.value) || 6)))}
                 className="px-3 py-2 border border-slate-200 rounded-xl text-xs"
               />
               <input
@@ -932,23 +1019,25 @@ export function AdminDashboard({
             </div>
             <button
               type="button"
+              disabled={generatingQRs}
               onClick={generateQRs}
-              className="bg-[#0D4A3E] text-white px-4 py-2 rounded-xl text-xs font-bold"
+              className="bg-[#0D4A3E] disabled:opacity-60 text-white px-4 py-2 rounded-xl text-xs font-bold"
             >
-              បង្កើត QR Stickers
+              {generatingQRs ? 'កំពុងបង្កើត QR...' : 'បង្កើត QR Stickers'}
             </button>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-            {Array.from({ length: qrTableCount }, (_, idx) => idx + 1).map((tNum) => (
+            {Array.from({ length: Math.min(50, Math.max(1, qrTableCount)) }, (_, idx) => idx + 1).map((tNum) => (
               <div
                 key={tNum}
                 className="bg-white rounded-3xl border-2 border-[#0D4A3E] overflow-hidden shadow-sm flex flex-col items-center text-center"
               >
                 <div className="w-full bg-[#0D4A3E] text-white py-3 px-4 flex items-center justify-center gap-2">
                   <img
-                    src={shopSettings.logoImg}
+                    src={resolveAssetUrl(shopSettings.logoImg, CAFE_ASSETS.logoEmblem)}
                     alt={shopSettings.brandTitle}
+                    onError={(e) => handleImgFallback(e, CAFE_ASSETS.logoEmblem)}
                     className="w-8 h-8 rounded-full object-cover border border-amber-300"
                   />
                   <div className="text-left">
@@ -1058,8 +1147,9 @@ export function AdminDashboard({
 
             <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
               <img
-                src={draft.logoImg}
+                src={resolveAssetUrl(draft.logoImg, CAFE_ASSETS.logoEmblem)}
                 alt="Logo"
+                onError={(e) => handleImgFallback(e, CAFE_ASSETS.logoEmblem)}
                 className="w-14 h-14 rounded-full object-cover border shrink-0 bg-white"
               />
               <div className="flex-1 space-y-1.5">
@@ -1069,7 +1159,8 @@ export function AdminDashboard({
                   accept="image/*"
                   onChange={(e) => {
                     const f = e.target.files?.[0];
-                    if (f) compressImageFile(f, 250, (b) => setDraft({ ...draft, logoImg: b }), onToast);
+                    if (f) compressImageFile(f, 250, (b) => setDraft((p) => ({ ...p, logoImg: b })), onToast);
+                    e.currentTarget.value = '';
                   }}
                   className="text-xs w-full"
                 />
@@ -1078,13 +1169,19 @@ export function AdminDashboard({
 
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
               <label className="text-xs font-bold block">រូបផ្ទាំងមុខហាង (Banner)</label>
-              <img src={draft.bannerImg} alt="Banner" className="w-full h-24 rounded-xl object-cover border bg-white" />
+              <img
+                src={resolveAssetUrl(draft.bannerImg, CAFE_ASSETS.heroBanner)}
+                alt="Banner"
+                onError={(e) => handleImgFallback(e, CAFE_ASSETS.heroBanner)}
+                className="w-full h-24 rounded-xl object-cover border bg-white"
+              />
               <input
                 type="file"
                 accept="image/*"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) compressImageFile(f, 650, (b) => setDraft({ ...draft, bannerImg: b }), onToast);
+                  if (f) compressImageFile(f, 650, (b) => setDraft((p) => ({ ...p, bannerImg: b })), onToast);
+                  e.currentTarget.value = '';
                 }}
                 className="text-xs w-full"
               />
@@ -1130,34 +1227,41 @@ export function AdminDashboard({
                     <input
                       type="file"
                       accept="image/*"
+                      disabled={decodingKhqr}
                       onChange={async (e) => {
                         const f = e.target.files?.[0];
-                        if (!f) return;
-                        const decoded = await decodeKhqrFromImageFile(f);
-                        if (decoded && isValidEmvKhqr(decoded)) {
-                          const info = extractKhqrSummary(decoded);
-                          setDraft((prev) => ({
-                            ...prev,
-                            khqrPayload: decoded,
-                            khqrBakongId: info.bakongId || prev.khqrBakongId || '',
-                            khqrMerchantName: info.merchantName || prev.khqrMerchantName || prev.brandTitle,
-                            khqrCurrency: info.currency || prev.khqrCurrency || 'USD',
-                          }));
-                          compressImageFile(
-                            f,
-                            320,
-                            (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
-                            onToast
-                          );
-                          onToast('✓ ទាញយកកូដ KHQR ផ្លូវការស្វ័យប្រវត្តិ — បើក Dynamic Amount ជោគជ័យ!');
-                        } else {
-                          compressImageFile(
-                            f,
-                            320,
-                            (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
-                            onToast
-                          );
-                          onToast('រូបនេះស្កេនកូដមិនច្បាស់! សូមបញ្ចូល Bakong ID ឬ Paste កូដ 000201... ខាងក្រោម');
+                        e.currentTarget.value = '';
+                        if (!f || decodingKhqr) return;
+                        setDecodingKhqr(true);
+                        try {
+                          const decoded = await decodeKhqrFromImageFile(f);
+                          if (decoded && isValidEmvKhqr(decoded)) {
+                            const info = extractKhqrSummary(decoded);
+                            setDraft((prev) => ({
+                              ...prev,
+                              khqrPayload: decoded,
+                              khqrBakongId: info.bakongId || prev.khqrBakongId || '',
+                              khqrMerchantName: info.merchantName || prev.khqrMerchantName || prev.brandTitle,
+                              khqrCurrency: info.currency || prev.khqrCurrency || 'USD',
+                            }));
+                            compressImageFile(
+                              f,
+                              320,
+                              (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
+                              onToast
+                            );
+                            onToast('✓ ទាញយកកូដ KHQR ផ្លូវការស្វ័យប្រវត្តិ — បើក Dynamic Amount ជោគជ័យ!');
+                          } else {
+                            compressImageFile(
+                              f,
+                              320,
+                              (b) => setDraft((prev) => ({ ...prev, khqrImg: b })),
+                              onToast
+                            );
+                            onToast('រូបនេះស្កេនកូដមិនច្បាស់! សូមបញ្ចូល Bakong ID ឬ Paste កូដ 000201... ខាងក្រោម');
+                          }
+                        } finally {
+                          setDecodingKhqr(false);
                         }
                       }}
                       className="text-xs w-full"

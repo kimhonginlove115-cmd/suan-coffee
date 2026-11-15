@@ -36,13 +36,20 @@ export function ReceiptModal({
   }, [order, shopSettings]);
 
   useEffect(() => {
-    if (!dynamicKhqr?.isOfficialEmv || !qrCanvasRef.current) return;
-    QRCode.toCanvas(qrCanvasRef.current, dynamicKhqr.payload, {
+    const canvas = qrCanvasRef.current;
+    if (!dynamicKhqr?.isOfficialEmv || !canvas) return;
+    let cancelled = false;
+    QRCode.toCanvas(canvas, dynamicKhqr.payload, {
       width: 148,
       margin: 1,
       errorCorrectionLevel: 'M',
       color: { dark: '#000000', light: '#FFFFFF' },
-    }).catch(() => {});
+    }).catch(() => {
+      if (cancelled) return;
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [dynamicKhqr]);
 
   return (

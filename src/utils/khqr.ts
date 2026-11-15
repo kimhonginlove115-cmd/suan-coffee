@@ -251,43 +251,51 @@ export function buildDynamicKhqr(opts: {
 }
 
 export async function decodeKhqrFromImageFile(file: File): Promise<string | null> {
+  if (file.size > 15 * 1024 * 1024) return null;
   return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onerror = () => resolve(null);
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onerror = () => resolve(null);
-      img.onload = () => {
-        try {
-          const maxDim = 1000;
-          let w = img.width;
-          let h = img.height;
-          if (w > maxDim || h > maxDim) {
-            const scale = maxDim / Math.max(w, h);
-            w = Math.round(w * scale);
-            h = Math.round(h * scale);
-          }
-          const canvas = document.createElement('canvas');
-          canvas.width = w;
-          canvas.height = h;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) return resolve(null);
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, w, h);
-          ctx.drawImage(img, 0, 0, w, h);
-          const imageData = ctx.getImageData(0, 0, w, h);
-          const code = jsQR(imageData.data, w, h, { inversionAttempts: 'attemptBoth' });
-          if (code?.data && code.data.trim().startsWith('000201')) {
-            return resolve(code.data.trim());
-          }
-          return resolve(null);
-        } catch {
-          return resolve(null);
-        }
-      };
-      img.src = String(e.target?.result || '');
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    const done = (val: string | null) => {
+      try {
+        URL.revokeObjectURL(objectUrl);
+      } catch {
+        // ignore
+      }
+      resolve(val);
     };
-    reader.readAsDataURL(file);
+    img.onerror = () => done(null);
+    img.onload = () => {
+      try {
+        const maxDim = 900;
+        let w = img.naturalWidth || img.width;
+        let h = img.naturalHeight || img.height;
+        if (!w || !h) return done(null);
+        if (w > maxDim || h > maxDim) {
+          const scale = maxDim / Math.max(w, h);
+          w = Math.max(1, Math.round(w * scale));
+          h = Math.max(1, Math.round(h * scale));
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return done(null);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        const imageData = ctx.getImageData(0, 0, w, h);
+        canvas.width = 0;
+        canvas.height = 0;
+        const code = jsQR(imageData.data, w, h, { inversionAttempts: 'attemptBoth' });
+        if (code?.data && code.data.trim().startsWith('000201')) {
+          return done(code.data.trim());
+        }
+        return done(null);
+      } catch {
+        return done(null);
+      }
+    };
+    img.src = objectUrl;
   });
 }
 

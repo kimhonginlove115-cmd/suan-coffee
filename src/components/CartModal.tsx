@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
 import { Download, MapPin, Minus, Plus, Send, X } from 'lucide-react';
 import type { CartItem, Coords, Member, OrderType, PaymentMethod, ShopSettings } from '../types';
-import { CAFE_ASSETS, computeDeliveryFee } from '../utils/cafeUtils';
+import { CAFE_ASSETS, computeDeliveryFee, handleImgFallback, resolveAssetUrl } from '../utils/cafeUtils';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 
 interface CartModalProps {
@@ -67,6 +67,7 @@ export function CartModal({
   const [addressNote, setAddressNote] = useState('');
   const [tableNum, setTableNum] = useState(initialTableNum || 1);
   const [dineInPhone, setDineInPhone] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const khqrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -113,13 +114,20 @@ export function CartModal({
 
   // Render crisp EMVCo Dynamic KHQR whenever grandTotal or payment changes
   useEffect(() => {
-    if (!isOpen || payment !== 'KHQR / ABA' || !dynamicKhqr.isOfficialEmv || !khqrCanvasRef.current) return;
-    QRCode.toCanvas(khqrCanvasRef.current, dynamicKhqr.payload, {
+    const canvas = khqrCanvasRef.current;
+    if (!isOpen || payment !== 'KHQR / ABA' || !dynamicKhqr.isOfficialEmv || !canvas) return;
+    let cancelled = false;
+    QRCode.toCanvas(canvas, dynamicKhqr.payload, {
       width: 176,
       margin: 1,
       errorCorrectionLevel: 'M',
       color: { dark: '#000000', light: '#FFFFFF' },
-    }).catch(() => {});
+    }).catch(() => {
+      if (cancelled) return;
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, payment, dynamicKhqr]);
 
   const handleApplyPromo = () => {
@@ -133,7 +141,8 @@ export function CartModal({
     }
   };
 
-  const handleSubmit = (sendTg: boolean) => {
+  const handleSubmit = async (sendTg: boolean) => {
+    if (submitting) return;
     if (!cart.length) {
       onToast('កន្ត្រកទំនិញទទេ!');
       return;
@@ -148,42 +157,49 @@ export function CartModal({
         onToast('សូមបំពេញឈ្មោះ និងលេខទូរស័ព្ទ!');
         return;
       }
-      onSubmitOrder({
-        sendTg,
-        payment,
-        promoDisc,
-        fee,
-        subtotal,
-        grandTotal,
-        customer: {
-          name: custName.trim(),
-          phone: custPhone.trim(),
-          tg: custTg.trim(),
-          addressName: pickedAddressName,
-          addressNote: addressNote.trim(),
-          coords: selectedCoords,
-          distanceKm: distanceKm.toFixed(2),
-        },
-      });
-    } else {
-      onSubmitOrder({
-        sendTg,
-        payment,
-        promoDisc,
-        fee: 0,
-        subtotal,
-        grandTotal,
-        customer: {
-          name: currentMember ? currentMember.name : `ភ្ញៀវតុលេខ ${tableNum}`,
-          phone: dineInPhone.trim(),
-          tg: currentMember ? currentMember.telegramUsername || currentMember.tg || '' : '',
-          tableNum,
-        },
-      });
     }
 
-    setAppliedPromoPct(0);
-    setPromoInput('');
+    setSubmitting(true);
+    try {
+      if (orderType === 'delivery') {
+        await onSubmitOrder({
+          sendTg,
+          payment,
+          promoDisc,
+          fee,
+          subtotal,
+          grandTotal,
+          customer: {
+            name: custName.trim(),
+            phone: custPhone.trim(),
+            tg: custTg.trim(),
+            addressName: pickedAddressName,
+            addressNote: addressNote.trim(),
+            coords: selectedCoords,
+            distanceKm: distanceKm.toFixed(2),
+          },
+        });
+      } else {
+        await onSubmitOrder({
+          sendTg,
+          payment,
+          promoDisc,
+          fee: 0,
+          subtotal,
+          grandTotal,
+          customer: {
+            name: currentMember ? currentMember.name : `ភ្ញៀវតុលេខ ${tableNum}`,
+            phone: dineInPhone.trim(),
+            tg: currentMember ? currentMember.telegramUsername || currentMember.tg || '' : '',
+            tableNum,
+          },
+        });
+      }
+      setAppliedPromoPct(0);
+      setPromoInput('');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -223,12 +239,10 @@ export function CartModal({
                 <div key={item.cartId} className="flex items-center justify-between bg-slate-50 p-2.5 rounded-xl gap-2">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <img
-                      src={item.img || CAFE_ASSETS.icedLatte}
+                      src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
                       alt={item.name}
                       referrerPolicy="no-referrer"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).src = CAFE_ASSETS.icedLatte;
-                      }}
+                      onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
                       className="w-10 h-10 rounded-lg object-cover shrink-0"
                     />
                     <div className="min-w-0">
@@ -493,15 +507,17 @@ export function CartModal({
             <div className="mt-3 space-y-2">
               <button
                 type="button"
+                disabled={submitting}
                 onClick={() => handleSubmit(false)}
-                className="w-full bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold py-3 rounded-2xl text-sm transition-colors active:scale-[0.98]"
+                className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-60 text-white font-bold py-3 rounded-2xl text-sm transition-colors active:scale-[0.98]"
               >
-                បញ្ជាក់ការកម្ម៉ង់
+                {submitting ? 'កំពុងបញ្ជូន...' : 'បញ្ជាក់ការកម្ម៉ង់'}
               </button>
               <button
                 type="button"
+                disabled={submitting}
                 onClick={() => handleSubmit(true)}
-                className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-colors active:scale-[0.98]"
+                className="w-full bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-bold py-2.5 rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-colors active:scale-[0.98]"
               >
                 <Send className="w-3.5 h-3.5" />
                 <span>កម្ម៉ង់ & ផ្ញើចូល Telegram ហាង</span>

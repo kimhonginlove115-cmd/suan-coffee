@@ -102,8 +102,32 @@ interface TokenPayload {
 
 const DB_KV_KEY = 'emerald_brew_db_v1';
 const memoryFallbackStore = new Map<string, { value: string; expiresAt?: number }>();
+const botUsernameCache = new Map<string, string>();
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+function safeJsonParse<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 8000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ---- KV + In-Memory Fallback Store ----
 async function kvGet(env: Env, key: string): Promise<string | null> {
@@ -492,16 +516,39 @@ async function sendTelegramBotMessage(
   try {
     const body: Record<string, unknown> = { chat_id: chatId.trim(), text, parse_mode: 'HTML' };
     if (replyMarkup) body.reply_markup = replyMarkup;
-    const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const resp = await fetchWithTimeout(
+      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      6000
+    );
     const data = (await resp.json()) as { ok?: boolean };
     return Boolean(data.ok);
   } catch {
     return false;
   }
+}
+
+async function resolveBotUsername(env: Env, db: PersistedDatabase, botToken: string): Promise<string> {
+  const explicit = getEffectiveBotUsername(env, db);
+  if (explicit) return explicit;
+  if (!botToken) return '';
+  const cached = botUsernameCache.get(botToken);
+  if (cached) return cached;
+  try {
+    const meRes = await fetchWithTimeout(`https://api.telegram.org/bot${botToken}/getMe`, {}, 3500);
+    const meData = (await meRes.json()) as { ok?: boolean; result?: { username?: string } };
+    if (meData.ok && meData.result?.username) {
+      botUsernameCache.set(botToken, meData.result.username);
+      return meData.result.username;
+    }
+  } catch {
+    // ignore timeout/network failure
+  }
+  return '';
 }
 
 async function requireAdmin(req: Request, env: Env, db: PersistedDatabase): Promise<TokenPayload | null> {
@@ -527,16 +574,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
   // 1. Capabilities
   if (path === '/api/auth/capabilities' && method === 'GET') {
     const botToken = getEffectiveBotToken(env, db);
-    let botUsername = getEffectiveBotUsername(env, db);
-    if (botToken && !botUsername) {
-      try {
-        const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
-        const meData = (await meRes.json()) as { ok?: boolean; result?: { username?: string } };
-        if (meData.ok && meData.result?.username) botUsername = meData.result.username;
-      } catch {
-        // ignore
-      }
-    }
+    const botUsername = await resolveBotUsername(env, db, botToken);
     const phoneOtpChannel = detectPhoneOtpChannel(env, db);
     const botReady = Boolean(botToken && botUsername);
     return jsonResponse({
@@ -584,11 +622,15 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     if (channel === 'telegram_gateway') {
       try {
         const gwToken = getEffectiveGatewayToken(env, db);
-        const gwRes = await fetch('https://gatewayapi.telegram.org/sendVerificationMessage', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${gwToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone_number: phone, code: otp, ttl: 300 }),
-        });
+        const gwRes = await fetchWithTimeout(
+          'https://gatewayapi.telegram.org/sendVerificationMessage',
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${gwToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone_number: phone, code: otp, ttl: 300 }),
+          },
+          8000
+        );
         const gwData = (await gwRes.json()) as { ok?: boolean; error?: string; result?: { request_id?: string } };
         if (!gwData.ok) {
           return jsonResponse({ ok: false, error: `Telegram Gateway បដិសេធ៖ ${gwData.error || 'Token Error'}` }, 502);
@@ -619,7 +661,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
           From: tw.from,
           Body: `Emerald Brew Cafe: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp} (សុពលភាព ៥ នាទី)`,
         });
-        const twRes = await fetch(
+        const twRes = await fetchWithTimeout(
           `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(tw.sid)}/Messages.json`,
           {
             method: 'POST',
@@ -628,7 +670,8 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
               'Content-Type': 'application/x-www-form-urlencoded',
             },
             body: params.toString(),
-          }
+          },
+          8000
         );
         if (!twRes.ok) {
           return jsonResponse({ ok: false, error: `Twilio SMS បរាជ័យ (${twRes.status})` }, 502);
@@ -652,18 +695,22 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
 
     const wh = getEffectiveSmsWebhook(env, db);
     try {
-      const whRes = await fetch(wh.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(wh.apiKey ? { Authorization: `Bearer ${wh.apiKey}`, 'X-API-Key': wh.apiKey } : {}),
+      const whRes = await fetchWithTimeout(
+        wh.url,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(wh.apiKey ? { Authorization: `Bearer ${wh.apiKey}`, 'X-API-Key': wh.apiKey } : {}),
+          },
+          body: JSON.stringify({
+            to: phone,
+            code: otp,
+            message: `Emerald Brew Cafe: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp}`,
+          }),
         },
-        body: JSON.stringify({
-          to: phone,
-          code: otp,
-          message: `Emerald Brew Cafe: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp}`,
-        }),
-      });
+        8000
+      );
       if (!whRes.ok) {
         return jsonResponse({ ok: false, error: 'SMS Gateway Webhook បានបដិសេធការផ្ញើ' }, 502);
       }
@@ -695,10 +742,10 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     const phone = normalizePhone(String(body.phone || ''));
     const code = String(body.code || '').replace(/\D/g, '');
     const raw = await kvGet(env, `otp:${phone}`);
-    if (!raw) {
+    const challenge = safeJsonParse<OtpChallenge>(raw);
+    if (!challenge) {
       return jsonResponse({ ok: false, error: 'លេខកូដ OTP ផុតកំណត់ ឬមិនទាន់បានស្នើសុំទេ' }, 400);
     }
-    const challenge = JSON.parse(raw) as OtpChallenge;
     if (challenge.expiresAt < Date.now()) {
       await kvDelete(env, `otp:${phone}`);
       return jsonResponse({ ok: false, error: 'លេខកូដ OTP ផុតកំណត់ហើយ សូមស្នើសុំម្តងទៀត' }, 400);
@@ -779,7 +826,6 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     }
 
     const botToken = getEffectiveBotToken(env, db);
-    let botUsername = getEffectiveBotUsername(env, db);
     if (!botToken) {
       return jsonResponse(
         {
@@ -789,15 +835,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
         503
       );
     }
-    if (!botUsername) {
-      try {
-        const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
-        const meData = (await meRes.json()) as { ok?: boolean; result?: { username?: string } };
-        if (meData.ok && meData.result?.username) botUsername = meData.result.username;
-      } catch {
-        // ignore
-      }
-    }
+    const botUsername = await resolveBotUsername(env, db, botToken);
     if (!botUsername) {
       return jsonResponse({ ok: false, error: 'មិនអាចទាញយក Bot Username បានទេ' }, 503);
     }
@@ -831,8 +869,9 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     const body = await readJsonBody(req);
     const nonce = String(body.nonce || '').trim();
     const rawSess = await kvGet(env, `tg:${nonce}`);
-    if (!rawSess) return jsonResponse({ ok: false, error: 'តំណភ្ជាប់ផុតកំណត់ហើយ' }, 404);
-    let session = JSON.parse(rawSess) as TelegramLinkSession;
+    const parsedSess = safeJsonParse<TelegramLinkSession>(rawSess);
+    if (!parsedSess) return jsonResponse({ ok: false, error: 'តំណភ្ជាប់ផុតកំណត់ហើយ' }, 404);
+    let session: TelegramLinkSession = parsedSess;
     if (session.expiresAt < Date.now()) {
       await kvDelete(env, `tg:${nonce}`);
       return jsonResponse({ ok: false, error: 'តំណភ្ជាប់ផុតកំណត់ហើយ' }, 404);
@@ -867,8 +906,10 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     }
 
     try {
-      const updRes = await fetch(
-        `https://api.telegram.org/bot${botToken}/getUpdates?offset=${db.lastTelegramUpdateOffset}&limit=30&timeout=0`
+      const updRes = await fetchWithTimeout(
+        `https://api.telegram.org/bot${botToken}/getUpdates?offset=${db.lastTelegramUpdateOffset}&limit=30&timeout=0`,
+        {},
+        4500
       );
       const updData = (await updRes.json()) as {
         ok?: boolean;
@@ -898,9 +939,11 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
             const parts = msgText.trim().split(/\s+/);
             const matchedNonce = parts[1];
             if (matchedNonce) {
-              const targetRaw = matchedNonce === nonce ? JSON.stringify(session) : await kvGet(env, `tg:${matchedNonce}`);
-              if (targetRaw) {
-                const targetSess = JSON.parse(targetRaw) as TelegramLinkSession;
+              const targetSess: TelegramLinkSession | null =
+                matchedNonce === nonce
+                  ? session
+                  : safeJsonParse<TelegramLinkSession>(await kvGet(env, `tg:${matchedNonce}`));
+              if (targetSess) {
                 targetSess.startedByTelegramId = String(from.id);
                 targetSess.verifiedUser = {
                   id: String(from.id),
@@ -938,9 +981,11 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
             if (isValidPhone(verifiedPhone)) {
               const activeNonce = await kvGet(env, `tg_user_active:${from.id}`);
               if (activeNonce) {
-                const candRaw = activeNonce === nonce ? JSON.stringify(session) : await kvGet(env, `tg:${activeNonce}`);
-                if (candRaw) {
-                  const cand = JSON.parse(candRaw) as TelegramLinkSession;
+                const cand: TelegramLinkSession | null =
+                  activeNonce === nonce
+                    ? session
+                    : safeJsonParse<TelegramLinkSession>(await kvGet(env, `tg:${activeNonce}`));
+                if (cand) {
                   if (cand.mode === 'contact' && cand.startedByTelegramId === String(from.id)) {
                     cand.verifiedPhone = verifiedPhone;
                     cand.verifiedUser = cand.verifiedUser || {
@@ -1049,7 +1094,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
   if (path === '/api/admin/verify-pin' && method === 'POST') {
     const ip = getClientIp(req);
     const lockRaw = await kvGet(env, `pinlock:${ip}`);
-    const lock = lockRaw ? (JSON.parse(lockRaw) as { failures: number; lockedUntil: number }) : null;
+    const lock = safeJsonParse<{ failures: number; lockedUntil: number }>(lockRaw);
     if (lock && lock.lockedUntil > Date.now()) {
       const secs = Math.ceil((lock.lockedUntil - Date.now()) / 1000);
       return jsonResponse({ ok: false, error: `បញ្ចូល PIN ខុសច្រើនដង! សូមរង់ចាំ ${secs} វិនាទី` }, 429);
@@ -1179,7 +1224,11 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
-      return handleApiRequest(request, env);
+      try {
+        return await handleApiRequest(request, env);
+      } catch {
+        return jsonResponse({ ok: false, error: 'ប្រព័ន្ធមានបញ្ហាបណ្តោះអាសន្ន សូមព្យាយាមម្តងទៀត' }, 500);
+      }
     }
     return env.ASSETS.fetch(request);
   },
