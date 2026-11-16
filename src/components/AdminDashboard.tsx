@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   Check,
@@ -300,6 +300,7 @@ export function AdminDashboard({
   const [confirmClearMenu, setConfirmClearMenu] = useState(false);
   const [decodingKhqr, setDecodingKhqr] = useState(false);
   const [previewSlipUrl, setPreviewSlipUrl] = useState<string | null>(null);
+  const menuFormRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setDraft(shopSettings);
@@ -600,6 +601,9 @@ export function AdminDashboard({
     setItemDescEn(item.descEn || '');
     setItemAvailable(item.available !== false);
     setItemFeatured(Boolean(item.featured));
+    window.setTimeout(() => {
+      menuFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
   };
 
   const handleDuplicateItem = async (item: MenuItem) => {
@@ -1076,7 +1080,7 @@ export function AdminDashboard({
                   phone: o.driverInfo?.phone || '',
                 };
                 return (
-                  <div key={o.id} className="bg-white p-4 rounded-2xl border border-slate-200 space-y-2.5">
+                  <div key={o.id} className="min-w-0 bg-white p-4 rounded-2xl border border-slate-200 space-y-2.5">
                     <div className="flex justify-between gap-2">
                       <div>
                         <span className="font-bold font-mono-num text-[#0D4A3E]">{o.id}</span>
@@ -1540,11 +1544,11 @@ export function AdminDashboard({
             </div>
           )}
 
-          <div className="grid lg:grid-cols-3 gap-5">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-5">
             {/* Left Column: Add/Edit Bilingual Item + Toppings */}
-            <div className="space-y-4">
-              <div className="bg-white p-4 rounded-2xl border border-slate-200">
-                <h3 className="font-bold text-sm mb-3 text-[#0D4A3E]">
+            <div className="min-w-0 space-y-4">
+              <div ref={menuFormRef} className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200">
+                <h3 className="font-bold text-sm mb-3 text-[#0D4A3E] break-words">
                   {editId
                     ? `${isEn ? 'Edit Item' : 'កែប្រែ'}៖ ${itemName || itemNameEn}`
                     : isEn
@@ -1555,7 +1559,7 @@ export function AdminDashboard({
                   <select
                     value={itemType}
                     onChange={(e) => setItemType(e.target.value as ItemType)}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white font-semibold"
+                    className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white font-semibold"
                   >
                     <option value="drink">
                       {isEn
@@ -1596,8 +1600,8 @@ export function AdminDashboard({
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[10px] font-bold text-slate-500 block mb-0.5">
+                    <div className="min-w-0">
+                      <label className="text-[10px] font-bold text-slate-500 block mb-0.5 truncate">
                         {isEn ? 'Price ($) *' : 'តម្លៃ ($) *'}
                       </label>
                       <input
@@ -1608,11 +1612,11 @@ export function AdminDashboard({
                         value={itemPrice}
                         onChange={(e) => setItemPrice(e.target.value)}
                         placeholder="2.50"
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono-num"
+                        className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono-num"
                       />
                     </div>
-                    <div>
-                      <label className="text-[10px] font-bold text-slate-500 block mb-0.5">
+                    <div className="min-w-0">
+                      <label className="text-[10px] font-bold text-slate-500 block mb-0.5 truncate">
                         {isEn ? 'Discount %' : 'បញ្ចុះតម្លៃ %'}
                       </label>
                       <input
@@ -1622,7 +1626,7 @@ export function AdminDashboard({
                         value={itemDiscount}
                         onChange={(e) => setItemDiscount(e.target.value)}
                         placeholder="0"
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono-num"
+                        className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono-num"
                       />
                     </div>
                   </div>
@@ -1696,13 +1700,14 @@ export function AdminDashboard({
                       ))}
                     </div>
                     <input
-                      type="url"
+                      type="text"
+                      inputMode="url"
                       value={itemImg.startsWith('data:') ? '' : itemImg}
                       onChange={(e) => setItemImg(e.target.value)}
-                      placeholder={isEn ? 'Image URL' : 'Link រូបភាព'}
-                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                      placeholder={isEn ? 'Image URL or /assets/...' : 'Link រូបភាព ឬ /assets/...'}
+                      className="w-full min-w-0 px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
                     />
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
                       {itemImg && (
                         <img
                           src={resolveAssetUrl(itemImg, CAFE_ASSETS.icedLatte)}
@@ -1719,7 +1724,7 @@ export function AdminDashboard({
                           e.currentTarget.value = '';
                           if (f) compressImageFile(f, 400, (b) => setItemImg(b), onToast);
                         }}
-                        className="text-xs w-full"
+                        className="text-xs min-w-0 flex-1 w-full"
                       />
                     </div>
                   </div>
@@ -1789,7 +1794,7 @@ export function AdminDashboard({
               </div>
 
               {/* Toppings Section (Bilingual) */}
-              <div className="bg-white p-4 rounded-2xl border border-slate-200">
+              <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200">
                 <h3 className="font-bold text-sm mb-2 text-[#0D4A3E]">
                   {isEn ? 'Manage Toppings' : 'គ្រប់គ្រង Topping'}
                 </h3>
@@ -1800,18 +1805,18 @@ export function AdminDashboard({
                       required={!newTopNameEn.trim()}
                       value={newTopName}
                       onChange={(e) => setNewTopName(e.target.value)}
-                      placeholder={isEn ? 'Name (Khmer)' : 'ឈ្មោះ Topping (ខ្មែរ)'}
-                      className="px-2.5 py-1.5 border border-slate-200 rounded-xl text-xs"
+                      placeholder={isEn ? 'Name (Khmer)' : 'ឈ្មោះ (ខ្មែរ)'}
+                      className="w-full min-w-0 px-2.5 py-1.5 border border-slate-200 rounded-xl text-xs"
                     />
                     <input
                       type="text"
                       value={newTopNameEn}
                       onChange={(e) => setNewTopNameEn(e.target.value)}
                       placeholder={isEn ? 'Name (English)' : 'ឈ្មោះ (English)'}
-                      className="px-2.5 py-1.5 border border-slate-200 rounded-xl text-xs"
+                      className="w-full min-w-0 px-2.5 py-1.5 border border-slate-200 rounded-xl text-xs"
                     />
                   </div>
-                  <div className="flex gap-1.5">
+                  <div className="flex gap-1.5 min-w-0">
                     <input
                       type="number"
                       step="0.05"
@@ -1820,11 +1825,11 @@ export function AdminDashboard({
                       value={newTopPrice}
                       onChange={(e) => setNewTopPrice(e.target.value)}
                       placeholder="$0.50"
-                      className="flex-1 px-2.5 py-1.5 border border-slate-200 rounded-xl text-xs font-mono-num"
+                      className="min-w-0 flex-1 w-full px-2.5 py-1.5 border border-slate-200 rounded-xl text-xs font-mono-num"
                     />
                     <button
                       type="submit"
-                      className="bg-[#0D4A3E] text-white px-4 py-1.5 rounded-xl text-xs font-bold"
+                      className="bg-[#0D4A3E] text-white px-3.5 py-1.5 rounded-xl text-xs font-bold shrink-0 whitespace-nowrap"
                     >
                       + {isEn ? 'Add' : 'បន្ថែម'}
                     </button>
@@ -1874,13 +1879,13 @@ export function AdminDashboard({
             </div>
 
             {/* Right Column: Menu List with Search, Filters, and Multi-Select Bulk Controls */}
-            <div className="lg:col-span-2 bg-white p-4 rounded-2xl border border-slate-200 h-fit space-y-3">
+            <div className="lg:col-span-2 min-w-0 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 h-fit space-y-3">
               <div className="flex flex-wrap justify-between items-center gap-2">
                 <h3 className="font-bold text-sm">
                   {isEn ? `All Menu Items (${menuItems.length})` : `បញ្ជីទំនិញទាំងអស់ (${menuItems.length})`}
                 </h3>
                 {confirmClearMenu ? (
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
                       onClick={() => {
@@ -1889,14 +1894,14 @@ export function AdminDashboard({
                         setSelectedMenuIds([]);
                         onToast(isEn ? 'Cleared all menu items!' : 'បានលុបម៉ឺនុយទាំងអស់!');
                       }}
-                      className="text-xs bg-red-600 text-white font-bold px-3 py-1 rounded-xl"
+                      className="text-xs bg-red-600 text-white font-bold px-3 py-1 rounded-xl whitespace-nowrap"
                     >
                       {isEn ? 'Confirm Clear' : 'បញ្ជាក់លុប'}
                     </button>
                     <button
                       type="button"
                       onClick={() => setConfirmClearMenu(false)}
-                      className="text-xs bg-slate-100 text-slate-600 font-bold px-2.5 py-1 rounded-xl"
+                      className="text-xs bg-slate-100 text-slate-600 font-bold px-2.5 py-1 rounded-xl whitespace-nowrap"
                     >
                       {isEn ? 'Cancel' : 'បោះបង់'}
                     </button>
@@ -1905,7 +1910,7 @@ export function AdminDashboard({
                   <button
                     type="button"
                     onClick={() => setConfirmClearMenu(true)}
-                    className="text-xs bg-red-50 text-red-600 font-bold px-3 py-1 rounded-xl"
+                    className="text-xs bg-red-50 text-red-600 font-bold px-3 py-1 rounded-xl shrink-0 whitespace-nowrap"
                   >
                     {isEn ? 'Clear All' : 'លុបទាំងអស់'}
                   </button>
@@ -1914,18 +1919,18 @@ export function AdminDashboard({
 
               {/* Search & Filters */}
               <div className="space-y-2">
-                <div className="flex flex-wrap gap-2">
-                  <div className="relative flex-1 min-w-[180px]">
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="relative flex-1 min-w-0">
                     <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
                       value={menuSearch}
                       onChange={(e) => setMenuSearch(e.target.value)}
                       placeholder={isEn ? 'Search menu (KM / EN)...' : 'ស្វែងរកទំនិញ (ខ្មែរ / អង់គ្លេស)...'}
-                      className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-xl text-xs outline-none focus:border-[#0D4A3E]"
+                      className="w-full min-w-0 pl-8 pr-3 py-1.5 border border-slate-200 rounded-xl text-xs outline-none focus:border-[#0D4A3E]"
                     />
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex flex-wrap gap-1 shrink-0">
                     {(
                       [
                         ['all', isEn ? 'All' : 'ទាំងអស់'],
@@ -1937,7 +1942,7 @@ export function AdminDashboard({
                         key={tId}
                         type="button"
                         onClick={() => setMenuTypeFilter(tId)}
-                        className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold ${
+                        className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap ${
                           menuTypeFilter === tId
                             ? 'bg-[#0D4A3E] text-white'
                             : 'bg-slate-100 text-slate-600'
@@ -2039,16 +2044,16 @@ export function AdminDashboard({
                     return (
                       <div
                         key={i.id}
-                        className={`flex flex-wrap items-center justify-between gap-2 p-2.5 border rounded-2xl transition-colors ${
+                        className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-2.5 sm:p-3 border rounded-2xl transition-colors ${
                           isChecked ? 'border-[#0D4A3E] bg-[#E8F2EF]/40' : 'border-slate-200'
                         }`}
                       >
-                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        <div className="flex items-start sm:items-center gap-2.5 min-w-0 flex-1">
                           <button
                             type="button"
                             onClick={() => toggleMenuSelection(i.id)}
                             aria-label="Select item"
-                            className="text-slate-400 hover:text-[#0D4A3E] shrink-0"
+                            className="text-slate-400 hover:text-[#0D4A3E] shrink-0 mt-0.5 sm:mt-0"
                           >
                             {isChecked ? (
                               <CheckSquare className="w-4 h-4 text-[#0D4A3E]" />
@@ -2062,17 +2067,19 @@ export function AdminDashboard({
                             onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
                             className="w-11 h-11 rounded-xl object-cover bg-slate-100 shrink-0"
                           />
-                          <div className="min-w-0">
-                            <p className="font-bold text-xs truncate">
+                          <div className="min-w-0 flex-1">
+                            <p className="font-bold text-xs text-slate-900 break-words leading-snug">
                               {getMenuName(i, lang)}{' '}
                               {i.nameEn && i.name && i.name !== i.nameEn && (
                                 <span className="font-normal text-slate-400">
                                   ({isEn ? i.name : i.nameEn})
                                 </span>
                               )}{' '}
-                              {i.discount > 0 ? `(-${i.discount}%)` : ''}
+                              {i.discount > 0 ? (
+                                <span className="text-red-600 font-mono-num">(-{i.discount}%)</span>
+                              ) : null}
                             </p>
-                            <p className="text-[11px] text-slate-500 truncate">
+                            <p className="text-[11px] text-slate-500 mt-0.5 break-words">
                               {i.type === 'food'
                                 ? isEn
                                   ? '🍜 Food'
@@ -2080,13 +2087,15 @@ export function AdminDashboard({
                                 : isEn
                                   ? '☕ Drink'
                                   : '☕ ភេសជ្ជៈ'}{' '}
-                              · {getMenuCategoryLabel(i.category, lang, i.categoryEn)} · $
-                              {getDiscountedPrice(i).toFixed(2)}
+                              · {getMenuCategoryLabel(i.category, lang, i.categoryEn)} ·{' '}
+                              <span className="font-bold font-mono-num text-[#0D4A3E]">
+                                ${getDiscountedPrice(i).toFixed(2)}
+                              </span>
                             </p>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100">
                           <button
                             type="button"
                             title={isEn ? 'Toggle Featured' : 'ដាក់/ដក ណែនាំពិសេស'}
@@ -2114,7 +2123,7 @@ export function AdminDashboard({
                           <button
                             type="button"
                             onClick={() => startEditItem(i)}
-                            className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-800"
+                            className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-800 whitespace-nowrap"
                           >
                             {isEn ? 'Edit' : 'កែប្រែ'}
                           </button>
@@ -2125,7 +2134,7 @@ export function AdminDashboard({
                                 menuItems.map((x) => (x.id === i.id ? { ...x, available: !x.available } : x))
                               )
                             }
-                            className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                            className={`px-2.5 py-1 rounded-lg text-xs font-bold whitespace-nowrap ${
                               i.available ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
                             }`}
                           >
@@ -2407,11 +2416,11 @@ export function AdminDashboard({
               </label>
               <div className="grid sm:grid-cols-2 gap-2">
                 <input
-                  type="url"
+                  type="text"
                   value={draft.facebookUrl || ''}
                   onChange={(e) => setDraft({ ...draft, facebookUrl: e.target.value })}
                   placeholder="Facebook (https://facebook.com/...)"
-                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white"
+                  className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white min-w-0 w-full"
                 />
                 <input
                   type="text"
