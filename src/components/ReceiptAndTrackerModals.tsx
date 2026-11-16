@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
-import { Check, Download, MapPin, Phone, Search, Send, X } from 'lucide-react';
+import { Check, Download, MapPin, Phone, Search, Send, ShieldCheck, X } from 'lucide-react';
 import type { AppLang, Order, ShopSettings } from '../types';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 import { getOrderStatusText } from '../utils/i18n';
@@ -120,6 +120,19 @@ export function ReceiptModal({
                   ${Number(order.grandTotal || 0).toFixed(2)}
                 </span>
               </div>
+              {order.paymentVerified && (
+                <div className="flex items-center justify-between gap-2 pt-1 text-[11px] font-bold text-emerald-700">
+                  <span className="inline-flex items-center gap-1">
+                    <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                    <span>{isEn ? 'Payment Verified' : 'បានផ្ទៀងផ្ទាត់ប្រាក់រួចរាល់'}</span>
+                  </span>
+                  {order.paymentRef && (
+                    <span className="font-mono-num text-[10px] text-slate-500">
+                      Ref: {order.paymentRef}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
 
             {order.payment === 'KHQR / ABA' && dynamicKhqr?.isOfficialEmv && (
@@ -333,13 +346,26 @@ export function OrderTrackerModal({
                         ))}
                       </div>
                       <div className="flex justify-between font-bold text-[#0D4A3E] pt-1.5 border-t border-slate-100">
-                        <span>
-                          {o.type === 'dinein'
-                            ? `${isEn ? 'Table' : 'តុ'} ${o.customer?.tableNum || 1} · ${o.payment}`
-                            : o.payment}
+                        <span className="flex items-center gap-1.5 flex-wrap">
+                          <span>
+                            {o.type === 'dinein'
+                              ? `${isEn ? 'Table' : 'តុ'} ${o.customer?.tableNum || 1} · ${o.payment}`
+                              : o.payment}
+                          </span>
+                          {o.paymentVerified && (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded-md">
+                              <ShieldCheck className="w-3 h-3 shrink-0" />
+                              <span>{isEn ? 'Paid' : 'បានបង់'}</span>
+                            </span>
+                          )}
                         </span>
                         <span className="font-mono-num">${Number(o.grandTotal || 0).toFixed(2)}</span>
                       </div>
+                      {o.paymentVerified && o.paymentRef && (
+                        <p className="text-[10px] font-mono-num text-slate-400">
+                          Ref: {o.paymentRef}
+                        </p>
+                      )}
                       {o.type === 'delivery' && (
                         <div className="flex gap-2">
                           <button

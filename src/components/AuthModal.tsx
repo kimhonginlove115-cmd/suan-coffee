@@ -887,6 +887,23 @@ export function AuthModal({
                       transition={{ duration: 0.18 }}
                       className="space-y-3.5"
                     >
+                      {/* Member Benefits Welcome Box */}
+                      <div className="bg-[#E8F2EF]/80 border border-[#0D4A3E]/15 rounded-2xl p-3.5 space-y-1.5">
+                        <p className="text-xs font-bold text-[#0D4A3E] flex items-center gap-1.5">
+                          <Award className="w-4 h-4 text-amber-500 shrink-0" />
+                          <span>
+                            {isEn
+                              ? `Become a ${shopSettings.brandTitle} Member`
+                              : `ចុះឈ្មោះសមាជិក ${shopSettings.brandTitle} (Free ១០០%)`}
+                          </span>
+                        </p>
+                        <p className="text-[11px] text-slate-600 leading-relaxed">
+                          {isEn
+                            ? 'Collect ★ points on every order, track your courier live on the map, reorder in 1 tap, and pay securely with KHQR.'
+                            : 'ទទួលបាន ★ ពិន្ទុរាល់ការកម្ម៉ង់, តាមដានអ្នកដឹកជញ្ជូន Live, កម្ម៉ង់ម្តងទៀតលឿន និងរក្សាទុកវិក្កយបត្រ KHQR ដោយសុវត្ថិភាព។'}
+                        </p>
+                      </div>
+
                       {capabilities?.telegramBotReady || capabilities?.telegramWidgetReady ? (
                         <>
                           {/* Primary Official 1-Click Telegram Bot Verification (Works on ALL domains & mobile) */}
@@ -894,41 +911,50 @@ export function AuthModal({
                             <div>
                               <p className="text-xs font-bold text-slate-900">
                                 {isEn
-                                  ? `Official Telegram Bot Login (@${capabilities.botUsername})`
-                                  : `ភ្ជាប់គណនីតាម Telegram Bot ផ្លូវការ (@${capabilities.botUsername})`}
+                                  ? `Register / Sign In via @${capabilities.botUsername}`
+                                  : `ចុះឈ្មោះ ឬ ចូលប្រើតាម Telegram Bot (@${capabilities.botUsername})`}
                               </p>
-                              <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                              <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
                                 {isEn
-                                  ? 'Instant 1-tap sign in using your official Telegram account. Earn points and track orders anywhere.'
-                                  : 'ចូលប្រើប្រាស់ភ្លាមៗ ១០០% តាម Telegram ផ្លូវការ ដើម្បីសន្សំពិន្ទុ និងតាមដានការកម្ម៉ង់។'}
+                                  ? '1) Click Open Bot → 2) Tap Start in Telegram → 3) Return here automatically signed in.'
+                                  : 'ជំហានងាយៗ៖ ១) ចុចប៊ូតុងបើក Telegram Bot → ២) ចុច Start ក្នុង Telegram → ៣) ត្រឡប់មកវិញភ្លាម!'}
                               </p>
                             </div>
-                            <input
-                              type="tel"
-                              value={phone}
-                              onChange={(e) => setPhone(e.target.value)}
-                              placeholder={
-                                isEn
-                                  ? 'Phone number for delivery (optional)'
-                                  : 'លេខទូរស័ព្ទភ្ជាប់ជាមួយគណនី (ស្រេចចិត្ត)'
-                              }
-                              className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num bg-white focus:outline-none focus:border-[#0D4A3E]"
-                            />
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              <input
+                                type="text"
+                                value={name}
+                                onChange={(e) => setName(e.target.value)}
+                                placeholder={
+                                  isEn ? 'Your Name (optional)' : 'ឈ្មោះរបស់អ្នក (ស្រេចចិត្ត)'
+                                }
+                                className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
+                              />
+                              <input
+                                type="tel"
+                                value={phone}
+                                onChange={(e) => setPhone(e.target.value)}
+                                placeholder={
+                                  isEn ? 'Phone number (optional)' : 'លេខទូរស័ព្ទ (ស្រេចចិត្ត)'
+                                }
+                                className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num bg-white focus:outline-none focus:border-[#0D4A3E]"
+                              />
+                            </div>
                             <button
                               type="button"
                               onClick={() => handleInitBotDeepLink('login')}
                               disabled={loading}
-                              className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs flex items-center justify-center gap-2 transition-colors active:scale-[0.98]"
+                              className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs flex items-center justify-center gap-2 transition-colors active:scale-[0.98] shadow-sm"
                             >
                               <Send className="w-3.5 h-3.5" />
                               <span>
                                 {isPollingTg && tgLinkMode === 'login'
                                   ? isEn
                                     ? 'Waiting for Start in Telegram...'
-                                    : 'កំពុងរង់ចាំការចុច Start លើ Telegram...'
+                                    : 'កំពុងរង់ចាំអ្នកចុច Start លើ Telegram...'
                                   : isEn
-                                    ? 'Open Telegram Bot to Sign In'
-                                    : 'បើក Telegram Bot ដើម្បីផ្ទៀងផ្ទាត់'}
+                                    ? 'Open Telegram Bot to Register / Sign In'
+                                    : 'បើក Telegram Bot ដើម្បីចុះឈ្មោះ / ចូលគណនី'}
                               </span>
                             </button>
 
@@ -936,7 +962,7 @@ export function AuthModal({
                               <div className="bg-white border border-sky-200 rounded-xl p-3 text-[11px] text-slate-700 space-y-2">
                                 <div className="flex items-center justify-between">
                                   <span>
-                                    {isEn ? 'Code: ' : 'កូដ៖ '}
+                                    {isEn ? 'Verification Code: ' : 'លេខកូដភ្ជាប់៖ '}
                                     <strong className="font-mono-num text-sky-700">{tgLinkNonce}</strong>
                                   </span>
                                   <span className="text-slate-400">
@@ -947,15 +973,22 @@ export function AuthModal({
                                   href={tgDeepLink}
                                   target="_blank"
                                   rel="noreferrer"
-                                  className="block w-full text-center bg-sky-50 hover:bg-sky-100 text-sky-700 font-bold py-2 rounded-lg border border-sky-200"
+                                  className="block w-full text-center bg-sky-50 hover:bg-sky-100 text-sky-700 font-bold py-2.5 rounded-lg border border-sky-200"
                                 >
-                                  {isEn ? 'Tap here to open Telegram Bot ↗' : 'ចុចទីនេះដើម្បីបើក Telegram Bot ↗'}
+                                  {isEn
+                                    ? 'Tap here to open Telegram Bot ↗'
+                                    : 'ចុចទីនេះដើម្បីបើក Telegram Bot ↗'}
                                 </a>
+                                <p className="text-[10px] text-slate-500 text-center">
+                                  {isEn
+                                    ? 'After tapping Start in Telegram, come right back — this window updates automatically.'
+                                    : 'បន្ទាប់ពីចុច Start ក្នុង Telegram រួច សូមត្រឡប់មកផ្ទាំងនេះវិញ ប្រព័ន្ធនឹងបើកដោយស្វ័យប្រវត្តិ។'}
+                                </p>
                               </div>
                             )}
                           </div>
 
-                          {/* Optional Web Widget Toggle (Only loaded if user opens it) */}
+                          {/* Optional Web Widget Toggle */}
                           {capabilities?.telegramWidgetReady && (
                             <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 text-center space-y-2">
                               <button
@@ -972,7 +1005,14 @@ export function AuthModal({
                                     : 'ឬ ចូលតាម Telegram Web Widget'}
                               </button>
                               {showWebWidget && (
-                                <div ref={widgetContainerRef} className="flex justify-center min-h-[42px] pt-1" />
+                                <div className="space-y-1.5 pt-1">
+                                  <div ref={widgetContainerRef} className="flex justify-center min-h-[42px]" />
+                                  <p className="text-[10px] text-slate-400">
+                                    {isEn
+                                      ? 'Requires BotFather /setdomain on custom domain. Use Open Telegram Bot above on any URL.'
+                                      : 'ប្រសិនបើបង្ហាញ Domain Invalid សូមប្រើប៊ូតុង «បើក Telegram Bot» ខាងលើ (ដំណើរការ ១០០% គ្រប់ទីកន្លែង)។'}
+                                  </p>
+                                </div>
                               )}
                             </div>
                           )}
@@ -987,7 +1027,7 @@ export function AuthModal({
                           <p>
                             {isEn
                               ? 'Shop owner can enable free Telegram login in Shop Admin → Settings by adding Bot Username and Bot Token from @BotFather.'
-                              : 'ដើម្បីបើកការចូលគណនី Telegram ផ្លូវការដោយឥតគិតថ្លៃ សូមម្ចាស់ហាងចូលទៅ គ្រប់គ្រងហាង → ការកំណត់ហាង រួចបញ្ចូល Bot Username និង Bot Token (បង្កើត Free ពី @BotFather) ។'}
+                              : 'ដើម្បីបើកការចុះឈ្មោះតាម Telegram ផ្លូវការដោយឥតគិតថ្លៃ សូមម្ចាស់ហាងចូលទៅ គ្រប់គ្រងហាង → ការកំណត់ហាង រួចបញ្ចូល Bot Username និង Bot Token (បង្កើត Free ពី @BotFather) ។'}
                           </p>
                         </div>
                       )}

@@ -103,6 +103,7 @@ function toAsciiMerchantText(input: string | undefined, fallback: string, maxLen
 export interface DynamicKhqrResult {
   payload: string;
   isOfficialEmv: boolean;
+  amount: number;
   formattedAmount: string;
   currency: 'USD' | 'KHR';
   currencyLabel: string;
@@ -207,6 +208,7 @@ export function buildDynamicKhqr(opts: {
     return {
       payload: `${withCrcPrefix}${crc}`,
       isOfficialEmv: true,
+      amount: Number(amountStr),
       formattedAmount,
       currency,
       currencyLabel: currency,
@@ -237,6 +239,7 @@ export function buildDynamicKhqr(opts: {
     return {
       payload: `${withCrcPrefix}${crc}`,
       isOfficialEmv: true,
+      amount: Number(amountStr),
       formattedAmount,
       currency,
       currencyLabel: currency,
@@ -248,6 +251,7 @@ export function buildDynamicKhqr(opts: {
   return {
     payload: '',
     isOfficialEmv: false,
+    amount: Number(amountStr),
     formattedAmount,
     currency,
     currencyLabel: currency,

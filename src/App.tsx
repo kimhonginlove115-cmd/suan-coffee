@@ -74,7 +74,7 @@ import { CoffeeCupSteamIllustration, DeliveryRiderIllustration } from './compone
 import { AuthModal } from './components/AuthModal';
 import { LocationPickerModal } from './components/LocationPickerModal';
 import { ItemCustomizerModal } from './components/ItemCustomizerModal';
-import { CartModal } from './components/CartModal';
+import { CartModal, type VerifiedPaymentState } from './components/CartModal';
 import { OrderTrackerModal, ReceiptModal } from './components/ReceiptAndTrackerModals';
 import { DriverConsole, LiveTrackModal } from './components/LiveTrackAndDriver';
 import { AdminDashboard, AdminPinModal } from './components/AdminDashboard';
@@ -320,9 +320,11 @@ export default function App() {
   );
 
   const syncOrderEverywhere = useCallback(
-    async (order: Order) => {
+    async (order: Order): Promise<{ ok: boolean; error?: string; order?: Order }> => {
+      let serverError: string | undefined;
+      let savedOrder: Order | undefined;
       try {
-        await fetchWithTimeout(
+        const res = await fetchWithTimeout(
           '/api/orders',
           {
             method: 'POST',
@@ -331,18 +333,35 @@ export default function App() {
           },
           10000
         );
+        const data = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          order?: Order;
+        };
+        if (!res.ok || data.ok === false) {
+          serverError = data.error || 'ការបញ្ជាក់ការកម្ម៉ង់ត្រូវបានបដិសេធដោយ Server';
+          return { ok: false, error: serverError };
+        }
+        savedOrder = data.order;
       } catch {
-        // ignore
+        if (order.payment === 'KHQR / ABA') {
+          return {
+            ok: false,
+            error: 'មិនអាចភ្ជាប់ទៅ Server ដើម្បីផ្ទៀងផ្ទាត់ KHQR បានទេ សូមសាកល្បងម្តងទៀត!',
+          };
+        }
       }
       const b = getFirebaseBase(shopSettings.firebaseUrl);
       if (b) {
         try {
+          const cleanOrder = { ...(savedOrder || order) };
+          delete cleanOrder.paymentProofToken;
           await fetchWithTimeout(
             `${b}/orders/${encodeURIComponent(order.id)}.json`,
             {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(order),
+              body: JSON.stringify(cleanOrder),
             },
             8000
           );
@@ -350,6 +369,7 @@ export default function App() {
           // ignore
         }
       }
+      return { ok: true, order: savedOrder };
     },
     [shopSettings.firebaseUrl]
   );
@@ -701,21 +721,24 @@ export default function App() {
     fee: number;
     subtotal: number;
     grandTotal: number;
+    paymentVerification?: VerifiedPaymentState;
     customer: Order['customer'];
-  }) => {
-    const earnedPoints = cart.reduce((s, i) => s + i.qty, 0);
-    if (currentMember) {
-      handleAuthenticated(
-        { ...currentMember, points: (currentMember.points || 0) + earnedPoints },
-        authToken
+  }): Promise<boolean> => {
+    const pv = payload.paymentVerification;
+    if (payload.payment === 'KHQR / ABA' && !pv?.proofToken) {
+      showToast(
+        isEn
+          ? 'Please verify KHQR payment amount before placing order!'
+          : 'សូមផ្ទៀងផ្ទាត់ការទូទាត់ KHQR ជាមុនសិន!'
       );
+      return false;
     }
 
     const customerPayload: Order['customer'] = currentMember
       ? { ...payload.customer, memberId: currentMember.id }
       : payload.customer;
 
-    const newOrder: Order = {
+    const orderForServer: Order = {
       id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
       createdAt: Date.now(),
       timestamp: new Date().toLocaleTimeString('km-KH', { hour: '2-digit', minute: '2-digit' }),
@@ -729,34 +752,64 @@ export default function App() {
       customer: customerPayload,
       driverCoords: null,
       status: 'Pending',
+      ...(pv
+        ? {
+            paymentVerified: true,
+            paymentVerifiedBy: pv.verifiedBy,
+            paymentPaidAmount: pv.paidAmount,
+            paymentCurrency: pv.currency,
+            paymentRef: pv.transactionRef,
+            paymentMd5: pv.md5,
+            paymentSlipImg: pv.slipImg,
+            paymentProofToken: pv.proofToken,
+          }
+        : {}),
     };
 
-    setOrders((prev) => [newOrder, ...prev]);
+    const syncRes = await syncOrderEverywhere(orderForServer);
+    if (!syncRes.ok) {
+      showToast(syncRes.error || 'ការបញ្ជាក់ការកម្ម៉ង់មិនជោគជ័យទេ');
+      return false;
+    }
+
+    const cleanOrder: Order = { ...(syncRes.order || orderForServer) };
+    delete cleanOrder.paymentProofToken;
+
+    const earnedPoints = cart.reduce((s, i) => s + i.qty, 0);
+    if (currentMember) {
+      handleAuthenticated(
+        { ...currentMember, points: (currentMember.points || 0) + earnedPoints },
+        authToken
+      );
+    }
+
+    setOrders((prev) => [cleanOrder, ...prev]);
     lastOrderCountRef.current += 1;
     setCart([]);
     setIsCartOpen(false);
 
-    await syncOrderEverywhere(newOrder);
-
-    const itemsTxt = newOrder.items
+    const itemsTxt = cleanOrder.items
       .map((i) => `• ${i.qty}x ${i.name} (${i.options}) = $${(i.unitPrice * i.qty).toFixed(2)}`)
       .join('\n');
     const locTxt =
-      newOrder.type === 'dinein'
-        ? `🪑 តុលេខ ${newOrder.customer.tableNum}`
-        : `📍 ${newOrder.customer.addressName}${
-            newOrder.customer.coords
-              ? `\n🗺 https://maps.google.com/?q=${newOrder.customer.coords.lat},${newOrder.customer.coords.lng}`
+      cleanOrder.type === 'dinein'
+        ? `🪑 តុលេខ ${cleanOrder.customer.tableNum}`
+        : `📍 ${cleanOrder.customer.addressName}${
+            cleanOrder.customer.coords
+              ? `\n🗺 https://maps.google.com/?q=${cleanOrder.customer.coords.lat},${cleanOrder.customer.coords.lng}`
               : ''
           }`;
     const uname = (shopSettings.tgUsername || '').replace('@', '').trim();
+    const verifiedLine = cleanOrder.paymentVerified
+      ? `\n✅ បានផ្ទៀងផ្ទាត់ KHQR${cleanOrder.paymentRef ? ` (Ref: ${cleanOrder.paymentRef})` : ''}`
+      : '';
     const tgUrl = uname
       ? `https://t.me/${uname}?text=${encodeURIComponent(
-          `☕ កម្ម៉ង់ថ្មី ${newOrder.id}\n👤 ${newOrder.customer.name} (${newOrder.customer.phone || '-'})\n${locTxt}\n\n${itemsTxt}\n\n💵 សរុប៖ $${newOrder.grandTotal.toFixed(2)} (${newOrder.payment})`
+          `☕ កម្ម៉ង់ថ្មី ${cleanOrder.id}\n👤 ${cleanOrder.customer.name} (${cleanOrder.customer.phone || '-'})\n${locTxt}\n\n${itemsTxt}\n\n💵 សរុប៖ $${cleanOrder.grandTotal.toFixed(2)} (${cleanOrder.payment})${verifiedLine}`
         )}`
       : '';
 
-    setReceiptState({ order: newOrder, tgUrl });
+    setReceiptState({ order: cleanOrder, tgUrl });
     if (payload.sendTg && tgUrl) {
       try {
         window.open(tgUrl, '_blank', 'noopener,noreferrer');
@@ -764,6 +817,7 @@ export default function App() {
         // receipt modal already provides direct <a> fallback
       }
     }
+    return true;
   };
 
   const handleUpdateOrderStatus = (orderId: string, status: OrderStatus) => {

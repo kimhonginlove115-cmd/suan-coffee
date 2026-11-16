@@ -204,6 +204,7 @@ const EMPTY_SECRETS: AdminSecretsConfig = {
   adminPin: '1234',
   botToken: '',
   chatId: '',
+  bakongToken: '',
   telegramGatewayToken: '',
   twilioAccountSid: '',
   twilioAuthToken: '',
@@ -298,6 +299,7 @@ export function AdminDashboard({
   const [generatingQRs, setGeneratingQRs] = useState(false);
   const [confirmClearMenu, setConfirmClearMenu] = useState(false);
   const [decodingKhqr, setDecodingKhqr] = useState(false);
+  const [previewSlipUrl, setPreviewSlipUrl] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(shopSettings);
@@ -1086,6 +1088,50 @@ export function AdminDashboard({
                         <p className="text-xs text-slate-500 mt-0.5">
                           {o.timestamp} · {cust.name} ({cust.phone}) · {o.payment}
                         </p>
+                        {o.payment === 'KHQR / ABA' && (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            {o.paymentVerified ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-lg">
+                                <ShieldCheck className="w-3 h-3 shrink-0" />
+                                <span>
+                                  {isEn ? 'Paid Verified' : 'ផ្ទៀងផ្ទាត់ប្រាក់រួច'}
+                                  {o.paymentPaidAmount !== undefined
+                                    ? ` (${
+                                        o.paymentCurrency === 'KHR'
+                                          ? `${Math.round(Number(o.paymentPaidAmount)).toLocaleString()} ៛`
+                                          : `$${Number(o.paymentPaidAmount).toFixed(2)}`
+                                      })`
+                                    : ''}
+                                  {o.paymentVerifiedBy === 'bakong_md5'
+                                    ? ' · Bakong Auto'
+                                    : o.paymentVerifiedBy === 'telegram_owner'
+                                      ? ' · Telegram Bot'
+                                      : o.paymentVerifiedBy === 'slip_ref'
+                                        ? ' · Slip & TX'
+                                        : ''}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-lg">
+                                {isEn ? 'Unverified KHQR' : 'KHQR មិនទាន់ផ្ទៀងផ្ទាត់'}
+                              </span>
+                            )}
+                            {o.paymentRef && (
+                              <span className="text-[10px] font-mono-num text-slate-500 bg-slate-100 px-2 py-0.5 rounded-lg">
+                                Ref: {o.paymentRef}
+                              </span>
+                            )}
+                            {o.paymentSlipImg && (
+                              <button
+                                type="button"
+                                onClick={() => setPreviewSlipUrl(o.paymentSlipImg || null)}
+                                className="inline-flex items-center gap-1 text-[10px] font-bold text-[#0D4A3E] bg-[#E8F2EF] hover:bg-[#d5ebe4] px-2 py-0.5 rounded-lg transition-colors"
+                              >
+                                <span>{isEn ? 'View Slip' : 'មើល Slip'}</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                       <span className="font-bold font-mono-num text-base shrink-0">
                         ${Number(o.grandTotal || 0).toFixed(2)}
@@ -2602,6 +2648,29 @@ export function AdminDashboard({
                       className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-[11px] font-mono-num bg-white"
                     />
                   </div>
+
+                  <div className="pt-2 border-t border-slate-200/80">
+                    <label className="text-[11px] font-bold text-[#0D4A3E] block mb-0.5">
+                      {isEn
+                        ? 'Bakong Open API Token (Auto Verify Paid Amount via MD5)'
+                        : 'Bakong Open API Token (ផ្ទៀងផ្ទាត់ប្រាក់ចូល & ចំនួនទឹកប្រាក់ Auto តាម MD5)'}
+                    </label>
+                    <input
+                      type="password"
+                      value={secrets.bakongToken || ''}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        setSecrets((prev) => ({ ...prev, bakongToken: val }));
+                      }}
+                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                      className="w-full px-2.5 py-1.5 border border-emerald-200 rounded-lg text-base sm:text-xs font-mono-num bg-white focus:outline-none focus:border-[#0D4A3E]"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1 leading-relaxed">
+                      {isEn
+                        ? 'Stored safely on server only. Checks Bakong NBC transaction MD5 + exact amount automatically every 2.5s; works alongside Telegram Bot approval.'
+                        : 'រក្សាទុកសុវត្ថិភាពលើ Server តែប៉ុណ្ណោះ។ ប្រព័ន្ធនឹងឆែកប្រតិបត្តិការ Bakong NBC & ចំនួនប្រាក់ពិតស្វ័យប្រវត្តិរៀងរាល់ 2.5 វិនាទី និងធ្វើការរួមជាមួយការអនុម័តតាម Telegram Bot។'}
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2893,6 +2962,37 @@ export function AdminDashboard({
                   ? '💾 Save Official Settings (Sync to All Devices)'
                   : '💾 រក្សាទុកការកំណត់ផ្លូវការ (ចែករំលែកគ្រប់គ្នា)'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {previewSlipUrl && (
+        <div
+          className="fixed inset-0 bg-slate-950/75 backdrop-blur-sm z-[90] flex items-center justify-center p-4"
+          onClick={() => setPreviewSlipUrl(null)}
+        >
+          <div
+            className="bg-white rounded-3xl p-3 max-w-sm w-full space-y-2.5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-1">
+              <span className="text-xs font-bold text-[#0D4A3E]">
+                {isEn ? 'Payment Slip' : 'រូបភាពវិក្កយបត្រវេរប្រាក់ (Slip)'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPreviewSlipUrl(null)}
+                className="p-1.5 rounded-full bg-slate-100 hover:bg-slate-200"
+                aria-label={isEn ? 'Close' : 'បិទ'}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <img
+              src={previewSlipUrl}
+              alt="Payment Slip"
+              className="w-full max-h-[70vh] object-contain rounded-2xl border border-slate-100 bg-slate-50"
+            />
           </div>
         </div>
       )}

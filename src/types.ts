@@ -78,6 +78,14 @@ export interface Order {
   type: OrderType;
   items: CartItem[];
   payment: PaymentMethod;
+  paymentVerified?: boolean;
+  paymentVerifiedBy?: 'bakong_md5' | 'telegram_owner' | 'slip_ref';
+  paymentRef?: string;
+  paymentPaidAmount?: number;
+  paymentCurrency?: 'USD' | 'KHR';
+  paymentMd5?: string;
+  paymentSlipImg?: string;
+  paymentProofToken?: string;
   subtotal: number;
   promoDisc: number;
   fee: number;
@@ -139,6 +147,7 @@ export interface AdminSecretsConfig {
   adminPin: string;
   botToken: string;
   chatId: string;
+  bakongToken: string;
   telegramGatewayToken: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
@@ -151,6 +160,8 @@ export interface AuthCapabilities {
   telegramWidgetReady: boolean;
   telegramBotReady: boolean;
   telegramContactReady: boolean;
+  telegramOrderVerifyReady?: boolean;
+  bakongVerifyReady?: boolean;
   phoneOtpReady: boolean;
   phoneOtpChannel: 'telegram_gateway' | 'twilio' | 'sms_webhook' | 'none';
   botUsername: string;
