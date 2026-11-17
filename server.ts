@@ -212,6 +212,9 @@ interface OtpChallenge {
 interface TelegramLinkSession {
   nonce: string;
   mode: 'login' | 'contact';
+  pollSecret: string;
+  verifyCode: string;
+  deviceLabel?: string;
   name?: string;
   memberId?: string;
   expectedPhone?: string;
@@ -219,6 +222,9 @@ interface TelegramLinkSession {
   createdAt: number;
   expiresAt: number;
   startedByTelegramId?: string;
+  startedChatId?: string;
+  promptMessageId?: number;
+  approvedByTelegram?: boolean;
   verifiedPhone?: string;
   verifiedUser?: {
     id: string;
@@ -355,6 +361,33 @@ function isValidPhone(normalized: string): boolean {
 
 function sanitizeText(val: unknown, maxLen = 80): string {
   return String(val || '').replace(/[<>]/g, '').trim().slice(0, maxLen);
+}
+
+function summarizeDevice(userAgent: unknown): string {
+  const ua = String(userAgent || '');
+  const os = /iPhone|iPad/i.test(ua)
+    ? 'iPhone / iPad'
+    : /Android/i.test(ua)
+    ? 'Android'
+    : /Windows/i.test(ua)
+    ? 'Windows PC'
+    : /Mac OS X|Macintosh/i.test(ua)
+    ? 'Mac'
+    : /Linux/i.test(ua)
+    ? 'Linux'
+    : 'Web Device';
+  const browser = /Edg\//i.test(ua)
+    ? 'Edge'
+    : /CriOS|Chrome/i.test(ua)
+    ? 'Chrome'
+    : /Firefox|FxiOS/i.test(ua)
+    ? 'Firefox'
+    : /Safari/i.test(ua) && !/Chrome|CriOS/i.test(ua)
+    ? 'Safari'
+    : /Telegram/i.test(ua)
+    ? 'Telegram'
+    : 'Browser';
+  return sanitizeText(`${os} · ${browser}`, 44);
 }
 
 function normalizeTgUsername(raw: unknown): string {
@@ -1054,6 +1087,34 @@ async function answerTelegramCallback(botToken: string, callbackId: string, text
   }
 }
 
+async function editTelegramReplyText(
+  botToken: string,
+  chatId: string,
+  messageId: number,
+  text: string
+): Promise<void> {
+  if (!botToken || !chatId || !messageId) return;
+  try {
+    await fetchWithTimeout(
+      `https://api.telegram.org/bot${botToken}/editMessageText`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          text,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [] },
+        }),
+      },
+      4500
+    );
+  } catch {
+    // ignore
+  }
+}
+
 async function editTelegramPaymentMessage(
   botToken: string,
   sess: PaymentVerifySession,
@@ -1287,6 +1348,53 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
         const targetId = colonIdx > 0 ? dataStr.slice(colonIdx + 1) : '';
         const reviewerName = sanitizeText(cb.from?.first_name || cb.from?.username || 'ម្ចាស់ហាង', 40);
 
+        if (action === 'tgauth_ok' || action === 'tgauth_no') {
+          const authSess = targetId ? tgLinkStore.get(targetId) : undefined;
+          if (!authSess || authSess.expiresAt < Date.now()) {
+            await answerTelegramCallback(botToken, cb.id, 'តំណផ្ទៀងផ្ទាត់ផុតកំណត់ហើយ');
+            continue;
+          }
+          if (!cb.from?.id || String(cb.from.id) !== String(authSess.startedByTelegramId || '')) {
+            await answerTelegramCallback(botToken, cb.id, 'សំណើនេះមិនមែនសម្រាប់គណនីអ្នកទេ');
+            continue;
+          }
+          const editChatId = String(cb.message?.chat?.id ?? authSess.startedChatId ?? cb.from.id);
+          const editMsgId = Number(cb.message?.message_id ?? authSess.promptMessageId ?? 0);
+
+          if (action === 'tgauth_no') {
+            authSess.approvedByTelegram = false;
+            authSess.error =
+              'ការចូលគណនីត្រូវបានបដិសេធដោយម្ចាស់ Telegram ផ្ទាល់! សូមកុំចែករំលែកតំណភ្ជាប់ឬ QR Code ទៅអ្នកដទៃ។';
+            await answerTelegramCallback(botToken, cb.id, '🛡️ បានបដិសេធការចូលដោយសុវត្ថិភាព!');
+            if (editMsgId) {
+              await editTelegramReplyText(
+                botToken,
+                editChatId,
+                editMsgId,
+                `🛡️ <b>បានបដិសេធការចូលគណនី · ${shopBrand}</b>\n\n` +
+                  `🔐 កូដវគ្គ៖ <code>${authSess.verifyCode}</code>\n` +
+                  `❌ សំណើនេះត្រូវបានបិទខ្ទប់ដោយសុវត្ថិភាព។`
+              );
+            }
+          } else {
+            authSess.approvedByTelegram = true;
+            authSess.error = undefined;
+            await answerTelegramCallback(botToken, cb.id, '✅ អនុញ្ញាតការចូលគណនីជោគជ័យ!');
+            if (editMsgId) {
+              await editTelegramReplyText(
+                botToken,
+                editChatId,
+                editMsgId,
+                `✅ <b>បានអនុញ្ញាតការចូលគណនី · ${shopBrand}</b>\n\n` +
+                  `🔐 កូដផ្ទៀងផ្ទាត់៖ <code>${authSess.verifyCode}</code>\n` +
+                  `💻 ឧបករណ៍៖ <b>${authSess.deviceLabel || 'Web Browser'}</b>\n\n` +
+                  `📲 <i>សូមត្រឡប់ទៅគេហទំព័រវិញ គណនីរបស់អ្នកកំពុងដំណើរការស្វ័យប្រវត្តិ!</i>`
+              );
+            }
+          }
+          continue;
+        }
+
         if (action === 'ord_ok' || action === 'ord_rdy' || action === 'ord_done') {
           const ord = targetId ? serverOrders.get(targetId) : undefined;
           if (!ord) {
@@ -1382,6 +1490,7 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
         if (matchedNonce && tgLinkStore.has(matchedNonce)) {
           const targetSess = tgLinkStore.get(matchedNonce)!;
           targetSess.startedByTelegramId = String(from.id);
+          targetSess.startedChatId = String(from.id);
           targetSess.verifiedUser = {
             id: String(from.id),
             username: from.username || '',
@@ -1390,14 +1499,16 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
 
           if (targetSess.mode === 'contact') {
             const expectedLine = targetSess.expectedPhone
-              ? `\n📱 លេខទូរស័ព្ទត្រូវផ្ទៀងផ្ទាត់៖ <b>${targetSess.expectedPhone}</b>`
+              ? `\n📱 លេខត្រូវផ្ទៀងផ្ទាត់៖ <b>${targetSess.expectedPhone}</b>`
               : '';
-            await sendTelegramBotMessage(
+            const sentPrompt = await sendTelegramBotMessage(
               botToken,
               String(from.id),
               `🌿 <b>សូមស្វាគមន៍មកកាន់ ${shopBrand}!</b>\n` +
-                `<i>ចុះឈ្មោះសមាជិក & ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ (Free ១០០%)</i>\n\n` +
-                `👋 សួស្តី <b>${fullFirstName}</b>!${expectedLine}\n` +
+                `<i>ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ & Telegram (Free ១០០%)</i>\n\n` +
+                `👋 សួស្តី <b>${fullFirstName}</b>!\n` +
+                `🔐 កូដលើអេក្រង់៖ <code>${targetSess.verifyCode}</code>\n` +
+                `💻 ឧបករណ៍៖ <b>${targetSess.deviceLabel || 'Web Browser'}</b>${expectedLine}\n\n` +
                 `ដើម្បីផ្ទៀងផ្ទាត់លេខទូរស័ព្ទពិតប្រាកដ សូមចុចប៊ូតុង <b>«📱 ចែករំលែកលេខទូរស័ព្ទចុះឈ្មោះ (Free)»</b> ខាងក្រោម 👇`,
               {
                 keyboard: [
@@ -1412,20 +1523,36 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
                 one_time_keyboard: true,
               }
             );
+            if (sentPrompt.messageId) targetSess.promptMessageId = sentPrompt.messageId;
           } else {
-            await sendTelegramBotMessage(
+            targetSess.approvedByTelegram = false;
+            const sentPrompt = await sendTelegramBotMessage(
               botToken,
               String(from.id),
-              `🌿 <b>សូមស្វាគមន៍មកកាន់ ${shopBrand}!</b>\n` +
-                `<i>Welcome to ${shopBrand} · Official Member</i>\n\n` +
-                `👋 សួស្តី <b>${fullFirstName}</b>!\n` +
-                `✅ គណនី Telegram របស់អ្នកត្រូវបានចុះឈ្មោះ & ភ្ជាប់ដោយសុវត្ថិភាពរួចរាល់ ១០០%។\n\n` +
-                `🎁 <b>អត្ថប្រយោជន៍សមាជិករបស់អ្នក៖</b>\n` +
-                `• ⭐ សន្សំពិន្ទុស្វ័យប្រវត្តិ (+1 ★ រាល់ពេលកម្ម៉ង់ ១ មុខ)\n` +
-                `• 🛵 តាមដានអ្នកដឹកជញ្ជូន Live លើផែនទី\n` +
-                `• 🔐 បង់ប្រាក់ KHQR មានការផ្ទៀងផ្ទាត់សុវត្ថិភាព\n\n` +
-                `📲 សូមត្រឡប់ទៅគេហទំព័រវិញ គណនីរបស់អ្នកនឹងបើកដោយស្វ័យប្រវត្តិ!`
+              `🛡️ <b>សំណើចូលគណនី · ${shopBrand}</b>\n` +
+                `<i>Telegram Bot 2FA Verification</i>\n\n` +
+                `👤 គណនី៖ <b>${fullFirstName}</b>\n` +
+                `💻 ឧបករណ៍ស្នើសុំ៖ <b>${targetSess.deviceLabel || 'Web Browser'}</b>\n` +
+                `🔐 កូដផ្ទៀងផ្ទាត់លើអេក្រង់៖ <code>${targetSess.verifyCode}</code>\n\n` +
+                `⚠️ <i>សូមពិនិត្យថា កូដ <b>${targetSess.verifyCode}</b> ត្រូវគ្នានឹងអេក្រង់វេបសាយ មុននឹងចុច «✅ អនុញ្ញាត»៖</i>`,
+              {
+                inline_keyboard: [
+                  [
+                    {
+                      text: `✅ អនុញ្ញាតចូល (${targetSess.verifyCode})`,
+                      callback_data: `tgauth_ok:${matchedNonce}`,
+                    },
+                  ],
+                  [
+                    {
+                      text: '❌ បដិសេធ (មិនមែនខ្ញុំទេ)',
+                      callback_data: `tgauth_no:${matchedNonce}`,
+                    },
+                  ],
+                ],
+              }
             );
+            if (sentPrompt.messageId) targetSess.promptMessageId = sentPrompt.messageId;
           }
         } else {
           // Direct /start or /register in Telegram Bot without web nonce
@@ -2027,7 +2154,7 @@ app.post('/api/auth/telegram/verify-widget', (req, res) => {
 // ---- Official Telegram Bot 1-Click Deep Link & Free Share-Contact Phone Verification ----
 app.post('/api/auth/telegram/init-link', async (req, res) => {
   const ip = getClientIp(req);
-  const rl = checkRateLimit(`tg_init_${ip}`, 12, 5 * 60 * 1000);
+  const rl = checkRateLimit(`tg_init_${ip}`, 30, 5 * 60 * 1000);
   if (!rl.allowed) {
     return res.status(429).json({ ok: false, error: 'សូមរង់ចាំបន្តិចមុននឹងបង្កើតតំណភ្ជាប់ថ្មី' });
   }
@@ -2061,9 +2188,16 @@ app.post('/api/auth/telegram/init-link', async (req, res) => {
   const authMember = getAuthenticatedMember(req);
   const prefix = mode === 'contact' ? 'ph' : 'eb';
   const nonce = `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
+  const pollSecret = crypto.randomBytes(16).toString('hex');
+  const verifyCode = String(crypto.randomInt(1000, 9999));
+  const deviceLabel = summarizeDevice(req.headers['user-agent']);
+
   tgLinkStore.set(nonce, {
     nonce,
     mode,
+    pollSecret,
+    verifyCode,
+    deviceLabel,
     name: sanitizeText(req.body?.name, 60),
     memberId: authMember?.member.id,
     expectedPhone: mode === 'contact' && rawExpected ? rawExpected : undefined,
@@ -2074,6 +2208,9 @@ app.post('/api/auth/telegram/init-link', async (req, res) => {
   return res.json({
     ok: true,
     nonce,
+    pollSecret,
+    verifyCode,
+    deviceLabel,
     mode,
     botUsername,
     deepLink: `https://t.me/${botUsername}?start=${nonce}`,
@@ -2085,6 +2222,9 @@ function completeTelegramSession(nonce: string, session: TelegramLinkSession) {
   tgLinkStore.delete(nonce);
   if (session.error) {
     return { ok: false, error: session.error };
+  }
+  if (session.mode === 'login' && !session.approvedByTelegram) {
+    return { ok: false, error: 'សូមចុចប៊ូតុង «✅ អនុញ្ញាតចូល» នៅក្នុង Telegram Bot ជាមុនសិន' };
   }
   // Never treat user-typed phone as verified; ONLY accept session.verifiedPhone from Telegram Share Contact
   const verifiedPhone = session.verifiedPhone;
@@ -2113,16 +2253,20 @@ function completeTelegramSession(nonce: string, session: TelegramLinkSession) {
 
 app.post('/api/auth/telegram/poll-link', async (req, res) => {
   const nonce = String(req.body?.nonce || '').trim();
+  const pollSecret = String(req.body?.pollSecret || '').trim();
   const session = tgLinkStore.get(nonce);
   if (!session || session.expiresAt < Date.now()) {
     return res.status(404).json({ ok: false, error: 'តំណភ្ជាប់ផុតកំណត់ហើយ' });
+  }
+  if (session.pollSecret && (!pollSecret || !safeEqualHex(pollSecret, session.pollSecret))) {
+    return res.status(403).json({ ok: false, error: 'មិនមានសិទ្ធិពិនិត្យវគ្គផ្ទៀងផ្ទាត់នេះទេ' });
   }
 
   if (session.error) {
     tgLinkStore.delete(nonce);
     return res.status(409).json({ ok: false, error: session.error });
   }
-  if (session.mode === 'login' && session.verifiedUser) {
+  if (session.mode === 'login' && session.verifiedUser && session.approvedByTelegram) {
     const out = completeTelegramSession(nonce, session);
     return res.status(out.ok ? 200 : 409).json(out);
   }
@@ -2142,7 +2286,7 @@ app.post('/api/auth/telegram/poll-link', async (req, res) => {
       tgLinkStore.delete(nonce);
       return res.status(409).json({ ok: false, error: updated.error });
     }
-    if (updated.mode === 'login' && updated.verifiedUser) {
+    if (updated.mode === 'login' && updated.verifiedUser && updated.approvedByTelegram) {
       const out = completeTelegramSession(nonce, updated);
       return res.status(out.ok ? 200 : 409).json(out);
     }
@@ -2150,17 +2294,26 @@ app.post('/api/auth/telegram/poll-link', async (req, res) => {
       const out = completeTelegramSession(nonce, updated);
       return res.status(out.ok ? 200 : 409).json(out);
     }
+    const step = !updated.startedByTelegramId
+      ? 'awaiting_start'
+      : updated.mode === 'login'
+      ? 'awaiting_approval'
+      : 'awaiting_contact';
     return res.json({
       ok: true,
       linked: false,
-      step: updated.startedByTelegramId ? 'awaiting_contact' : 'awaiting_start',
+      step,
     });
   }
 
   return res.json({
     ok: true,
     linked: false,
-    step: session.startedByTelegramId ? 'awaiting_contact' : 'awaiting_start',
+    step: !session.startedByTelegramId
+      ? 'awaiting_start'
+      : session.mode === 'login'
+      ? 'awaiting_approval'
+      : 'awaiting_contact',
   });
 });
 
@@ -2987,6 +3140,22 @@ app.post('/api/admin/telegram/test', async (req, res) => {
       botUsername = meData.result.username;
       botFirstName = meData.result.first_name || botUsername;
       botUsernameCache.set(candidateToken, botUsername);
+
+      // Register clean slash commands in Telegram Bot Menu
+      fetchWithTimeout(
+        `https://api.telegram.org/bot${candidateToken}/setMyCommands`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            commands: [
+              { command: 'start', description: 'ចាប់ផ្តើម & ផ្ទៀងផ្ទាត់គណនី' },
+              { command: 'register', description: 'ចុះឈ្មោះសមាជិកហាង' },
+            ],
+          }),
+        },
+        3500
+      ).catch(() => {});
 
       if (!getEffectiveChatId()) {
         try {

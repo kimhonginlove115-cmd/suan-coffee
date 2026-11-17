@@ -129,6 +129,9 @@ interface OtpChallenge {
 interface TelegramLinkSession {
   nonce: string;
   mode: 'login' | 'contact';
+  pollSecret: string;
+  verifyCode: string;
+  deviceLabel?: string;
   name?: string;
   memberId?: string;
   expectedPhone?: string;
@@ -136,6 +139,9 @@ interface TelegramLinkSession {
   createdAt: number;
   expiresAt: number;
   startedByTelegramId?: string;
+  startedChatId?: string;
+  promptMessageId?: number;
+  approvedByTelegram?: boolean;
   verifiedPhone?: string;
   verifiedUser?: {
     id: string;
@@ -522,6 +528,33 @@ function isValidPhone(normalized: string): boolean {
 
 function sanitizeText(val: unknown, maxLen = 80): string {
   return String(val || '').replace(/[<>]/g, '').trim().slice(0, maxLen);
+}
+
+function summarizeDevice(userAgent: unknown): string {
+  const ua = String(userAgent || '');
+  const os = /iPhone|iPad/i.test(ua)
+    ? 'iPhone / iPad'
+    : /Android/i.test(ua)
+    ? 'Android'
+    : /Windows/i.test(ua)
+    ? 'Windows PC'
+    : /Mac OS X|Macintosh/i.test(ua)
+    ? 'Mac'
+    : /Linux/i.test(ua)
+    ? 'Linux'
+    : 'Web Device';
+  const browser = /Edg\//i.test(ua)
+    ? 'Edge'
+    : /CriOS|Chrome/i.test(ua)
+    ? 'Chrome'
+    : /Firefox|FxiOS/i.test(ua)
+    ? 'Firefox'
+    : /Safari/i.test(ua) && !/Chrome|CriOS/i.test(ua)
+    ? 'Safari'
+    : /Telegram/i.test(ua)
+    ? 'Telegram'
+    : 'Browser';
+  return sanitizeText(`${os} · ${browser}`, 44);
 }
 
 function normalizeTgUsername(raw: unknown): string {
@@ -1131,6 +1164,34 @@ async function answerTelegramCallback(botToken: string, callbackId: string, text
   }
 }
 
+async function editTelegramReplyText(
+  botToken: string,
+  chatId: string,
+  messageId: number,
+  text: string
+): Promise<void> {
+  if (!botToken || !chatId || !messageId) return;
+  try {
+    await fetchWithTimeout(
+      `https://api.telegram.org/bot${botToken}/editMessageText`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          text,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [] },
+        }),
+      },
+      4500
+    );
+  } catch {
+    // ignore
+  }
+}
+
 function getShopBrandTitle(db: PersistedDatabase): string {
   return (
     (db.shopSettings && typeof db.shopSettings.brandTitle === 'string' && db.shopSettings.brandTitle.trim()) ||
@@ -1378,6 +1439,61 @@ async function processTelegramUpdates(
         const targetId = colonIdx > 0 ? dataStr.slice(colonIdx + 1) : '';
         const reviewerName = sanitizeText(cb.from?.first_name || cb.from?.username || 'ម្ចាស់ហាង', 40);
 
+        if (action === 'tgauth_ok' || action === 'tgauth_no') {
+          const authSess: TelegramLinkSession | null = targetId
+            ? targetId === activeNonce && sessionRef
+              ? sessionRef
+              : safeJsonParse<TelegramLinkSession>(await kvGet(env, `tg:${targetId}`))
+            : null;
+          if (!authSess || authSess.expiresAt < Date.now()) {
+            await answerTelegramCallback(botToken, cb.id, 'តំណផ្ទៀងផ្ទាត់ផុតកំណត់ហើយ');
+            continue;
+          }
+          if (!cb.from?.id || String(cb.from.id) !== String(authSess.startedByTelegramId || '')) {
+            await answerTelegramCallback(botToken, cb.id, 'សំណើនេះមិនមែនសម្រាប់គណនីអ្នកទេ');
+            continue;
+          }
+          const editChatId = String(cb.message?.chat?.id ?? authSess.startedChatId ?? cb.from.id);
+          const editMsgId = Number(cb.message?.message_id ?? authSess.promptMessageId ?? 0);
+
+          if (action === 'tgauth_no') {
+            authSess.approvedByTelegram = false;
+            authSess.error =
+              'ការចូលគណនីត្រូវបានបដិសេធដោយម្ចាស់ Telegram ផ្ទាល់! សូមកុំចែករំលែកតំណភ្ជាប់ឬ QR Code ទៅអ្នកដទៃ។';
+            await kvPut(env, `tg:${targetId}`, JSON.stringify(authSess), 600);
+            if (targetId === activeNonce) sessionRef = authSess;
+            await answerTelegramCallback(botToken, cb.id, '🛡️ បានបដិសេធការចូលដោយសុវត្ថិភាព!');
+            if (editMsgId) {
+              await editTelegramReplyText(
+                botToken,
+                editChatId,
+                editMsgId,
+                `🛡️ <b>បានបដិសេធការចូលគណនី · ${shopBrand}</b>\n\n` +
+                  `🔐 កូដវគ្គ៖ <code>${authSess.verifyCode}</code>\n` +
+                  `❌ សំណើនេះត្រូវបានបិទខ្ទប់ដោយសុវត្ថិភាព។`
+              );
+            }
+          } else {
+            authSess.approvedByTelegram = true;
+            authSess.error = undefined;
+            await kvPut(env, `tg:${targetId}`, JSON.stringify(authSess), 600);
+            if (targetId === activeNonce) sessionRef = authSess;
+            await answerTelegramCallback(botToken, cb.id, '✅ អនុញ្ញាតការចូលគណនីជោគជ័យ!');
+            if (editMsgId) {
+              await editTelegramReplyText(
+                botToken,
+                editChatId,
+                editMsgId,
+                `✅ <b>បានអនុញ្ញាតការចូលគណនី · ${shopBrand}</b>\n\n` +
+                  `🔐 កូដផ្ទៀងផ្ទាត់៖ <code>${authSess.verifyCode}</code>\n` +
+                  `💻 ឧបករណ៍៖ <b>${authSess.deviceLabel || 'Web Browser'}</b>\n\n` +
+                  `📲 <i>សូមត្រឡប់ទៅគេហទំព័រវិញ គណនីរបស់អ្នកកំពុងដំណើរការស្វ័យប្រវត្តិ!</i>`
+              );
+            }
+          }
+          continue;
+        }
+
         if (action === 'ord_ok' || action === 'ord_rdy' || action === 'ord_done') {
           const ordIdx = targetId ? db.orders.findIndex((o) => String(o.id) === targetId) : -1;
           if (ordIdx === -1) {
@@ -1485,25 +1601,25 @@ async function processTelegramUpdates(
 
         if (matchedNonce && targetSess) {
           targetSess.startedByTelegramId = String(from.id);
+          targetSess.startedChatId = String(from.id);
           targetSess.verifiedUser = {
             id: String(from.id),
             username: from.username || '',
             firstName: fullFirstName,
           };
-          await kvPut(env, `tg:${matchedNonce}`, JSON.stringify(targetSess), 600);
-          await kvPut(env, `tg_user_active:${from.id}`, matchedNonce, 600);
-          if (matchedNonce === activeNonce) sessionRef = targetSess;
 
           if (targetSess.mode === 'contact') {
             const expectedLine = targetSess.expectedPhone
-              ? `\n📱 លេខទូរស័ព្ទត្រូវផ្ទៀងផ្ទាត់៖ <b>${targetSess.expectedPhone}</b>`
+              ? `\n📱 លេខត្រូវផ្ទៀងផ្ទាត់៖ <b>${targetSess.expectedPhone}</b>`
               : '';
-            await sendTelegramBotMessage(
+            const sentPrompt = await sendTelegramBotMessage(
               botToken,
               String(from.id),
               `🌿 <b>សូមស្វាគមន៍មកកាន់ ${shopBrand}!</b>\n` +
-                `<i>ចុះឈ្មោះសមាជិក & ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ (Free ១០០%)</i>\n\n` +
-                `👋 សួស្តី <b>${fullFirstName}</b>!${expectedLine}\n` +
+                `<i>ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ & Telegram (Free ១០០%)</i>\n\n` +
+                `👋 សួស្តី <b>${fullFirstName}</b>!\n` +
+                `🔐 កូដលើអេក្រង់៖ <code>${targetSess.verifyCode}</code>\n` +
+                `💻 ឧបករណ៍៖ <b>${targetSess.deviceLabel || 'Web Browser'}</b>${expectedLine}\n\n` +
                 `ដើម្បីផ្ទៀងផ្ទាត់លេខទូរស័ព្ទពិតប្រាកដ សូមចុចប៊ូតុង <b>«📱 ចែករំលែកលេខទូរស័ព្ទចុះឈ្មោះ (Free)»</b> ខាងក្រោម 👇`,
               {
                 keyboard: [[{ text: '📱 ចែករំលែកលេខទូរស័ព្ទចុះឈ្មោះ (Free)', request_contact: true }]],
@@ -1511,21 +1627,41 @@ async function processTelegramUpdates(
                 one_time_keyboard: true,
               }
             );
+            if (sentPrompt.messageId) targetSess.promptMessageId = sentPrompt.messageId;
           } else {
-            await sendTelegramBotMessage(
+            targetSess.approvedByTelegram = false;
+            const sentPrompt = await sendTelegramBotMessage(
               botToken,
               String(from.id),
-              `🌿 <b>សូមស្វាគមន៍មកកាន់ ${shopBrand}!</b>\n` +
-                `<i>Welcome to ${shopBrand} · Official Member</i>\n\n` +
-                `👋 សួស្តី <b>${fullFirstName}</b>!\n` +
-                `✅ គណនី Telegram របស់អ្នកត្រូវបានចុះឈ្មោះ & ភ្ជាប់ដោយសុវត្ថិភាពរួចរាល់ ១០០%។\n\n` +
-                `🎁 <b>អត្ថប្រយោជន៍សមាជិករបស់អ្នក៖</b>\n` +
-                `• ⭐ សន្សំពិន្ទុស្វ័យប្រវត្តិ (+1 ★ រាល់ពេលកម្ម៉ង់ ១ មុខ)\n` +
-                `• 🛵 តាមដានអ្នកដឹកជញ្ជូន Live លើផែនទី\n` +
-                `• 🔐 បង់ប្រាក់ KHQR មានការផ្ទៀងផ្ទាត់សុវត្ថិភាព\n\n` +
-                `📲 សូមត្រឡប់ទៅគេហទំព័រវិញ គណនីរបស់អ្នកនឹងបើកដោយស្វ័យប្រវត្តិ!`
+              `🛡️ <b>សំណើចូលគណនី · ${shopBrand}</b>\n` +
+                `<i>Telegram Bot 2FA Verification</i>\n\n` +
+                `👤 គណនី៖ <b>${fullFirstName}</b>\n` +
+                `💻 ឧបករណ៍ស្នើសុំ៖ <b>${targetSess.deviceLabel || 'Web Browser'}</b>\n` +
+                `🔐 កូដផ្ទៀងផ្ទាត់លើអេក្រង់៖ <code>${targetSess.verifyCode}</code>\n\n` +
+                `⚠️ <i>សូមពិនិត្យថា កូដ <b>${targetSess.verifyCode}</b> ត្រូវគ្នានឹងអេក្រង់វេបសាយ មុននឹងចុច «✅ អនុញ្ញាត»៖</i>`,
+              {
+                inline_keyboard: [
+                  [
+                    {
+                      text: `✅ អនុញ្ញាតចូល (${targetSess.verifyCode})`,
+                      callback_data: `tgauth_ok:${matchedNonce}`,
+                    },
+                  ],
+                  [
+                    {
+                      text: '❌ បដិសេធ (មិនមែនខ្ញុំទេ)',
+                      callback_data: `tgauth_no:${matchedNonce}`,
+                    },
+                  ],
+                ],
+              }
             );
+            if (sentPrompt.messageId) targetSess.promptMessageId = sentPrompt.messageId;
           }
+
+          await kvPut(env, `tg:${matchedNonce}`, JSON.stringify(targetSess), 600);
+          await kvPut(env, `tg_user_active:${from.id}`, matchedNonce, 600);
+          if (matchedNonce === activeNonce) sessionRef = targetSess;
         } else {
           const upsertRes = upsertMember(db, {
             name: fullFirstName,
@@ -2133,10 +2269,10 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     return jsonResponse({ ok: true, token, member: toPublicMember(member) });
   }
 
-  // 5. Telegram Bot 1-Click Init Link (Free Login + Free Share Contact)
+  // 5. Telegram Bot 1-Click Init Link (Free 2FA Approval + Free Share Contact)
   if (path === '/api/auth/telegram/init-link' && method === 'POST') {
     const ip = getClientIp(req);
-    const rl = await checkRateLimit(env, `tg_init_${ip}`, 12, 300);
+    const rl = await checkRateLimit(env, `tg_init_${ip}`, 30, 300);
     if (!rl.allowed) {
       return jsonResponse({ ok: false, error: 'សូមរង់ចាំបន្តិចមុននឹងបង្កើតតំណភ្ជាប់ថ្មី' }, 429);
     }
@@ -2165,9 +2301,16 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     const authMember = await getAuthenticatedMember(req, env, db);
     const prefix = mode === 'contact' ? 'ph' : 'eb';
     const nonce = `${prefix}_${randomHex(6)}`;
+    const pollSecret = randomHex(16);
+    const verifyCode = String(1000 + (Number(randomSixDigitOtp()) % 9000));
+    const deviceLabel = summarizeDevice(req.headers.get('user-agent'));
+
     const sess: TelegramLinkSession = {
       nonce,
       mode,
+      pollSecret,
+      verifyCode,
+      deviceLabel,
       name: sanitizeText(body.name, 60),
       memberId: authMember?.member.id,
       expectedPhone: mode === 'contact' && rawExpected ? rawExpected : undefined,
@@ -2179,6 +2322,9 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     return jsonResponse({
       ok: true,
       nonce,
+      pollSecret,
+      verifyCode,
+      deviceLabel,
       mode,
       botUsername,
       deepLink: `https://t.me/${botUsername}?start=${nonce}`,
@@ -2190,6 +2336,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
   if (path === '/api/auth/telegram/poll-link' && method === 'POST') {
     const body = await readJsonBody(req);
     const nonce = String(body.nonce || '').trim();
+    const pollSecret = String(body.pollSecret || '').trim();
     const rawSess = await kvGet(env, `tg:${nonce}`);
     const parsedSess = safeJsonParse<TelegramLinkSession>(rawSess);
     if (!parsedSess) return jsonResponse({ ok: false, error: 'តំណភ្ជាប់ផុតកំណត់ហើយ' }, 404);
@@ -2198,11 +2345,20 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       await kvDelete(env, `tg:${nonce}`);
       return jsonResponse({ ok: false, error: 'តំណភ្ជាប់ផុតកំណត់ហើយ' }, 404);
     }
+    if (session.pollSecret && (!pollSecret || !safeEqualHex(pollSecret, session.pollSecret))) {
+      return jsonResponse({ ok: false, error: 'មិនមានសិទ្ធិពិនិត្យវគ្គផ្ទៀងផ្ទាត់នេះទេ' }, 403);
+    }
 
     const finalize = async (target: TelegramLinkSession) => {
       await kvDelete(env, `tg:${nonce}`);
       if (target.error) {
         return jsonResponse({ ok: false, error: target.error }, 409);
+      }
+      if (target.mode === 'login' && !target.approvedByTelegram) {
+        return jsonResponse(
+          { ok: false, error: 'សូមចុចប៊ូតុង «✅ អនុញ្ញាតចូល» នៅក្នុង Telegram Bot ជាមុនសិន' },
+          409
+        );
       }
       // Never accept unverified session phone; ONLY accept target.verifiedPhone from Telegram Share Contact
       const verifiedPhone = target.verifiedPhone;
@@ -2240,7 +2396,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     };
 
     if (session.error) return finalize(session);
-    if (session.mode === 'login' && session.verifiedUser) return finalize(session);
+    if (session.mode === 'login' && session.verifiedUser && session.approvedByTelegram) return finalize(session);
     if (session.mode === 'contact' && session.verifiedUser && session.verifiedPhone) return finalize(session);
 
     const botToken = getEffectiveBotToken(env, db);
@@ -2250,13 +2406,18 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     }
 
     if (session.error) return finalize(session);
-    if (session.mode === 'login' && session.verifiedUser) return finalize(session);
+    if (session.mode === 'login' && session.verifiedUser && session.approvedByTelegram) return finalize(session);
     if (session.mode === 'contact' && session.verifiedUser && session.verifiedPhone) return finalize(session);
 
+    const step = !session.startedByTelegramId
+      ? 'awaiting_start'
+      : session.mode === 'login'
+      ? 'awaiting_approval'
+      : 'awaiting_contact';
     return jsonResponse({
       ok: true,
       linked: false,
-      step: session.startedByTelegramId ? 'awaiting_contact' : 'awaiting_start',
+      step,
     });
   }
 
@@ -3113,6 +3274,21 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
         botUsername = meData.result.username;
         botFirstName = meData.result.first_name || botUsername;
         botUsernameCache.set(candidateToken, botUsername);
+
+        fetchWithTimeout(
+          `https://api.telegram.org/bot${candidateToken}/setMyCommands`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              commands: [
+                { command: 'start', description: 'ចាប់ផ្តើម & ផ្ទៀងផ្ទាត់គណនី' },
+                { command: 'register', description: 'ចុះឈ្មោះសមាជិកហាង' },
+              ],
+            }),
+          },
+          3500
+        ).catch(() => {});
 
         if (!getEffectiveChatId(env, db)) {
           try {

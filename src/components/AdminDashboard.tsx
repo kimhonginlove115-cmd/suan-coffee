@@ -7,6 +7,7 @@ import {
   Coffee,
   Copy,
   DollarSign,
+  ExternalLink,
   Globe,
   Layers,
   Loader2,
@@ -3216,6 +3217,21 @@ export function AdminDashboard({
                     {isEn ? 'Test Bot & Auto-Detect @Username' : 'តេស្ត Bot & ទាញយក @Username អូតូ'}
                   </span>
                 </button>
+                {secrets.botToken && draft.botUsername && (
+                  <a
+                    href={`https://t.me/${draft.botUsername.replace(/^@+/, '')}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 bg-white hover:bg-sky-100 border border-sky-300 text-[#0073ad] font-bold rounded-lg text-xs inline-flex items-center gap-1.5 transition"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>
+                      {isEn
+                        ? `Open @${draft.botUsername.replace(/^@+/, '')}`
+                        : `បើកតេស្ត @${draft.botUsername.replace(/^@+/, '')}`}
+                    </span>
+                  </a>
+                )}
                 <span className="text-[11px] text-slate-600">
                   {isEn
                     ? 'Create free bot in @BotFather → paste token → click Test → Save.'

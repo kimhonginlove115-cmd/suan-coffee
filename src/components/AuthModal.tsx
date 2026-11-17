@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
+import QRCode from 'qrcode';
 import {
   Check,
   CheckCircle2,
@@ -12,10 +13,12 @@ import {
   MapPin,
   MessageSquare,
   Phone,
+  QrCode,
   RefreshCw,
   RotateCcw,
   Send,
   ShieldCheck,
+  Smartphone,
   Star,
   User as UserIcon,
   X,
@@ -125,16 +128,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const quickPinInputRef = useRef<HTMLInputElement | null>(null);
   const quickNameInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Telegram Bot 1-Click & Contact Verification State
-  const [tgMode, setTgMode] = useState<'contact' | 'login'>('contact');
+  // Telegram Bot 2FA & Contact Verification State
+  const [tgMode, setTgMode] = useState<'login' | 'contact'>('login');
   const [tgExpectedPhone, setTgExpectedPhone] = useState('');
   const [tgLinkBusy, setTgLinkBusy] = useState(false);
   const [tgDeepLink, setTgDeepLink] = useState<string | null>(null);
   const [tgNonce, setTgNonce] = useState<string | null>(null);
+  const [tgPollSecret, setTgPollSecret] = useState<string | null>(null);
+  const [tgVerifyCode, setTgVerifyCode] = useState('');
+  const [tgDeviceLabel, setTgDeviceLabel] = useState('');
+  const [tgQrDataUrl, setTgQrDataUrl] = useState('');
+  const [tgStep, setTgStep] = useState<'awaiting_start' | 'awaiting_approval' | 'awaiting_contact'>('awaiting_start');
+  const [tgRemainingSec, setTgRemainingSec] = useState(0);
   const [tgBotUsername, setTgBotUsername] = useState('');
   const [tgWaiting, setTgWaiting] = useState(false);
   const [showFallbackWidget, setShowFallbackWidget] = useState(false);
   const tgWidgetContainerRef = useRef<HTMLDivElement | null>(null);
+  const tgAutoTriedRef = useRef(false);
 
   // Official Telegram Gateway / SMS OTP Verification State
   const [showSmsOtp, setShowSmsOtp] = useState(true);
@@ -210,11 +220,41 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     return () => clearTimeout(t);
   }, [otpCooldown]);
 
-  // Reset transient error when switching tabs
+  // Reset transient error & auto-init guard when modal closes or tab/mode changes
   useEffect(() => {
     setAuthError('');
     setChannelVerifyPrompt(null);
   }, [authTab, tgMode]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      tgAutoTriedRef.current = false;
+      setTgWaiting(false);
+      setTgDeepLink(null);
+      setTgNonce(null);
+      setTgPollSecret(null);
+      setTgVerifyCode('');
+      setTgDeviceLabel('');
+      setTgQrDataUrl('');
+      setTgStep('awaiting_start');
+      setTgRemainingSec(0);
+    }
+  }, [isOpen]);
+
+  // Countdown timer for active Telegram verification link
+  useEffect(() => {
+    if (!isOpen || !tgWaiting || tgRemainingSec <= 0) return;
+    const t = setTimeout(() => {
+      setTgRemainingSec((prev) => {
+        if (prev <= 1) {
+          setTgWaiting(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [isOpen, tgWaiting, tgRemainingSec]);
 
   // Focus PIN input automatically when server requests PIN
   useEffect(() => {
@@ -234,16 +274,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   }, [isOpen, prefillPhone, currentMember]);
 
-  // Poll function for active Telegram bot link (used by interval + window focus/visibility)
+  // Poll function for active Telegram bot link (requires cryptographic pollSecret)
   const pollTelegramNonce = useCallback(
-    async (nonce: string) => {
+    async (nonce: string, secretOverride?: string | null) => {
+      const secret = secretOverride ?? tgPollSecret;
+      if (!secret) return false;
       try {
         const res = await fetchWithTimeout(
           '/api/auth/telegram/poll-link',
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ nonce }),
+            body: JSON.stringify({ nonce, pollSecret: secret }),
           },
           7000
         );
@@ -252,18 +294,32 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           setTgWaiting(false);
           setTgDeepLink(null);
           setTgNonce(null);
+          setTgPollSecret(null);
+          setTgVerifyCode('');
+          setTgDeviceLabel('');
+          setTgQrDataUrl('');
+          setTgRemainingSec(0);
           onAuthenticated(data.member, data.token || null);
           onToast(
             isEn
-              ? `Signed in via Telegram as ${data.member.name}`
-              : `ចូលគណនី / ផ្ទៀងផ្ទាត់តាម Telegram ជោគជ័យ៖ ${data.member.name}`
+              ? `Verified & signed in via Telegram: ${data.member.name}`
+              : `ផ្ទៀងផ្ទាត់ Telegram ជោគជ័យ៖ ${data.member.name}`
           );
           return true;
+        }
+        if (data?.ok && !data.linked) {
+          if (data.step) setTgStep(data.step);
+          if (data.verifyCode) setTgVerifyCode(data.verifyCode);
         }
         if (data?.ok === false && data?.error) {
           setTgWaiting(false);
           setTgDeepLink(null);
           setTgNonce(null);
+          setTgPollSecret(null);
+          setTgVerifyCode('');
+          setTgDeviceLabel('');
+          setTgQrDataUrl('');
+          setTgRemainingSec(0);
           setAuthError(data.error);
           return true;
         }
@@ -272,23 +328,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
       return false;
     },
-    [isEn, onAuthenticated, onToast]
+    [isEn, onAuthenticated, onToast, tgPollSecret]
   );
 
   // Poll Telegram deep link + re-poll immediately when customer returns from Telegram app
   useEffect(() => {
-    if (!isOpen || !tgWaiting || !tgNonce) return;
+    if (!isOpen || !tgWaiting || !tgNonce || !tgPollSecret) return;
     let stopped = false;
 
     const timer = setInterval(() => {
       if (!stopped && document.visibilityState !== 'hidden') {
-        pollTelegramNonce(tgNonce);
+        pollTelegramNonce(tgNonce, tgPollSecret);
       }
-    }, 2200);
+    }, 2000);
 
     const handleReturnFromTelegram = () => {
       if (!stopped && document.visibilityState !== 'hidden') {
-        pollTelegramNonce(tgNonce);
+        pollTelegramNonce(tgNonce, tgPollSecret);
       }
     };
     window.addEventListener('focus', handleReturnFromTelegram);
@@ -300,7 +356,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       window.removeEventListener('focus', handleReturnFromTelegram);
       document.removeEventListener('visibilitychange', handleReturnFromTelegram);
     };
-  }, [isOpen, tgWaiting, tgNonce, pollTelegramNonce]);
+  }, [isOpen, tgWaiting, tgNonce, tgPollSecret, pollTelegramNonce]);
 
   // Official Telegram Login Widget (Optional Fallback inside Telegram tab)
   useEffect(() => {
@@ -481,53 +537,107 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  // Start Telegram Bot 1-Click Login or Free Contact Verify
-  const handleStartTelegramLink = async (
-    mode: 'login' | 'contact',
-    expectedPhoneOverride?: string
-  ) => {
-    setAuthError('');
-    setTgMode(mode);
-    const expectedPhone =
-      mode === 'contact' ? (expectedPhoneOverride ?? tgExpectedPhone).trim() : '';
-    setTgLinkBusy(true);
-    try {
-      const res = await fetchWithTimeout(
-        '/api/auth/telegram/init-link',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+  // Start Telegram Bot 2FA Login or Free Contact Verify (+ generate scannable QR code)
+  const handleStartTelegramLink = useCallback(
+    async (mode: 'login' | 'contact', expectedPhoneOverride?: string) => {
+      setAuthError('');
+      setTgMode(mode);
+      setTgWaiting(false);
+      setTgStep('awaiting_start');
+      setTgDeepLink(null);
+      setTgNonce(null);
+      setTgPollSecret(null);
+      setTgVerifyCode('');
+      setTgDeviceLabel('');
+      setTgQrDataUrl('');
+      setTgRemainingSec(0);
+
+      const expectedPhone =
+        mode === 'contact' ? (expectedPhoneOverride ?? tgExpectedPhone).trim() : '';
+      setTgLinkBusy(true);
+      try {
+        const res = await fetchWithTimeout(
+          '/api/auth/telegram/init-link',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+            },
+            body: JSON.stringify({
+              mode,
+              name: quickName.trim() || otpName.trim() || currentMember?.name || '',
+              ...(expectedPhone ? { expectedPhone } : {}),
+            }),
           },
-          body: JSON.stringify({
-            mode,
-            name: quickName.trim() || otpName.trim() || currentMember?.name || '',
-            ...(expectedPhone ? { expectedPhone } : {}),
-          }),
-        },
-        9000
-      );
-      const data = await res.json();
-      if (!res.ok || !data?.ok || !data.deepLink) {
-        setAuthError(
-          data?.error ||
-            (isEn
-              ? 'Telegram verification is not enabled yet. Please use Quick Phone Login.'
-              : 'Telegram មិនទាន់បានបើកដំណើរការទេ! សូមប្រើលេខទូរស័ព្ទចូលរហ័សវិញ។')
+          9000
         );
-        return;
+        const data = await res.json();
+        if (!res.ok || !data?.ok || !data.deepLink) {
+          setAuthError(
+            data?.error ||
+              (isEn
+                ? 'Telegram verification is not enabled yet. Please use Quick Phone Login.'
+                : 'Telegram មិនទាន់បានបើកដំណើរការទេ! សូមប្រើលេខទូរស័ព្ទចូលរហ័សវិញ។')
+          );
+          return;
+        }
+        setTgNonce(data.nonce);
+        setTgPollSecret(data.pollSecret || null);
+        setTgVerifyCode(data.verifyCode || '');
+        setTgDeviceLabel(data.deviceLabel || '');
+        setTgDeepLink(data.deepLink);
+        setTgStep('awaiting_start');
+        setTgRemainingSec(Number(data.expiresInSeconds) || 600);
+        if (data.botUsername) setTgBotUsername(data.botUsername);
+
+        try {
+          const qrUrl = await QRCode.toDataURL(data.deepLink, {
+            width: 176,
+            margin: 1,
+            color: { dark: '#0D4A3E', light: '#FFFFFF' },
+          });
+          setTgQrDataUrl(qrUrl);
+        } catch {
+          setTgQrDataUrl('');
+        }
+
+        setTgWaiting(true);
+      } catch {
+        setAuthError(isEn ? 'Could not reach server.' : 'មិនអាចភ្ជាប់ទៅកាន់ Server បានទេ');
+      } finally {
+        setTgLinkBusy(false);
       }
-      setTgNonce(data.nonce);
-      setTgDeepLink(data.deepLink);
-      if (data.botUsername) setTgBotUsername(data.botUsername);
-      setTgWaiting(true);
-    } catch {
-      setAuthError(isEn ? 'Could not reach server.' : 'មិនអាចភ្ជាប់ទៅកាន់ Server បានទេ');
-    } finally {
-      setTgLinkBusy(false);
+    },
+    [authToken, currentMember?.name, isEn, otpName, quickName, tgExpectedPhone]
+  );
+
+  // Auto-generate secure QR & Telegram link smoothly when user opens the Telegram tab
+  useEffect(() => {
+    if (
+      isOpen &&
+      !currentMember &&
+      authTab === 'telegram' &&
+      caps?.telegramBotReady &&
+      !tgDeepLink &&
+      !tgLinkBusy &&
+      !authError &&
+      !tgAutoTriedRef.current
+    ) {
+      tgAutoTriedRef.current = true;
+      handleStartTelegramLink(tgMode);
     }
-  };
+  }, [
+    isOpen,
+    currentMember,
+    authTab,
+    caps?.telegramBotReady,
+    tgDeepLink,
+    tgLinkBusy,
+    authError,
+    tgMode,
+    handleStartTelegramLink,
+  ]);
 
   // Optional SMS / Gateway OTP Send
   const handleSendOtp = async () => {
@@ -1050,140 +1160,284 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </div>
                   ) : (
                     <>
-                      {/* 1-Tap Telegram Bot Verification (Share Phone Free OR 1-Tap Login) */}
+                      {/* Modern Telegram Bot 2FA & Share-Phone Verification */}
                       {hasTelegram && (
                         <div className="bg-white rounded-2xl p-4 sm:p-5 border border-stone-200 space-y-3.5">
                           <div className="space-y-1">
                             <h4 className="text-sm font-extrabold text-[#1E2420] flex items-center gap-1.5">
-                              <Send className="w-4 h-4 text-sky-600" />
-                              {isEn ? 'Verify Phone & Sign In via Telegram' : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទតាម Telegram (Free)'}
+                              <ShieldCheck className="w-4 h-4 text-[#0088cc]" />
+                              {isEn
+                                ? 'Telegram Bot Security Verification'
+                                : 'ផ្ទៀងផ្ទាត់សុវត្ថិភាពតាម Telegram Bot'}
                             </h4>
-                            <p className="text-xs text-stone-500">
-                              {tgMode === 'contact'
+                            <p className="text-xs text-stone-500 leading-relaxed">
+                              {tgMode === 'login'
                                 ? isEn
-                                  ? 'Share your real SIM number inside Telegram Bot — 100% free and spoofing-proof.'
-                                  : 'ចុចបើក Telegram រួចចុច Share លេខទូរស័ព្ទពិតរបស់អ្នក — Free ១០០% និងការពារការបន្លំលេខ។'
+                                  ? 'Open our bot or scan the QR code, match the 4-digit security code, and tap Approve.'
+                                  : 'ចុចបើក Bot ឬស្កេន QR Code រួចផ្ទៀងផ្ទាត់លេខកូដ ៤ ខ្ទង់ ហើយចុច «អនុញ្ញាតចូល» ក្នុង Telegram។'
                                 : isEn
-                                ? 'Tap Start in our Telegram bot — returning to this page signs you in automatically.'
-                                : 'ចុច Start ក្នុង Telegram Bot ហើយត្រឡប់មកវិញ ប្រព័ន្ធនឹងភ្ជាប់ចូលអូតូភ្លាមៗ។'}
+                                ? 'Share your real SIM phone number inside Telegram Bot — 100% free & spoofing-proof.'
+                                : 'ចុចបើក Bot ហើយចុច «Share លេខទូរស័ព្ទពិត» ដើម្បីបញ្ជាក់លេខ SIM ដោយឥតគិតថ្លៃ។'}
                             </p>
                           </div>
 
-                          {/* Option toggles: Share Phone Contact (Default) vs 1-Tap Login */}
+                          {/* Option toggles: Telegram 2FA Login vs Share Phone Contact */}
                           <div className="grid grid-cols-2 gap-1.5 bg-stone-100 p-1 rounded-xl">
                             <button
                               type="button"
                               onClick={() => {
-                                setTgMode('contact');
-                                setTgWaiting(false);
-                                setTgDeepLink(null);
-                              }}
-                              className={`min-h-[40px] px-2.5 rounded-lg text-xs font-bold transition ${
-                                tgMode === 'contact'
-                                  ? 'bg-white text-[#0D4A3E] shadow-xs'
-                                  : 'text-stone-600 hover:text-stone-900'
-                              }`}
-                            >
-                              {isEn ? 'Verify Phone (Free)' : 'ផ្ទៀងផ្ទាត់លេខ (Free)'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
+                                if (tgMode === 'login') return;
+                                tgAutoTriedRef.current = false;
                                 setTgMode('login');
                                 setTgWaiting(false);
                                 setTgDeepLink(null);
+                                setTgNonce(null);
+                                setTgPollSecret(null);
+                                setTgQrDataUrl('');
+                                setTgVerifyCode('');
                               }}
-                              className={`min-h-[40px] px-2.5 rounded-lg text-xs font-bold transition ${
+                              className={`min-h-[44px] px-2.5 rounded-lg text-xs font-bold transition ${
                                 tgMode === 'login'
                                   ? 'bg-white text-sky-700 shadow-xs'
                                   : 'text-stone-600 hover:text-stone-900'
                               }`}
                             >
-                              {isEn ? '1-Tap Telegram' : 'Telegram ១ ជំហាន'}
+                              {isEn ? 'Telegram 2FA Login' : 'ផ្ទៀង Telegram 2FA'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (tgMode === 'contact') return;
+                                tgAutoTriedRef.current = false;
+                                setTgMode('contact');
+                                setTgWaiting(false);
+                                setTgDeepLink(null);
+                                setTgNonce(null);
+                                setTgPollSecret(null);
+                                setTgQrDataUrl('');
+                                setTgVerifyCode('');
+                              }}
+                              className={`min-h-[44px] px-2.5 rounded-lg text-xs font-bold transition ${
+                                tgMode === 'contact'
+                                  ? 'bg-white text-[#0D4A3E] shadow-xs'
+                                  : 'text-stone-600 hover:text-stone-900'
+                              }`}
+                            >
+                              {isEn ? 'Verify Phone (Free)' : 'Share លេខទូរស័ព្ទ (Free)'}
                             </button>
                           </div>
 
-                          {tgMode === 'contact' && !tgDeepLink && (
-                            <div>
-                              <label className="text-[11px] font-bold text-stone-600 block mb-1">
-                                {isEn ? 'Phone Number to Verify' : 'លេខទូរស័ព្ទត្រូវផ្ទៀងផ្ទាត់'}{' '}
+                          {tgMode === 'contact' && (
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] font-bold text-stone-600 block">
+                                {isEn ? 'Lock Expected Phone' : 'កំណត់លេខទូរស័ព្ទត្រូវផ្ទៀងផ្ទាត់'}{' '}
                                 <span className="font-normal text-stone-400">
-                                  {isEn ? '(optional · leave empty to pull from Telegram)' : '(ស្រេចចិត្ត · ទុកទំនេរដើម្បីទាញពី Telegram)'}
+                                  {isEn
+                                    ? '(optional · leave empty to use Telegram SIM)'
+                                    : '(ស្រេចចិត្ត · ទុកទំនេរដើម្បីទាញលេខពី Telegram)'}
                                 </span>
                               </label>
-                              <input
-                                type="tel"
-                                inputMode="tel"
-                                value={tgExpectedPhone}
-                                onChange={(e) => setTgExpectedPhone(e.target.value)}
-                                placeholder="012 345 678"
-                                className="w-full min-h-[44px] px-3.5 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm font-mono-num focus:outline-none focus:border-[#0D4A3E] focus:bg-white transition"
-                              />
+                              <div className="flex gap-2">
+                                <input
+                                  type="tel"
+                                  inputMode="tel"
+                                  value={tgExpectedPhone}
+                                  onChange={(e) => setTgExpectedPhone(e.target.value)}
+                                  placeholder="012 345 678"
+                                  className="flex-1 min-h-[44px] px-3.5 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm font-mono-num focus:outline-none focus:border-[#0D4A3E] focus:bg-white transition"
+                                />
+                                {tgDeepLink && (
+                                  <button
+                                    type="button"
+                                    disabled={tgLinkBusy}
+                                    onClick={() => handleStartTelegramLink('contact')}
+                                    className="shrink-0 min-h-[44px] px-3 bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold rounded-xl text-xs transition"
+                                  >
+                                    {isEn ? 'Apply' : 'ប្តូរលេខ'}
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           )}
 
-                          {!tgDeepLink ? (
+                          {tgLinkBusy && !tgDeepLink ? (
+                            <div className="bg-sky-50/70 border border-sky-200 rounded-xl p-6 flex items-center justify-center gap-2 text-xs font-semibold text-sky-900">
+                              <Loader2 className="w-4 h-4 animate-spin text-[#0088cc]" />
+                              <span>
+                                {isEn
+                                  ? 'Generating encrypted Telegram security link...'
+                                  : 'កំពុងបង្កើតតំណភ្ជាប់សុវត្ថិភាព Telegram...'}
+                              </span>
+                            </div>
+                          ) : !tgDeepLink ? (
                             <button
                               type="button"
                               disabled={tgLinkBusy}
                               onClick={() => handleStartTelegramLink(tgMode)}
                               className="w-full min-h-[48px] py-3 bg-[#0088cc] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 hover:bg-[#0073ad] transition disabled:opacity-60"
                             >
-                              {tgLinkBusy ? (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                              ) : (
-                                <Send className="w-4 h-4" />
-                              )}
+                              <Send className="w-4 h-4" />
                               <span>
                                 {tgMode === 'contact'
                                   ? isEn
-                                    ? 'Verify Number via Telegram Bot'
-                                    : 'បើក Telegram ដើម្បី Share លេខ'
+                                    ? 'Generate Phone Share Link & QR'
+                                    : 'បង្កើតតំណ Share លេខ & QR Code'
                                   : isEn
-                                  ? 'Generate Telegram Login Link'
-                                  : 'បើក Telegram Bot ដើម្បីចូល'}
+                                  ? 'Generate 2FA Login Link & QR'
+                                  : 'បង្កើតតំណ 2FA & QR Code'}
                               </span>
                             </button>
                           ) : (
-                            <div className="bg-sky-50 border border-sky-200 rounded-xl p-3.5 space-y-3">
-                              <a
-                                href={tgDeepLink}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="w-full min-h-[48px] py-3 px-4 bg-[#0088cc] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 hover:bg-[#0073ad] transition"
-                              >
-                                <ExternalLink className="w-4 h-4" />
-                                <span>
-                                  {isEn
-                                    ? `Open Telegram (${tgBotUsername ? '@' + tgBotUsername.replace(/^@/, '') : 'Bot'})`
-                                    : `ចុចបើក Telegram (${tgBotUsername ? '@' + tgBotUsername.replace(/^@/, '') : 'Bot'})`}
-                                </span>
-                              </a>
-                              {tgMode === 'contact' && (
-                                <p className="text-[11px] text-sky-900 leading-relaxed bg-white/80 rounded-lg px-2.5 py-2 border border-sky-100">
-                                  {isEn
-                                    ? '1. Tap Start in Telegram → 2. Tap "Share Phone Number" → 3. Return here to complete automatically.'
-                                    : '១. ចុច Start ក្នុង Telegram → ២. ចុចប៊ូតុង «ចែករំលែកលេខទូរស័ព្ទ (Free)» → ៣. ត្រឡប់មកទីនេះវិញ គណនីនឹងផ្ទៀងផ្ទាត់អូតូ!'}
-                                </p>
-                              )}
-                              <div className="flex items-center justify-between text-xs text-sky-800 px-1">
-                                <span className="flex items-center gap-1.5 font-medium">
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                  {tgMode === 'contact'
-                                    ? isEn
-                                      ? 'Waiting for Share Contact...'
-                                      : 'កំពុងរង់ចាំការ Share លេខ...'
-                                    : isEn
-                                    ? 'Waiting for Start tap...'
-                                    : 'កំពុងរង់ចាំការចុច Start...'}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => tgNonce && pollTelegramNonce(tgNonce)}
-                                  className="font-bold underline hover:text-sky-950"
-                                >
-                                  {isEn ? 'Check now' : 'ពិនិត្យម្តងទៀត'}
-                                </button>
+                            <div className="bg-sky-50/75 border border-sky-200 rounded-2xl p-3.5 sm:p-4 space-y-3.5">
+                              {/* Anti-Phishing Visual Security Code + Device + Timer Header */}
+                              <div className="bg-white rounded-xl p-3 border border-sky-100 flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-[11px] font-bold text-stone-500 uppercase tracking-wide">
+                                    {isEn ? 'Security Match Code' : 'លេខកូដផ្ទៀងផ្ទាត់សុវត្ថិភាព'}
+                                  </p>
+                                  <p className="font-mono-num text-2xl font-extrabold text-[#0D4A3E] tracking-[0.28em] leading-tight mt-0.5">
+                                    {tgVerifyCode || '••••'}
+                                  </p>
+                                  {tgDeviceLabel && (
+                                    <p className="text-[11px] text-stone-500 mt-0.5 flex items-center gap-1 truncate">
+                                      <Smartphone className="w-3 h-3 shrink-0 text-stone-400" />
+                                      <span className="truncate">{tgDeviceLabel}</span>
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <p className="text-[11px] font-semibold text-stone-400">
+                                    {isEn ? 'Expires' : 'សុពលភាព'}
+                                  </p>
+                                  <p
+                                    className={`font-mono-num text-sm font-extrabold mt-0.5 ${
+                                      tgRemainingSec > 60 ? 'text-[#0088cc]' : 'text-amber-600'
+                                    }`}
+                                  >
+                                    {tgRemainingSec > 0
+                                      ? `${String(Math.floor(tgRemainingSec / 60)).padStart(2, '0')}:${String(
+                                          tgRemainingSec % 60
+                                        ).padStart(2, '0')}`
+                                      : isEn
+                                      ? 'Expired'
+                                      : 'ផុតកំណត់'}
+                                  </p>
+                                </div>
+                              </div>
+
+                              {/* QR Code + Primary 1-Tap Deep Link Button */}
+                              <div className="flex flex-col sm:flex-row items-center gap-3.5">
+                                {tgQrDataUrl && (
+                                  <div className="bg-white p-2 rounded-xl border border-stone-200 shrink-0 flex flex-col items-center">
+                                    <img
+                                      src={tgQrDataUrl}
+                                      alt={isEn ? 'Telegram Verification QR Code' : 'QR Code ផ្ទៀងផ្ទាត់ Telegram'}
+                                      className="w-28 h-28 object-contain"
+                                    />
+                                    <span className="text-[10px] font-bold text-stone-500 mt-1 flex items-center gap-1">
+                                      <QrCode className="w-3 h-3 text-[#0D4A3E]" />
+                                      {isEn ? 'Scan with phone' : 'ស្កេនលើទូរស័ព្ទ'}
+                                    </span>
+                                  </div>
+                                )}
+
+                                <div className="w-full flex-1 space-y-2">
+                                  <a
+                                    href={tgDeepLink}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="w-full min-h-[48px] py-3 px-4 bg-[#0088cc] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 hover:bg-[#0073ad] active:scale-[0.99] transition shadow-xs"
+                                  >
+                                    <ExternalLink className="w-4 h-4 shrink-0" />
+                                    <span className="truncate">
+                                      {isEn
+                                        ? `Open Telegram (${tgBotUsername ? '@' + tgBotUsername.replace(/^@/, '') : 'Bot'})`
+                                        : `បើក Telegram (${tgBotUsername ? '@' + tgBotUsername.replace(/^@/, '') : 'Bot'})`}
+                                    </span>
+                                  </a>
+
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={tgLinkBusy}
+                                      onClick={() => handleStartTelegramLink(tgMode)}
+                                      className="min-h-[40px] px-2.5 bg-white hover:bg-stone-50 border border-stone-200 text-stone-700 font-bold rounded-xl text-xs flex items-center justify-center gap-1 transition"
+                                    >
+                                      <RefreshCw className="w-3.5 h-3.5" />
+                                      <span>{isEn ? 'New Code' : 'កូដថ្មី'}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => tgNonce && pollTelegramNonce(tgNonce, tgPollSecret)}
+                                      className="min-h-[40px] px-2.5 bg-white hover:bg-sky-100/70 border border-sky-200 text-[#0073ad] font-bold rounded-xl text-xs flex items-center justify-center gap-1 transition"
+                                    >
+                                      <Check className="w-3.5 h-3.5" />
+                                      <span>{isEn ? 'Check Now' : 'ពិនិត្យភ្លាម'}</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Clean 3-Step Numeric Status Tracker (no pulsing dots, no static pills) */}
+                              <div className="bg-white/90 rounded-xl p-3 border border-sky-100 space-y-1.5 text-xs">
+                                <div className="flex items-center gap-2">
+                                  {tgStep !== 'awaiting_start' ? (
+                                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                                  ) : tgWaiting ? (
+                                    <Loader2 className="w-4 h-4 animate-spin text-[#0088cc] shrink-0" />
+                                  ) : (
+                                    <span className="w-4 h-4 text-center font-mono-num font-bold text-stone-400 shrink-0">
+                                      1
+                                    </span>
+                                  )}
+                                  <span
+                                    className={
+                                      tgStep !== 'awaiting_start'
+                                        ? 'text-emerald-800 font-semibold'
+                                        : 'text-stone-800 font-bold'
+                                    }
+                                  >
+                                    {isEn
+                                      ? '1. Open bot & tap Start in Telegram'
+                                      : '១. ចុចបើក Bot រួចចុច Start ក្នុង Telegram'}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                  {tgStep === 'awaiting_approval' || tgStep === 'awaiting_contact' ? (
+                                    <Loader2 className="w-4 h-4 animate-spin text-[#0088cc] shrink-0" />
+                                  ) : (
+                                    <span className="w-4 h-4 text-center font-mono-num font-bold text-stone-400 shrink-0">
+                                      2
+                                    </span>
+                                  )}
+                                  <span
+                                    className={
+                                      tgStep === 'awaiting_approval' || tgStep === 'awaiting_contact'
+                                        ? 'text-[#0073ad] font-bold'
+                                        : 'text-stone-500'
+                                    }
+                                  >
+                                    {tgMode === 'login'
+                                      ? isEn
+                                        ? `2. Confirm code ${tgVerifyCode} → tap "Approve Login"`
+                                        : `២. ផ្ទៀងលេខកូដ ${tgVerifyCode} រួចចុច «អនុញ្ញាតចូល»`
+                                      : isEn
+                                      ? '2. Tap "Share Phone Number" button in Telegram'
+                                      : '២. ចុចប៊ូតុង «ចែករំលែកលេខទូរស័ព្ទ (Free)»'}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                  <span className="w-4 h-4 text-center font-mono-num font-bold text-stone-400 shrink-0">
+                                    3
+                                  </span>
+                                  <span className="text-stone-500">
+                                    {isEn
+                                      ? '3. Automatically signs in right here'
+                                      : '៣. ប្រព័ន្ធនឹងភ្ជាប់ចូលគណនីស្វ័យប្រវត្តិ'}
+                                  </span>
+                                </div>
                               </div>
                             </div>
                           )}
@@ -1478,12 +1732,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </div>
 
                     {tgDeepLink && tgMode === 'contact' && (
-                      <div className="bg-white border border-sky-200 rounded-lg p-2.5 space-y-2">
+                      <div className="bg-white border border-sky-200 rounded-lg p-3 space-y-2">
+                        {tgVerifyCode && (
+                          <div className="flex items-center justify-between text-[11px] bg-sky-50 px-2.5 py-1.5 rounded-md border border-sky-100">
+                            <span className="text-stone-600 font-semibold">
+                              {isEn ? 'Security Code:' : 'កូដផ្ទៀងផ្ទាត់៖'}
+                            </span>
+                            <span className="font-mono-num font-extrabold text-[#0D4A3E] tracking-[0.2em]">
+                              {tgVerifyCode}
+                            </span>
+                          </div>
+                        )}
                         <a
                           href={tgDeepLink}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="w-full min-h-[40px] py-2 px-3 bg-[#0088cc] text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 hover:bg-[#0073ad] transition"
+                          className="w-full min-h-[44px] py-2 px-3 bg-[#0088cc] text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 hover:bg-[#0073ad] transition"
                         >
                           <ExternalLink className="w-3.5 h-3.5" />
                           <span>
@@ -1499,7 +1763,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           </span>
                           <button
                             type="button"
-                            onClick={() => tgNonce && pollTelegramNonce(tgNonce)}
+                            onClick={() => tgNonce && pollTelegramNonce(tgNonce, tgPollSecret)}
                             className="font-bold underline"
                           >
                             {isEn ? 'Check now' : 'ពិនិត្យម្តងទៀត'}
