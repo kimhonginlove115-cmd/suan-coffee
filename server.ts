@@ -685,7 +685,7 @@ function isAllowedDiscoveredGeminiModel(name: string): boolean {
     'computer-use',
   ];
   if (blocked.some((b) => n.includes(b))) return false;
-  return n.includes('flash') || n.includes('hydrogen') || n.includes('lite');
+  return true;
 }
 
 async function discoverActiveGeminiFlashModels(apiKey: string): Promise<string[]> {
@@ -1919,6 +1919,7 @@ app.get('/api/auth/capabilities', async (_req, res) => {
     telegramOrderVerifyReady: Boolean(botToken && chatId),
     bakongVerifyReady: Boolean(getEffectiveBakongToken()),
     slipAutoVerifyReady: Boolean(getEffectiveGeminiKey()),
+    ocrVersion: 'v3-autodiscover',
     phoneOtpReady: phoneOtpChannel !== 'none',
     phoneOtpChannel,
     botUsername,
