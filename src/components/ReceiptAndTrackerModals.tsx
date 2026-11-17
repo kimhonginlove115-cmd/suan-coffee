@@ -57,6 +57,16 @@ export function ReceiptModal({
     };
   }, [dynamicKhqr]);
 
+  const effectiveTgUrl = useMemo(() => {
+    if (tgUrl) return tgUrl;
+    if (!order || !shopSettings.tgUsername) return '';
+    const tgClean = shopSettings.tgUsername.replace('@', '').trim();
+    if (!tgClean) return '';
+    const lines = (order.items || []).map((i) => `• ${i.qty}x ${i.name} (${i.options})`).join('\n');
+    const txt = `☕ កម្ម៉ង់ថ្មី ${order.id} (${order.type})\n${lines}\n💰 សរុប: $${Number(order.grandTotal || 0).toFixed(2)} (${order.payment})`;
+    return `https://t.me/${tgClean}?text=${encodeURIComponent(txt)}`;
+  }, [tgUrl, order, shopSettings.tgUsername]);
+
   return (
     <AnimatePresence>
       {order && (
@@ -227,9 +237,9 @@ export function ReceiptModal({
                   <span>{isEn ? 'Track Driver on Live Map' : 'មើលទីតាំងអ្នកដឹក Live Map'}</span>
                 </button>
               )}
-              {tgUrl && (
+              {effectiveTgUrl && (
                 <a
-                  href={tgUrl}
+                  href={effectiveTgUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"

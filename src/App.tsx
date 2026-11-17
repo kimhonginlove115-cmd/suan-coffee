@@ -155,17 +155,38 @@ export default function App() {
 
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [orderType, setOrderType] = useState<OrderType>('delivery');
+  const [cart, setCart] = useState<CartItem[]>(() => {
+    const stored = safeGet<CartItem[]>('cafe_cart_v15', []);
+    if (!Array.isArray(stored)) return [];
+    return stored.filter(
+      (i): i is CartItem =>
+        Boolean(i && typeof i === 'object' && typeof i.name === 'string' && Number(i.qty) > 0)
+    );
+  });
+  const [orderType, setOrderType] = useState<OrderType>(() => {
+    const stored = safeGet<string>('cafe_order_type_v15', 'delivery');
+    return stored === 'dinein' ? 'dinein' : 'delivery';
+  });
   const [tableNumberFromQR, setTableNumberFromQR] = useState<number | null>(null);
 
-  const [selectedCoords, setSelectedCoords] = useState<Coords>({
-    lat: shopSettings.lat,
-    lng: shopSettings.lng,
+  const [selectedCoords, setSelectedCoords] = useState<Coords>(() => {
+    const stored = safeGet<{ coords?: Coords; addressName?: string } | null>('cafe_customer_loc_v15', null);
+    if (
+      stored?.coords &&
+      Number.isFinite(Number(stored.coords.lat)) &&
+      Number.isFinite(Number(stored.coords.lng))
+    ) {
+      return { lat: Number(stored.coords.lat), lng: Number(stored.coords.lng) };
+    }
+    return { lat: shopSettings.lat, lng: shopSettings.lng };
   });
-  const [pickedAddressName, setPickedAddressName] = useState(() =>
-    lang === 'en' ? 'Phnom Penh · Tap to pick location' : 'ភ្នំពេញ · ចុចរើសទីតាំង'
-  );
+  const [pickedAddressName, setPickedAddressName] = useState(() => {
+    const stored = safeGet<{ coords?: Coords; addressName?: string } | null>('cafe_customer_loc_v15', null);
+    if (stored?.addressName && typeof stored.addressName === 'string' && stored.addressName.trim()) {
+      return stored.addressName;
+    }
+    return lang === 'en' ? 'Phnom Penh · Tap to pick location' : 'ភ្នំពេញ · ចុចរើសទីតាំង';
+  });
 
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authPrefillPhone, setAuthPrefillPhone] = useState('');
@@ -175,11 +196,22 @@ export default function App() {
     purpose: 'customer' | 'shop';
   }>({ open: false, purpose: 'customer' });
   const [customizingItem, setCustomizingItem] = useState<MenuItem | null>(null);
-  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [isCartOpen, setIsCartOpen] = useState<boolean>(() => {
+    const storedCart = safeGet<CartItem[]>('cafe_cart_v15', []);
+    const hasCart = Array.isArray(storedCart) && storedCart.some((i) => Number(i?.qty) > 0);
+    return hasCart && safeGet<boolean>('cafe_cart_open_v15', false) === true;
+  });
   const [isTrackerOpen, setIsTrackerOpen] = useState(false);
-  const [receiptState, setReceiptState] = useState<{ order: Order | null; tgUrl: string }>({
-    order: null,
-    tgUrl: '',
+  const [receiptState, setReceiptState] = useState<{ order: Order | null; tgUrl: string }>(() => {
+    const savedId = safeSessionGet('cafe_last_receipt_id_v15');
+    if (savedId) {
+      const storedOrders = normalizeOrders(safeGet<Order[]>('cafe_orders_v15', []));
+      const found = storedOrders.find((o) => o.id === savedId) || null;
+      if (found) {
+        return { order: found, tgUrl: '' };
+      }
+    }
+    return { order: null, tgUrl: '' };
   });
 
   const [lastOrderCountState] = useState(0);
@@ -243,10 +275,28 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (cart.length === 0 && isCartOpen) {
-      setIsCartOpen(false);
+    safeSet('cafe_cart_v15', cart);
+    if (cart.length === 0) {
+      if (isCartOpen) setIsCartOpen(false);
+      safeDel('cafe_cart_open_v15');
+      safeDel('cafe_checkout_state_v15');
     }
-  }, [cart.length, isCartOpen]);
+  }, [cart, isCartOpen]);
+
+  useEffect(() => {
+    safeSet('cafe_cart_open_v15', isCartOpen && cart.length > 0);
+  }, [isCartOpen, cart.length]);
+
+  useEffect(() => {
+    safeSet('cafe_order_type_v15', orderType);
+  }, [orderType]);
+
+  useEffect(() => {
+    safeSet('cafe_customer_loc_v15', {
+      coords: selectedCoords,
+      addressName: pickedAddressName,
+    });
+  }, [selectedCoords, pickedAddressName]);
 
   useEffect(() => {
     safeSet('cafe_lang_v15', lang);
@@ -987,6 +1037,8 @@ export default function App() {
     prevOrderStatusesRef.current.set(cleanOrder.id, cleanOrder.status);
     ordersInitializedRef.current = true;
     lastOrderCountRef.current += 1;
+    safeDel('cafe_checkout_state_v15');
+    safeDel('cafe_cart_open_v15');
     setCart([]);
     setIsCartOpen(false);
 
@@ -1011,13 +1063,14 @@ export default function App() {
         )}`
       : '';
 
+    safeSessionSet('cafe_last_receipt_id_v15', cleanOrder.id);
     setReceiptState({ order: cleanOrder, tgUrl });
     if (payload.sendTg && tgUrl) {
-      try {
-        window.open(tgUrl, '_blank', 'noopener,noreferrer');
-      } catch {
-        // receipt modal already provides direct <a> fallback
-      }
+      showToast(
+        isEn
+          ? 'Receipt ready — tap "Send Receipt to Shop Telegram" below.'
+          : 'វិក្កយបត្ររួចរាល់ — ចុចប៊ូតុងផ្ញើទៅ Telegram ហាងខាងក្រោម!'
+      );
     }
     return true;
   };
@@ -2230,8 +2283,12 @@ export default function App() {
         order={receiptState.order}
         tgUrl={receiptState.tgUrl}
         shopSettings={shopSettings}
-        onClose={() => setReceiptState({ order: null, tgUrl: '' })}
+        onClose={() => {
+          safeSessionDel('cafe_last_receipt_id_v15');
+          setReceiptState({ order: null, tgUrl: '' });
+        }}
         onOpenLiveTrack={(id) => {
+          safeSessionDel('cafe_last_receipt_id_v15');
           setReceiptState({ order: null, tgUrl: '' });
           setLiveTrackOrderId(id);
         }}

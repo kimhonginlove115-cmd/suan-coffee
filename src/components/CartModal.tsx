@@ -30,6 +30,9 @@ import {
   fetchWithTimeout,
   handleImgFallback,
   resolveAssetUrl,
+  safeDel,
+  safeGet,
+  safeSet,
 } from '../utils/cafeUtils';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 import { md5Hex } from '../utils/md5';
@@ -85,6 +88,40 @@ interface CartModalProps {
   onToast: (msg: string) => void;
 }
 
+type KhqrPayStatus =
+  | 'idle'
+  | 'creating'
+  | 'pending'
+  | 'awaiting_owner'
+  | 'verified'
+  | 'amount_mismatch'
+  | 'rejected'
+  | 'expired';
+
+interface PersistedCheckoutState {
+  promoInput: string;
+  appliedPromoPct: number;
+  payment: PaymentMethod;
+  custName: string;
+  custPhone: string;
+  custTg: string;
+  addressNote: string;
+  tableNum: number;
+  dineInPhone: string;
+  billMeta: { billNumber: string; timestampMs: number };
+  paySessionId: string | null;
+  payMd5: string;
+  payExpiresAt: number;
+  payStatus: KhqrPayStatus;
+  verifyCaps: { bakong: boolean; telegram: boolean; slipAuto: boolean };
+  verifiedPayment: VerifiedPaymentState | null;
+  paymentRefInput: string;
+  slipImgData: string;
+  sessionKey: string;
+}
+
+const CHECKOUT_STORAGE_KEY = 'cafe_checkout_state_v15';
+
 function makeBillNonce(): string {
   return `PAY-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 }
@@ -108,44 +145,77 @@ export function CartModal({
   onToast,
 }: CartModalProps) {
   const isEn = lang === 'en';
-  const [promoInput, setPromoInput] = useState('');
-  const [appliedPromoPct, setAppliedPromoPct] = useState(0);
-  const [payment, setPayment] = useState<PaymentMethod>('Cash');
-  const [custName, setCustName] = useState('');
-  const [custPhone, setCustPhone] = useState('');
-  const [custTg, setCustTg] = useState('');
-  const [addressNote, setAddressNote] = useState('');
-  const [tableNum, setTableNum] = useState(initialTableNum || 1);
-  const [dineInPhone, setDineInPhone] = useState('');
+  const savedCheckout = useMemo(() => {
+    if (cart.length === 0) return null;
+    const raw = safeGet<PersistedCheckoutState | null>(CHECKOUT_STORAGE_KEY, null);
+    if (!raw || typeof raw !== 'object') return null;
+    return raw;
+    // Read once on mount so reload / banking app return restores exact session state
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [promoInput, setPromoInput] = useState(() => savedCheckout?.promoInput || '');
+  const [appliedPromoPct, setAppliedPromoPct] = useState(() => Number(savedCheckout?.appliedPromoPct) || 0);
+  const [payment, setPayment] = useState<PaymentMethod>(() =>
+    savedCheckout?.payment === 'KHQR / ABA' ? 'KHQR / ABA' : 'Cash'
+  );
+  const [custName, setCustName] = useState(() => savedCheckout?.custName || '');
+  const [custPhone, setCustPhone] = useState(() => savedCheckout?.custPhone || '');
+  const [custTg, setCustTg] = useState(() => savedCheckout?.custTg || '');
+  const [addressNote, setAddressNote] = useState(() => savedCheckout?.addressNote || '');
+  const [tableNum, setTableNum] = useState(() => savedCheckout?.tableNum || initialTableNum || 1);
+  const [dineInPhone, setDineInPhone] = useState(() => savedCheckout?.dineInPhone || '');
   const [submitting, setSubmitting] = useState(false);
   const khqrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Payment Verification State (KHQR Auto Verification)
-  const [billMeta, setBillMeta] = useState<{ billNumber: string; timestampMs: number }>(() => ({
-    billNumber: makeBillNonce(),
-    timestampMs: Date.now(),
-  }));
-  const [paySessionId, setPaySessionId] = useState<string | null>(null);
-  const [payMd5, setPayMd5] = useState('');
-  const [payExpiresAt, setPayExpiresAt] = useState(0);
-  const [payCountdown, setPayCountdown] = useState(0);
-  const [payStatus, setPayStatus] = useState<
-    'idle' | 'creating' | 'pending' | 'awaiting_owner' | 'verified' | 'amount_mismatch' | 'rejected' | 'expired'
-  >('idle');
-  const [payError, setPayError] = useState('');
-  const [verifyCaps, setVerifyCaps] = useState<{ bakong: boolean; telegram: boolean; slipAuto: boolean }>({
-    bakong: false,
-    telegram: false,
-    slipAuto: false,
+  const [billMeta, setBillMeta] = useState<{ billNumber: string; timestampMs: number }>(() => {
+    if (savedCheckout?.billMeta?.billNumber && Number.isFinite(savedCheckout.billMeta.timestampMs)) {
+      return savedCheckout.billMeta;
+    }
+    return { billNumber: makeBillNonce(), timestampMs: Date.now() };
   });
-  const [verifiedPayment, setVerifiedPayment] = useState<VerifiedPaymentState | null>(null);
+  const [paySessionId, setPaySessionId] = useState<string | null>(() => savedCheckout?.paySessionId || null);
+  const [payMd5, setPayMd5] = useState(() => savedCheckout?.payMd5 || '');
+  const [payExpiresAt, setPayExpiresAt] = useState(() => Number(savedCheckout?.payExpiresAt) || 0);
+  const [payCountdown, setPayCountdown] = useState(0);
+  const [payStatus, setPayStatus] = useState<KhqrPayStatus>(() => {
+    const st = savedCheckout?.payStatus;
+    if (
+      st === 'pending' ||
+      st === 'awaiting_owner' ||
+      st === 'verified' ||
+      st === 'amount_mismatch' ||
+      st === 'rejected' ||
+      st === 'expired'
+    ) {
+      if (
+        st !== 'verified' &&
+        savedCheckout?.payExpiresAt &&
+        Date.now() >= Number(savedCheckout.payExpiresAt)
+      ) {
+        return 'expired';
+      }
+      return st;
+    }
+    return 'idle';
+  });
+  const [payError, setPayError] = useState('');
+  const [verifyCaps, setVerifyCaps] = useState<{ bakong: boolean; telegram: boolean; slipAuto: boolean }>(() => ({
+    bakong: Boolean(savedCheckout?.verifyCaps?.bakong),
+    telegram: Boolean(savedCheckout?.verifyCaps?.telegram),
+    slipAuto: Boolean(savedCheckout?.verifyCaps?.slipAuto),
+  }));
+  const [verifiedPayment, setVerifiedPayment] = useState<VerifiedPaymentState | null>(
+    () => savedCheckout?.verifiedPayment || null
+  );
   const [checkingNow, setCheckingNow] = useState(false);
   const [sendingTgVerify, setSendingTgVerify] = useState(false);
   const [verifyingSlip, setVerifyingSlip] = useState(false);
   const [needsOwnerFallback, setNeedsOwnerFallback] = useState(false);
-  const [paymentRefInput, setPaymentRefInput] = useState('');
-  const [slipImgData, setSlipImgData] = useState('');
-  const activeSessionKeyRef = useRef<string>('');
+  const [paymentRefInput, setPaymentRefInput] = useState(() => savedCheckout?.paymentRefInput || '');
+  const [slipImgData, setSlipImgData] = useState(() => savedCheckout?.slipImgData || '');
+  const activeSessionKeyRef = useRef<string>(savedCheckout?.sessionKey || '');
 
   useEffect(() => {
     if (currentMember) {
@@ -157,7 +227,9 @@ export function CartModal({
   }, [currentMember]);
 
   useEffect(() => {
-    setTableNum(initialTableNum || 1);
+    if (initialTableNum && initialTableNum > 1) {
+      setTableNum(initialTableNum);
+    }
   }, [initialTableNum]);
 
   const subtotal = cart.reduce((s, i) => s + i.unitPrice * i.qty, 0);
@@ -207,12 +279,70 @@ export function CartModal({
   // Reset only when the entire cart becomes empty
   useEffect(() => {
     if (cart.length === 0) {
+      safeDel(CHECKOUT_STORAGE_KEY);
       resetPaymentSession();
       setBillMeta({ billNumber: makeBillNonce(), timestampMs: Date.now() });
     }
   }, [cart.length, resetPaymentSession]);
 
-  // Create KHQR payment session only when total/currency/bill/QR changes (keep session across close & reopen)
+  // Persist active checkout & KHQR payment state so switching to ABA/banking apps or reloading Safari never loses progress
+  useEffect(() => {
+    if (cart.length === 0) return;
+    const khqrCurr = shopSettings.khqrCurrency === 'KHR' ? 'KHR' : 'USD';
+    const sessionKey = `${grandTotal.toFixed(2)}|${khqrCurr}|${billMeta.billNumber}|${dynamicKhqr.payload}`;
+    const stateToSave: PersistedCheckoutState = {
+      promoInput,
+      appliedPromoPct,
+      payment,
+      custName,
+      custPhone,
+      custTg,
+      addressNote,
+      tableNum,
+      dineInPhone,
+      billMeta,
+      paySessionId,
+      payMd5,
+      payExpiresAt,
+      payStatus,
+      verifyCaps,
+      verifiedPayment,
+      paymentRefInput,
+      slipImgData,
+      sessionKey: activeSessionKeyRef.current || sessionKey,
+    };
+    try {
+      window.localStorage.setItem(CHECKOUT_STORAGE_KEY, JSON.stringify(stateToSave));
+    } catch {
+      // Fallback without image data if slip image exceeded localStorage quota
+      safeSet(CHECKOUT_STORAGE_KEY, { ...stateToSave, slipImgData: '' });
+    }
+  }, [
+    cart.length,
+    grandTotal,
+    shopSettings.khqrCurrency,
+    dynamicKhqr.payload,
+    promoInput,
+    appliedPromoPct,
+    payment,
+    custName,
+    custPhone,
+    custTg,
+    addressNote,
+    tableNum,
+    dineInPhone,
+    billMeta,
+    paySessionId,
+    payMd5,
+    payExpiresAt,
+    payStatus,
+    verifyCaps,
+    verifiedPayment,
+    paymentRefInput,
+    slipImgData,
+  ]);
+
+  // Create KHQR payment session only when total/currency/bill/QR changes (keep session across close, reload & app switch)
   useEffect(() => {
     if (!isOpen || payment !== 'KHQR / ABA' || grandTotal <= 0) return;
 
@@ -221,8 +351,8 @@ export function CartModal({
     const stillValid =
       activeSessionKeyRef.current === sessionKey &&
       Boolean(paySessionId) &&
-      payStatus !== 'expired' &&
-      (payExpiresAt === 0 || Date.now() < payExpiresAt);
+      (payStatus === 'verified' ||
+        (payStatus !== 'expired' && (payExpiresAt === 0 || Date.now() < payExpiresAt)));
 
     if (stillValid) {
       return;
@@ -382,7 +512,7 @@ export function CartModal({
     [paySessionId, payStatus, dynamicKhqr.amount, billMeta.billNumber, payMd5, slipImgData, onToast, isEn]
   );
 
-  // Automatic polling every 2.5s when Bakong, Telegram Bot, or Website Admin approval can arrive
+  // Automatic polling every 2.5s + instant check when returning from banking app (ABA / Bakong / ACLEDA)
   useEffect(() => {
     if (
       !isOpen ||
@@ -400,7 +530,20 @@ export function CartModal({
         checkPaymentStatus(false);
       }
     }, 2500);
-    return () => clearInterval(timer);
+
+    const handleReturnFromBankApp = () => {
+      if (document.visibilityState !== 'hidden') {
+        checkPaymentStatus(false);
+      }
+    };
+    window.addEventListener('focus', handleReturnFromBankApp);
+    document.addEventListener('visibilitychange', handleReturnFromBankApp);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', handleReturnFromBankApp);
+      document.removeEventListener('visibilitychange', handleReturnFromBankApp);
+    };
   }, [isOpen, payment, paySessionId, payStatus, checkPaymentStatus]);
 
   // Render crisp EMVCo Dynamic KHQR whenever grandTotal or payment changes
@@ -614,6 +757,7 @@ export function CartModal({
               },
       });
       if (ok !== false) {
+        safeDel(CHECKOUT_STORAGE_KEY);
         setAppliedPromoPct(0);
         setPromoInput('');
         resetPaymentSession();
@@ -1172,15 +1316,22 @@ export function CartModal({
                             if (f) {
                               compressImageFile(
                                 f,
-                                900,
+                                1440,
                                 (compressedDataUri) => {
                                   setSlipImgData(compressedDataUri);
                                   setPayError('');
                                   if (verifyCaps.slipAuto && paySessionId && payStatus !== 'expired') {
                                     void handleVerifySlipAuto(compressedDataUri);
+                                  } else if (!verifyCaps.slipAuto && verifyCaps.telegram) {
+                                    onToast(
+                                      isEn
+                                        ? 'Slip attached! Tap "Send to Shop Telegram" below to confirm.'
+                                        : 'បានភ្ជាប់រូបវិក្កយបត្រ! ចុច «ផ្ញើទៅ Telegram ម្ចាស់ហាង» ខាងក្រោមដើម្បីបញ្ជាក់។'
+                                    );
                                   }
                                 },
-                                onToast
+                                onToast,
+                                0.85
                               );
                             }
                           }}
@@ -1203,37 +1354,55 @@ export function CartModal({
                       </div>
 
                       <div className="grid grid-cols-1 gap-1.5">
-                        <button
-                          type="button"
-                          disabled={verifyingSlip || payStatus === 'expired' || !slipImgData}
-                          onClick={() => handleVerifySlipAuto()}
-                          className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-50 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors"
-                        >
-                          {verifyingSlip ? (
-                            <>
-                              <ScanLine className="w-4 h-4 animate-pulse" />
-                              <span>
-                                {isEn ? 'Auto-Verifying Receipt...' : 'កំពុងស្កេន & ផ្ទៀងផ្ទាត់វិក្កយបត្រ...'}
-                              </span>
-                            </>
-                          ) : (
-                            <>
-                              <ShieldCheck className="w-4 h-4" />
-                              <span>
-                                {isEn
-                                  ? 'Scan & Verify Slip Automatically'
-                                  : 'ស្កេន & ផ្ទៀងផ្ទាត់វិក្កយបត្រ Auto'}
-                              </span>
-                            </>
-                          )}
-                        </button>
+                        {verifyCaps.slipAuto && (
+                          <button
+                            type="button"
+                            disabled={verifyingSlip || payStatus === 'expired' || !slipImgData}
+                            onClick={() => handleVerifySlipAuto()}
+                            className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-50 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors"
+                          >
+                            {verifyingSlip ? (
+                              <>
+                                <ScanLine className="w-4 h-4 animate-pulse" />
+                                <span>
+                                  {isEn ? 'Auto-Verifying Receipt...' : 'កំពុងស្កេន & ផ្ទៀងផ្ទាត់វិក្កយបត្រ...'}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <ShieldCheck className="w-4 h-4" />
+                                <span>
+                                  {isEn
+                                    ? 'Scan & Verify Slip Automatically'
+                                    : 'ស្កេន & ផ្ទៀងផ្ទាត់វិក្កយបត្រ Auto'}
+                                </span>
+                              </>
+                            )}
+                          </button>
+                        )}
 
-                        {(verifyCaps.telegram || needsOwnerFallback) && verifyCaps.telegram && (
+                        {!verifyCaps.slipAuto && !verifyCaps.bakong && (
+                          <p className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-2 leading-relaxed">
+                            {verifyCaps.telegram
+                              ? isEn
+                                ? 'Upload your bank slip & tap below to send directly to Shop Telegram Bot for instant approval (or ask owner to add Bakong Token / GEMINI_API_KEY for 100% hands-free verification).'
+                                : 'Upload រូបវិក្កយបត្រ រួចចុចប៊ូតុងខាងក្រោមដើម្បីផ្ញើទៅ Telegram Bot ហាងចុចបញ្ជាក់ភ្លាមៗ (ម្ចាស់ហាងក៏អាចដាក់ Bakong Token ឬ GEMINI_API_KEY ដើម្បីផ្ទៀងផ្ទាត់ Auto 100%)។'
+                              : isEn
+                                ? 'Upload your bank slip or tap Check Now after shop approves in Owner Dashboard.'
+                                : 'Upload រូបវិក្កយបត្រ រួចរង់ចាំម្ចាស់ហាងចុចបញ្ជាក់ ឬកំណត់ Telegram Bot / Bakong Token ក្នុងផ្ទាំងគ្រប់គ្រងហាង។'}
+                          </p>
+                        )}
+
+                        {verifyCaps.telegram && (
                           <button
                             type="button"
                             disabled={sendingTgVerify || payStatus === 'expired'}
                             onClick={handleRequestTelegramVerify}
-                            className="w-full bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-bold py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors"
+                            className={`w-full ${
+                              !verifyCaps.slipAuto || needsOwnerFallback
+                                ? 'bg-[#0088cc] hover:bg-[#0073ad]'
+                                : 'bg-sky-600 hover:bg-sky-700'
+                            } disabled:opacity-60 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors`}
                           >
                             <Send className="w-3.5 h-3.5" />
                             <span>
@@ -1243,11 +1412,15 @@ export function CartModal({
                                   : 'កំពុងផ្ញើទៅ Telegram Bot ហាង...'
                                 : payStatus === 'awaiting_owner'
                                   ? isEn
-                                    ? 'Resend to Shop Telegram Bot'
-                                    : 'ផ្ញើសំណើផ្ទៀងផ្ទាត់ម្តងទៀតទៅ Telegram'
+                                    ? 'Resend Receipt to Shop Telegram Bot'
+                                    : 'ផ្ញើសំណើម្តងទៀតទៅ Telegram ហាង'
                                   : isEn
-                                    ? 'Or Send to Shop Telegram for Manual Approval'
-                                    : 'ឬ ផ្ញើទៅ Telegram ម្ចាស់ហាងចុចបញ្ជាក់'}
+                                    ? verifyCaps.slipAuto
+                                      ? 'Or Send Receipt to Shop Telegram'
+                                      : 'Send Receipt to Shop Telegram (Instant Approve)'
+                                    : verifyCaps.slipAuto
+                                      ? 'ឬ ផ្ញើទៅ Telegram ម្ចាស់ហាងចុចបញ្ជាក់'
+                                      : 'ផ្ញើវិក្កយបត្រទៅ Telegram Bot ហាងចុចបញ្ជាក់'}
                             </span>
                           </button>
                         )}

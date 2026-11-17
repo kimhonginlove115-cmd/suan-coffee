@@ -446,7 +446,8 @@ export function compressImageFile(
   file: File,
   maxDim: number,
   onSuccess: (dataUrl: string) => void,
-  onError: (msg: string) => void
+  onError: (msg: string) => void,
+  quality = 0.82
 ): void {
   if (file.size > 15 * 1024 * 1024) {
     onError('រូបភាពធំពេក (>15MB)! សូមជ្រើសរើសរូបតូចជាងនេះ');
@@ -505,7 +506,8 @@ export function compressImageFile(
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, w, h);
       ctx.drawImage(img, 0, 0, w, h);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+      const safeQuality = Math.min(0.95, Math.max(0.4, quality));
+      const dataUrl = canvas.toDataURL('image/jpeg', safeQuality);
       canvas.width = 0;
       canvas.height = 0;
       cleanup();

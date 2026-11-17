@@ -660,23 +660,68 @@ function formatPhnomPenhDateTime(tsMs: number): { ymd: string; hm: string; displ
   return { ymd: `${y}-${m}-${d}`, hm: `${hh}:${mm}`, display: `${y}-${m}-${d} ${hh}:${mm} (UTC+7)` };
 }
 
+function extractEmvKhqrMerchantHints(rawPayload: string): string {
+  const s = (rawPayload || '').trim();
+  if (!s.startsWith('000201')) return '';
+  const extracted: string[] = [];
+  let idx = 0;
+  while (idx + 4 <= s.length) {
+    const tag = s.slice(idx, idx + 2);
+    const len = parseInt(s.slice(idx + 2, idx + 4), 10);
+    if (!/^\d{2}$/.test(tag) || !Number.isFinite(len) || idx + 4 + len > s.length) break;
+    const val = s.slice(idx + 4, idx + 4 + len);
+    if (tag === '59') extracted.push(val);
+    if (tag === '29' || tag === '30') {
+      const idMatch = val.match(/^00\d{2}([^]+)/);
+      if (idMatch?.[1]) extracted.push(idMatch[1].slice(0, 40));
+    }
+    idx += 4 + len;
+  }
+  return extracted.join(' ');
+}
+
 function getShopMerchantHints(settings: Record<string, unknown> | null): string[] {
   if (!settings) return [];
-  const rawFields = [
-    settings.khqrMerchantName,
-    settings.brandTitle,
-    settings.shopName,
-    settings.khqrBakongId,
-    settings.bankInfo,
-  ]
+  const emvHints = extractEmvKhqrMerchantHints(String(settings.khqrPayload || ''));
+  const customMerchant =
+    String(settings.khqrMerchantName || '').trim().toUpperCase() !== 'EMERALD BREW CAFE'
+      ? String(settings.khqrMerchantName || '')
+      : '';
+  const bankSpecificFields = [emvHints, customMerchant, settings.khqrBakongId, settings.bankInfo]
     .map((v) => String(v || '').trim())
     .filter(Boolean)
     .join(' ');
-  const tokens = rawFields
+
+  const sourceText =
+    bankSpecificFields ||
+    [settings.brandTitle, settings.shopName]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean)
+      .join(' ');
+
+  const stopWords = new Set([
+    'emerald',
+    'brew',
+    'cafe',
+    'coffee',
+    'shop',
+    'store',
+    'aba',
+    'bakong',
+    'khqr',
+    'pay',
+    'bank',
+    'acleda',
+    'wing',
+    'canadia',
+    'sathapana',
+    'prasac',
+  ]);
+  const tokens = sourceText
     .toLowerCase()
     .split(/[^a-z0-9\u1780-\u17ff]+/)
     .filter((t) => (/^\d+$/.test(t) ? t.length >= 4 : t.length >= 3))
-    .filter((t) => !['cafe', 'coffee', 'shop', 'aba', 'bakong', 'khqr', 'pay', 'bank', 'acleda', 'wing'].includes(t));
+    .filter((t) => !stopWords.has(t));
   return Array.from(new Set(tokens));
 }
 
@@ -795,8 +840,12 @@ async function analyzeBankSlipWithGeminiRest(
   const data = (await res.json()) as {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
   };
-  const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '{}';
-  return JSON.parse(rawText) as AnalyzedSlipResult;
+  const rawText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '{}')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+  return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
 }
 
 function validateReceiptAgainstSession(
@@ -886,7 +935,7 @@ function validateReceiptAgainstSession(
     const hasTime = /^\d{2}:\d{2}$/.test(ocr.receiptTimeHm || '');
     const [hh, min] = hasTime ? ocr.receiptTimeHm.split(':').map(Number) : [23, 59];
     const receiptUtcMs = Date.UTC(yy, mm - 1, dd, hh, min) - 7 * 3600 * 1000;
-    const maxAllowedPastMs = hasTime ? 30 * 60 * 1000 : 12 * 3600 * 1000;
+    const maxAllowedPastMs = hasTime ? 2 * 3600 * 1000 : 24 * 3600 * 1000;
     if (receiptUtcMs < sess.createdAt - maxAllowedPastMs) {
       return {
         ok: false,
