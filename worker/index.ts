@@ -867,6 +867,27 @@ async function discoverActiveGeminiFlashModels(apiKey: string): Promise<string[]
   }
 }
 
+let cachedGeminiGeoBlockedUntil = 0;
+let cachedWorkingGeminiModel: { model: string; thinkingLevel?: 'LOW' | 'MINIMAL' } | null = null;
+let cachedWorkingWorkersAiModel: string | null = null;
+const agreedWorkersAiModels = new Set<string>();
+
+function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function analyzeBankSlipWithGeminiRest(
   apiKey: string,
   dataUri: string,
@@ -898,7 +919,10 @@ async function analyzeBankSlipWithGeminiRest(
     .filter(Boolean)
     .join('\n');
 
-  const tryModel = async (model: string, useLowThinking: boolean): Promise<AnalyzedSlipResult> => {
+  const tryModel = async (
+    model: string,
+    thinkingLevel?: 'LOW' | 'MINIMAL'
+  ): Promise<AnalyzedSlipResult> => {
     const res = await fetchWithTimeout(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {
@@ -919,7 +943,7 @@ async function analyzeBankSlipWithGeminiRest(
             },
           ],
           generationConfig: {
-            ...(useLowThinking ? { thinkingConfig: { thinkingLevel: 'LOW' } } : {}),
+            ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
             responseMimeType: 'application/json',
             responseSchema: {
               type: 'OBJECT',
@@ -955,7 +979,7 @@ async function analyzeBankSlipWithGeminiRest(
           },
         }),
       },
-      26000
+      9000
     );
 
     if (!res.ok) {
@@ -983,16 +1007,22 @@ async function analyzeBankSlipWithGeminiRest(
     return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
   };
 
-  const candidateModels: Array<{ model: string; useLowThinking: boolean }> = [
-    { model: 'gemini-4-hydrogen', useLowThinking: true },
-    { model: 'gemini-3.5-flash', useLowThinking: false },
-    { model: 'gemini-3.5-flash-lite', useLowThinking: false },
-    { model: 'gemini-3.1-flash-lite', useLowThinking: true },
-    { model: 'gemini-3.1-flash-lite-preview', useLowThinking: true },
-    { model: 'gemini-3-flash-preview', useLowThinking: true },
-    { model: 'gemini-2.5-flash', useLowThinking: false },
-    { model: 'gemini-2.5-flash-lite', useLowThinking: false },
+  const baseCandidates: Array<{ model: string; thinkingLevel?: 'LOW' | 'MINIMAL' }> = [
+    { model: 'gemini-4-hydrogen', thinkingLevel: 'LOW' },
+    { model: 'gemini-3.1-flash-lite', thinkingLevel: 'MINIMAL' },
+    { model: 'gemini-3.1-flash-lite-preview', thinkingLevel: 'MINIMAL' },
+    { model: 'gemini-3.5-flash-lite' },
+    { model: 'gemini-3.5-flash' },
+    { model: 'gemini-2.5-flash-lite' },
+    { model: 'gemini-2.5-flash' },
+    { model: 'gemini-3-flash-preview', thinkingLevel: 'MINIMAL' },
   ];
+  const candidateModels = cachedWorkingGeminiModel
+    ? [
+        cachedWorkingGeminiModel,
+        ...baseCandidates.filter((c) => c.model !== cachedWorkingGeminiModel?.model),
+      ]
+    : baseCandidates;
 
   const tried = new Set<string>();
   const suggestedModels: string[] = [];
@@ -1000,9 +1030,14 @@ async function analyzeBankSlipWithGeminiRest(
   for (const candidate of candidateModels) {
     tried.add(candidate.model);
     try {
-      return await tryModel(candidate.model, candidate.useLowThinking);
+      const parsed = await tryModel(candidate.model, candidate.thinkingLevel);
+      cachedWorkingGeminiModel = candidate;
+      return parsed;
     } catch (err) {
       lastErr = err;
+      if (cachedWorkingGeminiModel?.model === candidate.model) {
+        cachedWorkingGeminiModel = null;
+      }
       const msg = err instanceof Error ? err.message : '';
       const upper = msg.toUpperCase();
       if (
@@ -1026,7 +1061,9 @@ async function analyzeBankSlipWithGeminiRest(
     if (tried.has(hinted)) continue;
     tried.add(hinted);
     try {
-      return await tryModel(hinted, false);
+      const parsed = await tryModel(hinted);
+      cachedWorkingGeminiModel = { model: hinted };
+      return parsed;
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
@@ -1049,7 +1086,9 @@ async function analyzeBankSlipWithGeminiRest(
     if (tried.has(modelName)) continue;
     tried.add(modelName);
     try {
-      return await tryModel(modelName, false);
+      const parsed = await tryModel(modelName);
+      cachedWorkingGeminiModel = { model: modelName };
+      return parsed;
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
@@ -1073,19 +1112,12 @@ function buildSlipOcrPrompt(db: PersistedDatabase, sess: PaymentVerifySession): 
   const nowPP = formatPhnomPenhDateTime(Date.now());
   const merchantHints = getShopMerchantHints(db.shopSettings);
   return [
-    'Analyze this uploaded bank transfer receipt / payment slip image strictly for anti-fraud verification in Cambodia.',
-    `Expected payment amount: ${sess.expectedAmount} ${sess.currency} (or USD $${sess.expectedAmountUsd.toFixed(2)}).`,
-    merchantHints.length ? `Expected shop recipient keywords/account: ${merchantHints.join(', ')}.` : '',
-    `Current Cambodia time: ${nowPP.display}.`,
-    'Rules:',
-    '1. isBankReceipt=true ONLY if this is an authentic completed banking/e-wallet payment confirmation receipt (ABA, ACLEDA, Bakong, Wing, Canadia, Sathapana, Prince, Chip Mong, Vattanac, KB Prasac, Phillip Bank, etc.). A KHQR scan-to-pay screen BEFORE payment is NOT a receipt (isBankReceipt=false). Random photos/text notes are NOT receipts.',
-    '2. transferStatus: SUCCESS only if clearly marked completed/successful/paid. PENDING, FAILED, or UNKNOWN otherwise.',
-    '3. Extract exact numeric paidAmount and currency (USD or KHR or OTHER) printed on the receipt. Never guess.',
-    '4. Extract transactionId (Trx ID / Ref / Hash / Trace No) printed on the receipt, recipientName, recipientAccount.',
-    '5. Extract receiptDateYmd (YYYY-MM-DD) and receiptTimeHm (24h HH:MM) converted if AM/PM is shown, or empty string if absent.',
-    '6. Set appearsTampered=true if digits/text look edited, pasted over, mismatched fonts, blurred/cropped out amount or status, or artificially altered.',
-    'Return ONLY a single valid JSON object (no markdown fences, no commentary) with these exact keys:',
-    '{"isBankReceipt": boolean, "transferStatus": "SUCCESS"|"PENDING"|"FAILED"|"UNKNOWN", "bankName": string, "paidAmount": number, "currency": "USD"|"KHR"|"OTHER", "transactionId": string, "recipientName": string, "recipientAccount": string, "receiptDateYmd": string, "receiptTimeHm": string, "appearsTampered": boolean, "summaryKm": string}',
+    'Strict Cambodia bank slip OCR. Return ONLY compact JSON (no markdown):',
+    `Expected: ${sess.expectedAmount} ${sess.currency} ($${sess.expectedAmountUsd.toFixed(2)}).`,
+    merchantHints.length ? `Recipient hints: ${merchantHints.join(', ')}.` : '',
+    `Time: ${nowPP.display}.`,
+    'Rules: isBankReceipt=true only if completed transfer confirmation receipt (KHQR scan-to-pay screen=false). transferStatus=SUCCESS only if clearly completed/paid. Extract exact numeric paidAmount, currency (USD|KHR|OTHER), transactionId, recipientName, recipientAccount, receiptDateYmd (YYYY-MM-DD or ""), receiptTimeHm (24h HH:MM or ""), appearsTampered (boolean), summaryKm (short Khmer reason if invalid).',
+    'Keys: {"isBankReceipt":boolean,"transferStatus":"SUCCESS"|"PENDING"|"FAILED"|"UNKNOWN","bankName":string,"paidAmount":number,"currency":"USD"|"KHR"|"OTHER","transactionId":string,"recipientName":string,"recipientAccount":string,"receiptDateYmd":string,"receiptTimeHm":string,"appearsTampered":boolean,"summaryKm":string}',
   ]
     .filter(Boolean)
     .join('\n');
@@ -1125,44 +1157,60 @@ async function analyzeBankSlipWithWorkersAi(
   sess: PaymentVerifySession
 ): Promise<AnalyzedSlipResult> {
   const prompt = buildSlipOcrPrompt(db, sess);
-  const models = [
-    '@cf/mistralai/mistral-small-3.1-24b-instruct',
-    '@cf/meta/llama-4-scout-17b-16e-instruct',
+  const baseModels = [
     '@cf/meta/llama-3.2-11b-vision-instruct',
+    '@cf/meta/llama-4-scout-17b-16e-instruct',
+    '@cf/mistralai/mistral-small-3.1-24b-instruct',
   ];
+  const models =
+    cachedWorkingWorkersAiModel && baseModels.includes(cachedWorkingWorkersAiModel)
+      ? [cachedWorkingWorkersAiModel, ...baseModels.filter((m) => m !== cachedWorkingWorkersAiModel)]
+      : baseModels;
 
   let lastErr: unknown = null;
   for (const model of models) {
-    const runInference = async (): Promise<unknown> =>
-      ai.run(model, {
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: dataUri } },
-            ],
-          },
-        ],
-        max_tokens: 700,
-        temperature: 0.1,
-      });
+    const runInference = (): Promise<unknown> =>
+      runWithTimeout(
+        ai.run(model, {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: dataUri } },
+              ],
+            },
+          ],
+          max_tokens: 240,
+          temperature: 0.05,
+        }),
+        10500,
+        `Workers AI timeout on ${model}`
+      );
 
     try {
       const res = await runInference();
-      return extractWorkersAiJson(res);
+      const parsed = extractWorkersAiJson(res);
+      cachedWorkingWorkersAiModel = model;
+      return parsed;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err || '');
       // Automatically accept Meta model license terms on first Workers AI invocation
-      if (/agree|license|5016|accept/i.test(msg)) {
+      if (!agreedWorkersAiModels.has(model) && /agree|license|5016|accept/i.test(msg)) {
         try {
-          await ai.run(model, { prompt: 'agree' });
+          await runWithTimeout(ai.run(model, { prompt: 'agree' }), 4500, 'License accept timeout');
+          agreedWorkersAiModels.add(model);
           const retryRes = await runInference();
-          return extractWorkersAiJson(retryRes);
+          const parsed = extractWorkersAiJson(retryRes);
+          cachedWorkingWorkersAiModel = model;
+          return parsed;
         } catch (retryErr) {
           lastErr = retryErr;
           continue;
         }
+      }
+      if (cachedWorkingWorkersAiModel === model) {
+        cachedWorkingWorkersAiModel = null;
       }
       lastErr = err;
     }
@@ -2219,7 +2267,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       telegramOrderVerifyReady: Boolean(botToken && chatId),
       bakongVerifyReady: Boolean(getEffectiveBakongToken(env, db)),
       slipAutoVerifyReady: isSlipAutoVerifyReady(env),
-      ocrVersion: 'v4-workers-ai',
+      ocrVersion: 'v5-fast-ocr',
       phoneOtpReady: phoneOtpChannel !== 'none',
       phoneOtpChannel,
       botUsername,
@@ -3164,15 +3212,27 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       let ocr: AnalyzedSlipResult | null = null;
       let geminiErr: unknown = null;
 
-      if (geminiKey) {
+      // Skip Gemini completely if this PoP is geo-blocked and Workers AI is bound
+      const skipGeminiForGeo =
+        Boolean(env.AI) &&
+        (cachedGeminiGeoBlockedUntil > Date.now() || (await kvGet(env, 'ocr_geo_blocked')) === '1');
+
+      if (geminiKey && !skipGeminiForGeo) {
         try {
           ocr = await analyzeBankSlipWithGeminiRest(geminiKey, slipImg, db, sess);
         } catch (err) {
           geminiErr = err;
+          const msg = (err instanceof Error ? err.message : String(err || '')).toUpperCase();
+          if (msg.includes('LOCATION') || msg.includes('FAILED_PRECONDITION')) {
+            cachedGeminiGeoBlockedUntil = Date.now() + 3600_000;
+            if (env.AI) {
+              await kvPut(env, 'ocr_geo_blocked', '1', 3600);
+            }
+          }
         }
       }
 
-      // Automatic fallback to Cloudflare Workers AI (never geo-blocked in Cambodia!)
+      // Automatic fast fallback to Cloudflare Workers AI (never geo-blocked in Cambodia!)
       if (!ocr && env.AI) {
         try {
           ocr = await analyzeBankSlipWithWorkersAi(env.AI, slipImg, db, sess);

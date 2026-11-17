@@ -212,10 +212,23 @@ export function CartModal({
   const [checkingNow, setCheckingNow] = useState(false);
   const [sendingTgVerify, setSendingTgVerify] = useState(false);
   const [verifyingSlip, setVerifyingSlip] = useState(false);
+  const [scanElapsedSec, setScanElapsedSec] = useState(0);
   const [needsOwnerFallback, setNeedsOwnerFallback] = useState(false);
   const [paymentRefInput, setPaymentRefInput] = useState(() => savedCheckout?.paymentRefInput || '');
-  const [slipImgData, setSlipImgData] = useState(() => savedCheckout?.slipImgData || '');
+  const [slipImgData, setSlipImgData] = useState('');
   const activeSessionKeyRef = useRef<string>(savedCheckout?.sessionKey || '');
+
+  useEffect(() => {
+    if (!verifyingSlip) {
+      setScanElapsedSec(0);
+      return;
+    }
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      setScanElapsedSec(Math.max(1, Math.floor((Date.now() - started) / 1000)));
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [verifyingSlip]);
 
   useEffect(() => {
     if (currentMember) {
@@ -308,15 +321,10 @@ export function CartModal({
       verifyCaps,
       verifiedPayment,
       paymentRefInput,
-      slipImgData,
+      slipImgData: '',
       sessionKey: activeSessionKeyRef.current || sessionKey,
     };
-    try {
-      window.localStorage.setItem(CHECKOUT_STORAGE_KEY, JSON.stringify(stateToSave));
-    } catch {
-      // Fallback without image data if slip image exceeded localStorage quota
-      safeSet(CHECKOUT_STORAGE_KEY, { ...stateToSave, slipImgData: '' });
-    }
+    safeSet(CHECKOUT_STORAGE_KEY, stateToSave);
   }, [
     cart.length,
     grandTotal,
@@ -339,7 +347,6 @@ export function CartModal({
     verifyCaps,
     verifiedPayment,
     paymentRefInput,
-    slipImgData,
   ]);
 
   // Create KHQR payment session only when total/currency/bill/QR changes (keep session across close, reload & app switch)
@@ -639,7 +646,7 @@ export function CartModal({
               slipImg: targetSlip,
             }),
           },
-          35000
+          24000
         );
         const data = await res.json();
         if (!data.ok || !data.proofToken) {
@@ -673,9 +680,18 @@ export function CartModal({
             ? `✅ Verified ${data.bankName ? `${data.bankName} ` : ''}receipt automatically!`
             : `✅ បានស្កេនផ្ទៀងផ្ទាត់វិក្កយបត្រ${data.bankName ? ` (${data.bankName})` : ''} ស្វ័យប្រវត្តិជោគជ័យ!`
         );
-      } catch {
+      } catch (err) {
         setNeedsOwnerFallback(true);
-        setPayError(isEn ? 'Could not verify receipt right now' : 'មានបញ្ហាស្កេនផ្ទៀងផ្ទាត់វិក្កយបត្រ');
+        const isAbort = err instanceof DOMException && err.name === 'AbortError';
+        setPayError(
+          isAbort
+            ? isEn
+              ? 'Receipt scan timed out. Please retry or send directly to Shop Telegram.'
+              : 'ការស្កេនវិក្កយបត្រចំណាយពេលយូរពេក! សូមចុចស្កេនម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។'
+            : isEn
+              ? 'Could not verify receipt right now'
+              : 'មានបញ្ហាស្កេនផ្ទៀងផ្ទាត់វិក្កយបត្រ'
+        );
       } finally {
         setVerifyingSlip(false);
       }
@@ -1285,8 +1301,8 @@ export function CartModal({
                             <p className="text-[11px] font-bold text-slate-800 truncate">
                               {verifyingSlip
                                 ? isEn
-                                  ? 'Scanning receipt · Checking amount & anti-replay...'
-                                  : 'កំពុងស្កេនអានវិក្កយបត្រ & ពិនិត្យសុវត្ថិភាព...'
+                                  ? `Scanning receipt... ${scanElapsedSec > 0 ? `(${scanElapsedSec}s)` : ''}`
+                                  : `កំពុងស្កេនអានវិក្កយបត្រ... ${scanElapsedSec > 0 ? `(${scanElapsedSec}s)` : ''}`
                                 : slipImgData
                                   ? isEn
                                     ? '✓ Slip Ready — Tap to replace image'
@@ -1316,7 +1332,7 @@ export function CartModal({
                             if (f) {
                               compressImageFile(
                                 f,
-                                1440,
+                                960,
                                 (compressedDataUri) => {
                                   setSlipImgData(compressedDataUri);
                                   setPayError('');
@@ -1331,7 +1347,7 @@ export function CartModal({
                                   }
                                 },
                                 onToast,
-                                0.85
+                                0.76
                               );
                             }
                           }}
@@ -1365,7 +1381,9 @@ export function CartModal({
                               <>
                                 <ScanLine className="w-4 h-4 animate-pulse" />
                                 <span>
-                                  {isEn ? 'Auto-Verifying Receipt...' : 'កំពុងស្កេន & ផ្ទៀងផ្ទាត់វិក្កយបត្រ...'}
+                                  {isEn
+                                    ? `Auto-Verifying Receipt... ${scanElapsedSec > 0 ? `(${scanElapsedSec}s)` : ''}`
+                                    : `កំពុងស្កេន & ផ្ទៀងផ្ទាត់វិក្កយបត្រ... ${scanElapsedSec > 0 ? `(${scanElapsedSec}s)` : ''}`}
                                 </span>
                               </>
                             ) : (

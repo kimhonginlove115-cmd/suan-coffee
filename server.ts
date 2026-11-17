@@ -730,6 +730,24 @@ async function discoverActiveGeminiFlashModels(apiKey: string): Promise<string[]
   }
 }
 
+let cachedWorkingServerGeminiModel: { model: string; thinkingLevel?: ThinkingLevel } | null = null;
+
+function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function analyzeBankSlipWithGemini(
   apiKey: string,
   dataUri: string,
@@ -769,51 +787,58 @@ async function analyzeBankSlipWithGemini(
     .filter(Boolean)
     .join('\n');
 
-  const trySdkModel = async (model: string, useLowThinking: boolean): Promise<AnalyzedSlipResult> => {
-    const response = await ai.models.generateContent({
-      model,
-      contents: {
-        parts: [
-          { inlineData: { mimeType, data: base64Data } },
-          { text: prompt },
-        ],
-      },
-      config: {
-        ...(useLowThinking ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            isBankReceipt: { type: Type.BOOLEAN },
-            transferStatus: { type: Type.STRING, enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
-            bankName: { type: Type.STRING },
-            paidAmount: { type: Type.NUMBER },
-            currency: { type: Type.STRING, enum: ['USD', 'KHR', 'OTHER'] },
-            transactionId: { type: Type.STRING },
-            recipientName: { type: Type.STRING },
-            recipientAccount: { type: Type.STRING },
-            receiptDateYmd: { type: Type.STRING },
-            receiptTimeHm: { type: Type.STRING },
-            appearsTampered: { type: Type.BOOLEAN },
-            summaryKm: { type: Type.STRING },
-          },
-          required: [
-            'isBankReceipt',
-            'transferStatus',
-            'bankName',
-            'paidAmount',
-            'currency',
-            'transactionId',
-            'recipientName',
-            'recipientAccount',
-            'receiptDateYmd',
-            'receiptTimeHm',
-            'appearsTampered',
-            'summaryKm',
+  const trySdkModel = async (
+    model: string,
+    thinkingLevel?: ThinkingLevel
+  ): Promise<AnalyzedSlipResult> => {
+    const response = await runWithTimeout(
+      ai.models.generateContent({
+        model,
+        contents: {
+          parts: [
+            { inlineData: { mimeType, data: base64Data } },
+            { text: prompt },
           ],
         },
-      },
-    });
+        config: {
+          ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isBankReceipt: { type: Type.BOOLEAN },
+              transferStatus: { type: Type.STRING, enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
+              bankName: { type: Type.STRING },
+              paidAmount: { type: Type.NUMBER },
+              currency: { type: Type.STRING, enum: ['USD', 'KHR', 'OTHER'] },
+              transactionId: { type: Type.STRING },
+              recipientName: { type: Type.STRING },
+              recipientAccount: { type: Type.STRING },
+              receiptDateYmd: { type: Type.STRING },
+              receiptTimeHm: { type: Type.STRING },
+              appearsTampered: { type: Type.BOOLEAN },
+              summaryKm: { type: Type.STRING },
+            },
+            required: [
+              'isBankReceipt',
+              'transferStatus',
+              'bankName',
+              'paidAmount',
+              'currency',
+              'transactionId',
+              'recipientName',
+              'recipientAccount',
+              'receiptDateYmd',
+              'receiptTimeHm',
+              'appearsTampered',
+              'summaryKm',
+            ],
+          },
+        },
+      }),
+      10000,
+      `Gemini timeout on ${model}`
+    );
 
     const rawText = (response.text || '{}')
       .trim()
@@ -823,16 +848,22 @@ async function analyzeBankSlipWithGemini(
     return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
   };
 
-  const candidateModels: Array<{ model: string; useLowThinking: boolean }> = [
-    { model: 'gemini-4-hydrogen', useLowThinking: true },
-    { model: 'gemini-3.5-flash', useLowThinking: false },
-    { model: 'gemini-3.5-flash-lite', useLowThinking: false },
-    { model: 'gemini-3.1-flash-lite', useLowThinking: true },
-    { model: 'gemini-3.1-flash-lite-preview', useLowThinking: true },
-    { model: 'gemini-3-flash-preview', useLowThinking: true },
-    { model: 'gemini-2.5-flash', useLowThinking: false },
-    { model: 'gemini-2.5-flash-lite', useLowThinking: false },
+  const baseCandidates: Array<{ model: string; thinkingLevel?: ThinkingLevel }> = [
+    { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+    { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+    { model: 'gemini-3.1-flash-lite-preview', thinkingLevel: ThinkingLevel.MINIMAL },
+    { model: 'gemini-3.5-flash-lite' },
+    { model: 'gemini-3.5-flash' },
+    { model: 'gemini-2.5-flash-lite' },
+    { model: 'gemini-2.5-flash' },
+    { model: 'gemini-3-flash-preview', thinkingLevel: ThinkingLevel.MINIMAL },
   ];
+  const candidateModels = cachedWorkingServerGeminiModel
+    ? [
+        cachedWorkingServerGeminiModel,
+        ...baseCandidates.filter((c) => c.model !== cachedWorkingServerGeminiModel?.model),
+      ]
+    : baseCandidates;
 
   const tried = new Set<string>();
   const suggestedModels: string[] = [];
@@ -840,9 +871,14 @@ async function analyzeBankSlipWithGemini(
   for (const candidate of candidateModels) {
     tried.add(candidate.model);
     try {
-      return await trySdkModel(candidate.model, candidate.useLowThinking);
+      const parsed = await trySdkModel(candidate.model, candidate.thinkingLevel);
+      cachedWorkingServerGeminiModel = candidate;
+      return parsed;
     } catch (err) {
       lastErr = err;
+      if (cachedWorkingServerGeminiModel?.model === candidate.model) {
+        cachedWorkingServerGeminiModel = null;
+      }
       const msg = err instanceof Error ? err.message : '';
       const upper = msg.toUpperCase();
       const isAuthFailure =
@@ -864,7 +900,9 @@ async function analyzeBankSlipWithGemini(
     if (tried.has(hinted)) continue;
     tried.add(hinted);
     try {
-      return await trySdkModel(hinted, false);
+      const parsed = await trySdkModel(hinted);
+      cachedWorkingServerGeminiModel = { model: hinted };
+      return parsed;
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
@@ -884,7 +922,9 @@ async function analyzeBankSlipWithGemini(
     if (tried.has(modelName)) continue;
     tried.add(modelName);
     try {
-      return await trySdkModel(modelName, false);
+      const parsed = await trySdkModel(modelName);
+      cachedWorkingServerGeminiModel = { model: modelName };
+      return parsed;
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
@@ -1960,7 +2000,7 @@ app.get('/api/auth/capabilities', async (_req, res) => {
     telegramOrderVerifyReady: Boolean(botToken && chatId),
     bakongVerifyReady: Boolean(getEffectiveBakongToken()),
     slipAutoVerifyReady: Boolean(getEffectiveGeminiKey()),
-    ocrVersion: 'v3-autodiscover',
+    ocrVersion: 'v5-fast-ocr',
     phoneOtpReady: phoneOtpChannel !== 'none',
     phoneOtpChannel,
     botUsername,
