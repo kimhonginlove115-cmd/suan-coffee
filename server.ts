@@ -845,7 +845,13 @@ async function analyzeBankSlipWithGemini(
       lastErr = err;
       const msg = err instanceof Error ? err.message : '';
       const upper = msg.toUpperCase();
-      const isAuthFailure = upper.includes('API_KEY_INVALID') || upper.includes('API KEY NOT VALID') || upper.includes('PERMISSION_DENIED') || upper.includes('403');
+      const isAuthFailure =
+        upper.includes('API_KEY_INVALID') ||
+        upper.includes('API KEY NOT VALID') ||
+        upper.includes('PERMISSION_DENIED') ||
+        upper.includes('403') ||
+        upper.includes('LOCATION') ||
+        upper.includes('FAILED_PRECONDITION');
       if (isAuthFailure) throw err;
       const hintMatches = msg.matchAll(/(?:use|try)\s+models\/(gemini-[a-z0-9._-]+)/gi);
       for (const hm of hintMatches) {
@@ -862,7 +868,13 @@ async function analyzeBankSlipWithGemini(
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
-      const isAuthFailure = msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('403');
+      const isAuthFailure =
+        msg.includes('API_KEY_INVALID') ||
+        msg.includes('API KEY NOT VALID') ||
+        msg.includes('PERMISSION_DENIED') ||
+        msg.includes('403') ||
+        msg.includes('LOCATION') ||
+        msg.includes('FAILED_PRECONDITION');
       if (isAuthFailure) throw err;
     }
   }
@@ -876,7 +888,13 @@ async function analyzeBankSlipWithGemini(
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
-      const isAuthFailure = msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('403');
+      const isAuthFailure =
+        msg.includes('API_KEY_INVALID') ||
+        msg.includes('API KEY NOT VALID') ||
+        msg.includes('PERMISSION_DENIED') ||
+        msg.includes('403') ||
+        msg.includes('LOCATION') ||
+        msg.includes('FAILED_PRECONDITION');
       if (isAuthFailure) throw err;
     }
   }

@@ -16,6 +16,7 @@ interface AssetsBindingLike {
 export interface Env {
   ASSETS: AssetsBindingLike;
   CAFE_KV?: KVNamespaceLike;
+  AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> };
   SESSION_SECRET?: string;
   ADMIN_PIN?: string;
   TELEGRAM_BOT_TOKEN?: string;
@@ -753,9 +754,19 @@ function sanitizeGeminiDiagnostic(raw: string): string {
     .slice(0, 220);
 }
 
+function isSlipAutoVerifyReady(env: Env): boolean {
+  return Boolean(getEffectiveGeminiKey(env) || env.AI);
+}
+
 function formatGeminiSlipErrorMessage(err: unknown): { httpStatus: number; message: string } {
   const raw = err instanceof Error ? err.message : String(err || '');
   const upper = raw.toUpperCase();
+  if (upper.includes('LOCATION') && upper.includes('NOT SUPPORTED')) {
+    return {
+      httpStatus: 400,
+      message: 'ទីតាំង Server មិនគាំទ្រ Google Gemini API ផ្ទាល់ទេ (Location not supported)! សូម Upload wrangler.jsonc ថ្មីដើម្បីបើក Cloudflare AI ឬផ្ញើទៅ Telegram ហាង។',
+    };
+  }
   if (upper.includes('API_KEY_INVALID') || upper.includes('API KEY NOT VALID')) {
     return {
       httpStatus: 400,
@@ -994,7 +1005,14 @@ async function analyzeBankSlipWithGeminiRest(
       lastErr = err;
       const msg = err instanceof Error ? err.message : '';
       const upper = msg.toUpperCase();
-      if (upper.includes('API_KEY_INVALID') || upper.includes('API KEY NOT VALID') || upper.includes('PERMISSION_DENIED') || upper.includes('HTTP 403')) {
+      if (
+        upper.includes('API_KEY_INVALID') ||
+        upper.includes('API KEY NOT VALID') ||
+        upper.includes('PERMISSION_DENIED') ||
+        upper.includes('HTTP 403') ||
+        upper.includes('LOCATION') ||
+        upper.includes('FAILED_PRECONDITION')
+      ) {
         throw err;
       }
       const hintMatches = msg.matchAll(/(?:use|try)\s+models\/(gemini-[a-z0-9._-]+)/gi);
@@ -1012,7 +1030,14 @@ async function analyzeBankSlipWithGeminiRest(
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
-      if (msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('HTTP 403')) {
+      if (
+        msg.includes('API_KEY_INVALID') ||
+        msg.includes('API KEY NOT VALID') ||
+        msg.includes('PERMISSION_DENIED') ||
+        msg.includes('HTTP 403') ||
+        msg.includes('LOCATION') ||
+        msg.includes('FAILED_PRECONDITION')
+      ) {
         throw err;
       }
     }
@@ -1028,13 +1053,121 @@ async function analyzeBankSlipWithGeminiRest(
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
-      if (msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('HTTP 403')) {
+      if (
+        msg.includes('API_KEY_INVALID') ||
+        msg.includes('API KEY NOT VALID') ||
+        msg.includes('PERMISSION_DENIED') ||
+        msg.includes('HTTP 403') ||
+        msg.includes('LOCATION') ||
+        msg.includes('FAILED_PRECONDITION')
+      ) {
         throw err;
       }
     }
   }
 
   throw lastErr instanceof Error ? lastErr : new Error('Gemini API call failed');
+}
+
+function buildSlipOcrPrompt(db: PersistedDatabase, sess: PaymentVerifySession): string {
+  const nowPP = formatPhnomPenhDateTime(Date.now());
+  const merchantHints = getShopMerchantHints(db.shopSettings);
+  return [
+    'Analyze this uploaded bank transfer receipt / payment slip image strictly for anti-fraud verification in Cambodia.',
+    `Expected payment amount: ${sess.expectedAmount} ${sess.currency} (or USD $${sess.expectedAmountUsd.toFixed(2)}).`,
+    merchantHints.length ? `Expected shop recipient keywords/account: ${merchantHints.join(', ')}.` : '',
+    `Current Cambodia time: ${nowPP.display}.`,
+    'Rules:',
+    '1. isBankReceipt=true ONLY if this is an authentic completed banking/e-wallet payment confirmation receipt (ABA, ACLEDA, Bakong, Wing, Canadia, Sathapana, Prince, Chip Mong, Vattanac, KB Prasac, Phillip Bank, etc.). A KHQR scan-to-pay screen BEFORE payment is NOT a receipt (isBankReceipt=false). Random photos/text notes are NOT receipts.',
+    '2. transferStatus: SUCCESS only if clearly marked completed/successful/paid. PENDING, FAILED, or UNKNOWN otherwise.',
+    '3. Extract exact numeric paidAmount and currency (USD or KHR or OTHER) printed on the receipt. Never guess.',
+    '4. Extract transactionId (Trx ID / Ref / Hash / Trace No) printed on the receipt, recipientName, recipientAccount.',
+    '5. Extract receiptDateYmd (YYYY-MM-DD) and receiptTimeHm (24h HH:MM) converted if AM/PM is shown, or empty string if absent.',
+    '6. Set appearsTampered=true if digits/text look edited, pasted over, mismatched fonts, blurred/cropped out amount or status, or artificially altered.',
+    'Return ONLY a single valid JSON object (no markdown fences, no commentary) with these exact keys:',
+    '{"isBankReceipt": boolean, "transferStatus": "SUCCESS"|"PENDING"|"FAILED"|"UNKNOWN", "bankName": string, "paidAmount": number, "currency": "USD"|"KHR"|"OTHER", "transactionId": string, "recipientName": string, "recipientAccount": string, "receiptDateYmd": string, "receiptTimeHm": string, "appearsTampered": boolean, "summaryKm": string}',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function extractWorkersAiJson(res: unknown): AnalyzedSlipResult {
+  if (!res || typeof res !== 'object') {
+    throw new Error('Workers AI empty response');
+  }
+  const obj = res as {
+    response?: unknown;
+    choices?: Array<{ message?: { content?: unknown } }>;
+  };
+  let candidate: unknown = obj.response;
+  if (candidate === undefined && Array.isArray(obj.choices)) {
+    candidate = obj.choices[0]?.message?.content;
+  }
+  if (candidate && typeof candidate === 'object' && 'isBankReceipt' in (candidate as Record<string, unknown>)) {
+    return candidate as AnalyzedSlipResult;
+  }
+  const rawText = (typeof candidate === 'string' ? candidate : JSON.stringify(candidate ?? obj))
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+  const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error(`Workers AI non-JSON response: ${rawText.slice(0, 120)}`);
+  }
+  return JSON.parse(jsonMatch[0]) as AnalyzedSlipResult;
+}
+
+async function analyzeBankSlipWithWorkersAi(
+  ai: NonNullable<Env['AI']>,
+  dataUri: string,
+  db: PersistedDatabase,
+  sess: PaymentVerifySession
+): Promise<AnalyzedSlipResult> {
+  const prompt = buildSlipOcrPrompt(db, sess);
+  const models = [
+    '@cf/mistralai/mistral-small-3.1-24b-instruct',
+    '@cf/meta/llama-4-scout-17b-16e-instruct',
+    '@cf/meta/llama-3.2-11b-vision-instruct',
+  ];
+
+  let lastErr: unknown = null;
+  for (const model of models) {
+    const runInference = async (): Promise<unknown> =>
+      ai.run(model, {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: dataUri } },
+            ],
+          },
+        ],
+        max_tokens: 700,
+        temperature: 0.1,
+      });
+
+    try {
+      const res = await runInference();
+      return extractWorkersAiJson(res);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err || '');
+      // Automatically accept Meta model license terms on first Workers AI invocation
+      if (/agree|license|5016|accept/i.test(msg)) {
+        try {
+          await ai.run(model, { prompt: 'agree' });
+          const retryRes = await runInference();
+          return extractWorkersAiJson(retryRes);
+        } catch (retryErr) {
+          lastErr = retryErr;
+          continue;
+        }
+      }
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Workers AI vision verification failed');
 }
 
 function validateReceiptAgainstSession(
@@ -2085,8 +2218,8 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       telegramContactReady: botReady,
       telegramOrderVerifyReady: Boolean(botToken && chatId),
       bakongVerifyReady: Boolean(getEffectiveBakongToken(env, db)),
-      slipAutoVerifyReady: Boolean(getEffectiveGeminiKey(env)),
-      ocrVersion: 'v3-autodiscover',
+      slipAutoVerifyReady: isSlipAutoVerifyReady(env),
+      ocrVersion: 'v4-workers-ai',
       phoneOtpReady: phoneOtpChannel !== 'none',
       phoneOtpChannel,
       botUsername,
@@ -2708,7 +2841,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       expiresInSeconds: 600,
       bakongVerifyReady: Boolean(getEffectiveBakongToken(env, db)),
       telegramOrderVerifyReady: Boolean(getEffectiveBotToken(env, db) && getEffectiveChatId(env, db)),
-      slipAutoVerifyReady: Boolean(getEffectiveGeminiKey(env)),
+      slipAutoVerifyReady: isSlipAutoVerifyReady(env),
     });
   }
 
@@ -3015,20 +3148,44 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     }
 
     const geminiKey = getEffectiveGeminiKey(env);
-    if (!geminiKey) {
+    if (!geminiKey && !env.AI) {
       return jsonResponse(
         {
           ok: false,
           needsOwnerReview: true,
           error:
-            'មិនទាន់បានកំណត់សេវាស្កេនវិក្កយបត្រ Auto (GEMINI_API_KEY) លើ Server ទេ! សូមចុច «ផ្ញើទៅ Telegram Bot ហាង» ដើម្បីឱ្យម្ចាស់ហាងចុចបញ្ជាក់ដោយសុវត្ថិភាព។',
+            'មិនទាន់បានកំណត់សេវាស្កេនវិក្កយបត្រ Auto (GEMINI_API_KEY ឬ Workers AI) លើ Server ទេ! សូមចុច «ផ្ញើទៅ Telegram Bot ហាង» ដើម្បីឱ្យម្ចាស់ហាងចុចបញ្ជាក់ដោយសុវត្ថិភាព។',
         },
         503
       );
     }
 
     try {
-      const ocr = await analyzeBankSlipWithGeminiRest(geminiKey, slipImg, db, sess);
+      let ocr: AnalyzedSlipResult | null = null;
+      let geminiErr: unknown = null;
+
+      if (geminiKey) {
+        try {
+          ocr = await analyzeBankSlipWithGeminiRest(geminiKey, slipImg, db, sess);
+        } catch (err) {
+          geminiErr = err;
+        }
+      }
+
+      // Automatic fallback to Cloudflare Workers AI (never geo-blocked in Cambodia!)
+      if (!ocr && env.AI) {
+        try {
+          ocr = await analyzeBankSlipWithWorkersAi(env.AI, slipImg, db, sess);
+        } catch (cfErr) {
+          const cfMsg = cfErr instanceof Error ? cfErr.message : String(cfErr || 'Workers AI failed');
+          throw new Error(cfMsg);
+        }
+      }
+
+      if (!ocr) {
+        throw geminiErr || new Error('OCR service unavailable');
+      }
+
       const verdict = validateReceiptAgainstSession(ocr, db, sess, slipHash, cleanRef);
       if (!verdict.ok) {
         sess.status = verdict.status;
