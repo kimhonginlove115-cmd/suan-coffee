@@ -745,6 +745,14 @@ function doesRecipientMatchShop(
   return false;
 }
 
+function sanitizeGeminiDiagnostic(raw: string): string {
+  return String(raw || '')
+    .replace(/AIza[0-9A-Za-z_-]{10,}/g, '[REDACTED]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 140);
+}
+
 function formatGeminiSlipErrorMessage(err: unknown): { httpStatus: number; message: string } {
   const raw = err instanceof Error ? err.message : String(err || '');
   const upper = raw.toUpperCase();
@@ -774,10 +782,76 @@ function formatGeminiSlipErrorMessage(err: unknown): { httpStatus: number; messa
   }
   const codeMatch = raw.match(/HTTP\s*(\d{3})/i);
   const codeTag = codeMatch ? ` (HTTP ${codeMatch[1]})` : '';
+  const detail = sanitizeGeminiDiagnostic(raw.replace(/^Gemini API HTTP \d{3}:\s*/i, ''));
   return {
     httpStatus: 502,
-    message: `ប្រព័ន្ធស្កេនវិក្កយបត្រមានភាពរអាក់រអួលបណ្តោះអាសន្ន${codeTag}! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។`,
+    message: `ប្រព័ន្ធស្កេនវិក្កយបត្រមានភាពរអាក់រអួលបណ្តោះអាសន្ន${codeTag}${detail ? ` · ${detail}` : ''}! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។`,
   };
+}
+
+function isAllowedDiscoveredGeminiModel(name: string): boolean {
+  const n = name.toLowerCase();
+  if (!n.includes('gemini-')) return false;
+  // Strictly block deprecated/prohibited or non-vision/specialized models
+  const blocked = [
+    'gemini-1.0',
+    'gemini-1.5',
+    'gemini-2.0',
+    'gemini-pro',
+    'embedding',
+    'imagen',
+    'veo',
+    'lyria',
+    'tts',
+    'live',
+    'transcribe',
+    'translate',
+    'aqa',
+    'robotics',
+    'computer-use',
+  ];
+  if (blocked.some((b) => n.includes(b))) return false;
+  return n.includes('flash') || n.includes('hydrogen') || n.includes('lite');
+}
+
+async function discoverActiveGeminiFlashModels(apiKey: string): Promise<string[]> {
+  try {
+    const res = await fetchWithTimeout(
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=100',
+      {
+        method: 'GET',
+        headers: {
+          'x-goog-api-key': apiKey,
+          'User-Agent': 'aistudio-build',
+        },
+      },
+      8000
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      models?: Array<{ name?: string; supportedGenerationMethods?: string[] }>;
+    };
+    const list = (data.models || [])
+      .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+      .map((m) => String(m.name || '').replace(/^models\//, ''))
+      .filter((name) => isAllowedDiscoveredGeminiModel(name));
+
+    const score = (name: string): number => {
+      const n = name.toLowerCase();
+      let s = 0;
+      if (n.includes('gemini-4')) s += 400;
+      else if (n.includes('gemini-3.1')) s += 310;
+      else if (n.includes('gemini-3')) s += 300;
+      else if (n.includes('gemini-2.5')) s += 250;
+      if (n.includes('flash') || n.includes('hydrogen')) s += 40;
+      if (n.includes('lite')) s += 10;
+      if (n.includes('image')) s -= 200;
+      return s;
+    };
+    return list.sort((a, b) => score(b) - score(a)).slice(0, 4);
+  } catch {
+    return [];
+  }
 }
 
 async function analyzeBankSlipWithGeminiRest(
@@ -811,101 +885,131 @@ async function analyzeBankSlipWithGeminiRest(
     .filter(Boolean)
     .join('\n');
 
+  const tryModel = async (model: string, useLowThinking: boolean): Promise<AnalyzedSlipResult> => {
+    const res = await fetchWithTimeout(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+          'User-Agent': 'aistudio-build',
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { inlineData: { mimeType, data: base64Data } },
+                { text: prompt },
+              ],
+            },
+          ],
+          generationConfig: {
+            ...(useLowThinking ? { thinkingConfig: { thinkingLevel: 'LOW' } } : {}),
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: 'OBJECT',
+              properties: {
+                isBankReceipt: { type: 'BOOLEAN' },
+                transferStatus: { type: 'STRING', enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
+                bankName: { type: 'STRING' },
+                paidAmount: { type: 'NUMBER' },
+                currency: { type: 'STRING', enum: ['USD', 'KHR', 'OTHER'] },
+                transactionId: { type: 'STRING' },
+                recipientName: { type: 'STRING' },
+                recipientAccount: { type: 'STRING' },
+                receiptDateYmd: { type: 'STRING' },
+                receiptTimeHm: { type: 'STRING' },
+                appearsTampered: { type: 'BOOLEAN' },
+                summaryKm: { type: 'STRING' },
+              },
+              required: [
+                'isBankReceipt',
+                'transferStatus',
+                'bankName',
+                'paidAmount',
+                'currency',
+                'transactionId',
+                'recipientName',
+                'recipientAccount',
+                'receiptDateYmd',
+                'receiptTimeHm',
+                'appearsTampered',
+                'summaryKm',
+              ],
+            },
+          },
+        }),
+      },
+      26000
+    );
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      let msgSummary = errBody;
+      try {
+        const parsed = JSON.parse(errBody) as { error?: { message?: string; status?: string } };
+        if (parsed?.error?.message) {
+          msgSummary = `${parsed.error.status || ''} ${parsed.error.message}`.trim();
+        }
+      } catch {
+        // use raw errBody
+      }
+      throw new Error(`Gemini API HTTP ${res.status}: ${msgSummary.slice(0, 260)}`);
+    }
+
+    const data = (await res.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const rawText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '{}')
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/```\s*$/i, '')
+      .trim();
+    return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
+  };
+
   const candidateModels: Array<{ model: string; useLowThinking: boolean }> = [
     { model: 'gemini-4-hydrogen', useLowThinking: true },
     { model: 'gemini-3.1-flash-lite', useLowThinking: true },
+    { model: 'gemini-3.1-flash-lite-preview', useLowThinking: true },
+    { model: 'gemini-3-flash-preview', useLowThinking: true },
     { model: 'gemini-2.5-flash', useLowThinking: false },
+    { model: 'gemini-2.5-flash-lite', useLowThinking: false },
   ];
 
+  const tried = new Set<string>();
   let lastErr: unknown = null;
   for (const candidate of candidateModels) {
+    tried.add(candidate.model);
     try {
-      const res = await fetchWithTimeout(
-        `https://generativelanguage.googleapis.com/v1beta/models/${candidate.model}:generateContent`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': apiKey,
-            'User-Agent': 'aistudio-build',
-          },
-          body: JSON.stringify({
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  { inlineData: { mimeType, data: base64Data } },
-                  { text: prompt },
-                ],
-              },
-            ],
-            generationConfig: {
-              ...(candidate.useLowThinking ? { thinkingConfig: { thinkingLevel: 'LOW' } } : {}),
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: 'OBJECT',
-                properties: {
-                  isBankReceipt: { type: 'BOOLEAN' },
-                  transferStatus: { type: 'STRING', enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
-                  bankName: { type: 'STRING' },
-                  paidAmount: { type: 'NUMBER' },
-                  currency: { type: 'STRING', enum: ['USD', 'KHR', 'OTHER'] },
-                  transactionId: { type: 'STRING' },
-                  recipientName: { type: 'STRING' },
-                  recipientAccount: { type: 'STRING' },
-                  receiptDateYmd: { type: 'STRING' },
-                  receiptTimeHm: { type: 'STRING' },
-                  appearsTampered: { type: 'BOOLEAN' },
-                  summaryKm: { type: 'STRING' },
-                },
-                required: [
-                  'isBankReceipt',
-                  'transferStatus',
-                  'bankName',
-                  'paidAmount',
-                  'currency',
-                  'transactionId',
-                  'recipientName',
-                  'recipientAccount',
-                  'receiptDateYmd',
-                  'receiptTimeHm',
-                  'appearsTampered',
-                  'summaryKm',
-                ],
-              },
-            },
-          }),
-        },
-        26000
-      );
-
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => '');
-        const apiErr = new Error(`Gemini API HTTP ${res.status}: ${errBody.slice(0, 300)}`);
-        const upperBody = errBody.toUpperCase();
-        if (upperBody.includes('API_KEY_INVALID') || upperBody.includes('API KEY NOT VALID') || res.status === 403) {
-          throw apiErr;
-        }
-        lastErr = apiErr;
-        continue;
-      }
-
-      const data = (await res.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-      };
-      const rawText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '{}')
-        .trim()
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/```\s*$/i, '')
-        .trim();
-      return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
+      return await tryModel(candidate.model, candidate.useLowThinking);
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
-      const isAuthFailure = msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('HTTP 403');
-      if (isAuthFailure) throw err;
+      if (msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('HTTP 403')) {
+        throw err;
+      }
     }
   }
+
+  // Fallback: dynamically discover available Gemini models on the user's API key if static names returned 404
+  const discovered = await discoverActiveGeminiFlashModels(apiKey);
+  for (const modelName of discovered) {
+    if (tried.has(modelName)) continue;
+    tried.add(modelName);
+    try {
+      return await tryModel(modelName, false);
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message.toUpperCase() : '';
+      if (msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('HTTP 403')) {
+        throw err;
+      }
+    }
+  }
+
   throw lastErr instanceof Error ? lastErr : new Error('Gemini API call failed');
 }
 
