@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -15,7 +16,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const cliPortIdx = process.argv.indexOf('--port');
+const cliPort = cliPortIdx !== -1 ? Number(process.argv[cliPortIdx + 1]) : 0;
+const PORT =
+  (Number.isFinite(cliPort) && cliPort > 0 ? cliPort : 0) ||
+  (process.env.NODE_ENV === 'production' ? Number(process.env.PORT) || 3000 : 3000);
 
 app.use(express.json({ limit: '5mb' }));
 
@@ -61,6 +66,9 @@ interface MemberRecord {
   telegramPhotoUrl?: string;
   telegramVerified: boolean;
   points: number;
+  pinHash?: string;
+  pinSalt?: string;
+  tokenVersion?: number;
   createdAt: number;
   lastLoginAt: number;
 }
@@ -205,7 +213,9 @@ interface TelegramLinkSession {
   nonce: string;
   mode: 'login' | 'contact';
   name?: string;
-  phone?: string;
+  memberId?: string;
+  expectedPhone?: string;
+  error?: string;
   createdAt: number;
   expiresAt: number;
   startedByTelegramId?: string;
@@ -228,9 +238,12 @@ interface PaymentVerifySession {
   createdAt: number;
   expiresAt: number;
   status: 'pending' | 'awaiting_owner' | 'verified' | 'amount_mismatch' | 'rejected';
-  verifiedBy?: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'slip_ref';
+  verifiedBy?: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'auto_slip_ocr' | 'slip_ref';
   paidAmount?: number;
+  paidCurrency?: 'USD' | 'KHR';
   transactionRef?: string;
+  bankName?: string;
+  slipHash?: string;
   customerName?: string;
   customerPhone?: string;
   slipImg?: string;
@@ -370,6 +383,7 @@ function safeEqualHex(a: string, b: string): boolean {
 interface TokenPayload {
   sub: string;
   role: 'member' | 'admin';
+  ver?: number;
   jti: string;
   iat: number;
   exp: number;
@@ -378,12 +392,14 @@ interface TokenPayload {
 function signSessionToken(
   sub: string,
   role: 'member' | 'admin',
-  ttlMs = 7 * 24 * 60 * 60 * 1000
+  ttlMs = 7 * 24 * 60 * 60 * 1000,
+  ver?: number
 ): string {
   const now = Date.now();
   const payload: TokenPayload = {
     sub,
     role,
+    ...(typeof ver === 'number' ? { ver } : {}),
     jti: crypto.randomBytes(12).toString('hex'),
     iat: now,
     exp: now + ttlMs,
@@ -417,9 +433,11 @@ interface PaymentProofPayload {
   amtUsd: number;
   amtCur: number;
   cur: 'USD' | 'KHR';
-  by: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'slip_ref';
+  by: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'auto_slip_ocr' | 'slip_ref';
   md5: string;
   ref: string;
+  bankName?: string;
+  slipHash?: string;
   iat: number;
   exp: number;
 }
@@ -429,11 +447,13 @@ function signPaymentProofToken(sess: PaymentVerifySession): string {
   const payload: PaymentProofPayload = {
     sid: sess.id,
     amtUsd: Number(sess.expectedAmountUsd.toFixed(2)),
-    amtCur: sess.expectedAmount,
-    cur: sess.currency,
+    amtCur: sess.paidAmount ?? sess.expectedAmount,
+    cur: sess.paidCurrency || sess.currency,
     by: sess.verifiedBy || 'slip_ref',
     md5: sess.md5,
     ref: sess.transactionRef || sess.billNumber,
+    bankName: sess.bankName,
+    slipHash: sess.slipHash,
     iat: now,
     exp: now + 30 * 60 * 1000,
   };
@@ -443,6 +463,297 @@ function signPaymentProofToken(sess: PaymentVerifySession): string {
     .update(`pay1:${encoded}`)
     .digest('base64url');
   return `pay1.${encoded}.${sig}`;
+}
+
+interface AnalyzedSlipResult {
+  isBankReceipt: boolean;
+  transferStatus: 'SUCCESS' | 'PENDING' | 'FAILED' | 'UNKNOWN';
+  bankName: string;
+  paidAmount: number;
+  currency: 'USD' | 'KHR' | 'OTHER';
+  transactionId: string;
+  recipientName: string;
+  recipientAccount: string;
+  receiptDateYmd: string;
+  receiptTimeHm: string;
+  appearsTampered: boolean;
+  summaryKm: string;
+}
+
+function getEffectiveGeminiKey(): string {
+  const key = (process.env.GEMINI_API_KEY || '').trim();
+  if (!key || key === 'MY_GEMINI_API_KEY' || key.startsWith('YOUR_')) return '';
+  return key;
+}
+
+function computeSlipSha256(dataUri: string): string {
+  const m = dataUri.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
+  const raw = m ? Buffer.from(m[1], 'base64') : Buffer.from(dataUri, 'utf8');
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+function formatPhnomPenhDateTime(tsMs: number): { ymd: string; hm: string; display: string } {
+  const shifted = new Date(tsMs + 7 * 3600 * 1000);
+  const y = shifted.getUTCFullYear();
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(shifted.getUTCDate()).padStart(2, '0');
+  const hh = String(shifted.getUTCHours()).padStart(2, '0');
+  const mm = String(shifted.getUTCMinutes()).padStart(2, '0');
+  return { ymd: `${y}-${m}-${d}`, hm: `${hh}:${mm}`, display: `${y}-${m}-${d} ${hh}:${mm} (UTC+7)` };
+}
+
+function getShopMerchantHints(settings: Record<string, unknown> | null): string[] {
+  if (!settings) return [];
+  const rawFields = [
+    settings.khqrMerchantName,
+    settings.brandTitle,
+    settings.shopName,
+    settings.khqrBakongId,
+    settings.bankInfo,
+  ]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean)
+    .join(' ');
+  const tokens = rawFields
+    .toLowerCase()
+    .split(/[^a-z0-9\u1780-\u17ff]+/)
+    .filter((t) => (/^\d+$/.test(t) ? t.length >= 4 : t.length >= 3))
+    .filter((t) => !['cafe', 'coffee', 'shop', 'aba', 'bakong', 'khqr', 'pay', 'bank', 'acleda', 'wing'].includes(t));
+  return Array.from(new Set(tokens));
+}
+
+function doesRecipientMatchShop(
+  merchantHints: string[],
+  recipientName: string,
+  recipientAccount: string
+): boolean {
+  if (!merchantHints.length) return true;
+  const combined = `${recipientName || ''} ${recipientAccount || ''}`.toLowerCase();
+  const cleanCombinedDigits = combined.replace(/\D/g, '');
+  if (!combined.trim() || combined.trim().length < 3) return true;
+  for (const hint of merchantHints) {
+    if (/^\d+$/.test(hint)) {
+      const tail = hint.slice(-4);
+      if (cleanCombinedDigits.includes(tail)) return true;
+    } else if (combined.includes(hint)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function analyzeBankSlipWithGemini(
+  apiKey: string,
+  dataUri: string,
+  sess: PaymentVerifySession
+): Promise<AnalyzedSlipResult> {
+  const m = dataUri.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!m) {
+    throw new Error('ទម្រង់រូបភាពវិក្កយបត្រមិនត្រឹមត្រូវទេ');
+  }
+  const mimeType = m[1];
+  const base64Data = m[2];
+  const nowPP = formatPhnomPenhDateTime(Date.now());
+  const merchantHints = getShopMerchantHints(db.shopSettings);
+
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+
+  const prompt = [
+    'Analyze this uploaded bank transfer receipt / payment slip image strictly for anti-fraud verification in Cambodia.',
+    `Expected payment amount: ${sess.expectedAmount} ${sess.currency} (or USD $${sess.expectedAmountUsd.toFixed(2)}).`,
+    merchantHints.length ? `Expected shop recipient keywords/account: ${merchantHints.join(', ')}.` : '',
+    `Current Cambodia time: ${nowPP.display}.`,
+    'Rules:',
+    '1. isBankReceipt=true ONLY if this is an authentic completed banking/e-wallet payment confirmation receipt (ABA, ACLEDA, Bakong, Wing, Canadia, Sathapana, Prince, Chip Mong, Vattanac, KB Prasac, Phillip Bank, etc.). A KHQR scan-to-pay screen BEFORE payment is NOT a receipt (isBankReceipt=false). Random photos/text notes are NOT receipts.',
+    '2. transferStatus: SUCCESS only if clearly marked completed/successful/paid. PENDING, FAILED, or UNKNOWN otherwise.',
+    '3. Extract exact numeric paidAmount and currency (USD or KHR or OTHER) printed on the receipt. Never guess.',
+    '4. Extract transactionId (Trx ID / Ref / Hash / Trace No) printed on the receipt, recipientName, recipientAccount.',
+    '5. Extract receiptDateYmd (YYYY-MM-DD) and receiptTimeHm (24h HH:MM) converted if AM/PM is shown, or empty string if absent.',
+    '6. Set appearsTampered=true if digits/text look edited, pasted over, mismatched fonts, blurred/cropped out amount or status, or artificially altered.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-4-hydrogen',
+    contents: {
+      parts: [
+        { inlineData: { mimeType, data: base64Data } },
+        { text: prompt },
+      ],
+    },
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          isBankReceipt: { type: Type.BOOLEAN },
+          transferStatus: { type: Type.STRING, enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
+          bankName: { type: Type.STRING },
+          paidAmount: { type: Type.NUMBER },
+          currency: { type: Type.STRING, enum: ['USD', 'KHR', 'OTHER'] },
+          transactionId: { type: Type.STRING },
+          recipientName: { type: Type.STRING },
+          recipientAccount: { type: Type.STRING },
+          receiptDateYmd: { type: Type.STRING },
+          receiptTimeHm: { type: Type.STRING },
+          appearsTampered: { type: Type.BOOLEAN },
+          summaryKm: { type: Type.STRING },
+        },
+        required: [
+          'isBankReceipt',
+          'transferStatus',
+          'bankName',
+          'paidAmount',
+          'currency',
+          'transactionId',
+          'recipientName',
+          'recipientAccount',
+          'receiptDateYmd',
+          'receiptTimeHm',
+          'appearsTampered',
+          'summaryKm',
+        ],
+      },
+    },
+  });
+
+  const rawText = (response.text || '{}').trim();
+  return JSON.parse(rawText) as AnalyzedSlipResult;
+}
+
+function validateReceiptAgainstSession(
+  ocr: AnalyzedSlipResult,
+  sess: PaymentVerifySession,
+  slipHash: string,
+  manualRef: string
+): { ok: true; paidAmount: number; paidCurrency: 'USD' | 'KHR'; effectiveRef: string; bankName: string } | {
+  ok: false;
+  httpStatus: number;
+  status: 'amount_mismatch' | 'rejected';
+  error: string;
+} {
+  if (!ocr.isBankReceipt) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      status: 'rejected',
+      error: ocr.summaryKm || 'រូបភាពនេះមិនមែនជាវិក្កយបត្រវេរលុយជោគជ័យពីធនាគារទេ! សូម Upload រូបវិក្កយបត្រវេរប្រាក់ពិតប្រាកដ។',
+    };
+  }
+  if (ocr.appearsTampered) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      status: 'rejected',
+      error: 'ប្រព័ន្ធសុវត្ថិភាពរកឃើញថារូបវិក្កយបត្រនេះមានសញ្ញាកែសម្រួល ឬមិនច្បាស់លាស់! សូម Upload រូបដើម ឬផ្ញើជូនម្ចាស់ហាងពិនិត្យ។',
+    };
+  }
+  if (ocr.transferStatus !== 'SUCCESS') {
+    return {
+      ok: false,
+      httpStatus: 400,
+      status: 'rejected',
+      error: `ស្ថានភាពប្រតិបត្តិការណ៍លើវិក្កយបត្រមិនទាន់ជោគជ័យទេ (${ocr.transferStatus})!`,
+    };
+  }
+
+  const paidAmt = Number(ocr.paidAmount || 0);
+  if (!Number.isFinite(paidAmt) || paidAmt <= 0 || ocr.currency === 'OTHER') {
+    return {
+      ok: false,
+      httpStatus: 400,
+      status: 'amount_mismatch',
+      error: 'មិនអាចអានចំនួនទឹកប្រាក់ និងរូបិយប័ណ្ណច្បាស់លើវិក្កយបត្របានទេ!',
+    };
+  }
+
+  const khrRate = Number(db.shopSettings?.khqrKhrRate || 4100) || 4100;
+  let paidMatches = false;
+  if (ocr.currency === sess.currency) {
+    const tol = sess.currency === 'KHR' ? 100 : 0.01;
+    paidMatches = paidAmt + tol >= sess.expectedAmount;
+  } else {
+    const paidUsd = ocr.currency === 'KHR' ? paidAmt / khrRate : paidAmt;
+    paidMatches = paidUsd + 0.02 >= sess.expectedAmountUsd;
+  }
+
+  if (!paidMatches) {
+    const readStr =
+      ocr.currency === 'KHR' ? `${Math.round(paidAmt).toLocaleString()} ៛` : `$${paidAmt.toFixed(2)}`;
+    const reqStr =
+      sess.currency === 'KHR'
+        ? `${Math.round(sess.expectedAmount).toLocaleString()} ៛ ($${sess.expectedAmountUsd.toFixed(2)})`
+        : `$${sess.expectedAmountUsd.toFixed(2)}`;
+    return {
+      ok: false,
+      httpStatus: 400,
+      status: 'amount_mismatch',
+      error: `ចំនួនលុយលើវិក្កយបត្រមិនគ្រប់ទេ! អានឃើញ ${readStr} ≠ ត្រូវបង់ ${reqStr}`,
+    };
+  }
+
+  const merchantHints = getShopMerchantHints(db.shopSettings);
+  if (!doesRecipientMatchShop(merchantHints, ocr.recipientName, ocr.recipientAccount)) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      status: 'rejected',
+      error: `ឈ្មោះអ្នកទទួលលើវិក្កយបត្រ (${ocr.recipientName || ocr.recipientAccount}) មិនត្រូវគ្នានឹងគណនីហាងទេ!`,
+    };
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(ocr.receiptDateYmd || '')) {
+    const [yy, mm, dd] = ocr.receiptDateYmd.split('-').map(Number);
+    const hasTime = /^\d{2}:\d{2}$/.test(ocr.receiptTimeHm || '');
+    const [hh, min] = hasTime ? ocr.receiptTimeHm.split(':').map(Number) : [23, 59];
+    const receiptUtcMs = Date.UTC(yy, mm - 1, dd, hh, min) - 7 * 3600 * 1000;
+    const maxAllowedPastMs = hasTime ? 30 * 60 * 1000 : 12 * 3600 * 1000;
+    if (receiptUtcMs < sess.createdAt - maxAllowedPastMs) {
+      return {
+        ok: false,
+        httpStatus: 400,
+        status: 'rejected',
+        error: `វិក្កយបត្រនេះចាស់ហួសពេល (${ocr.receiptDateYmd}${hasTime ? ` ${ocr.receiptTimeHm}` : ''})! សូមបង់ប្រាក់ថ្មី រួច Upload វិក្កយបត្រទើបវេរ។`,
+      };
+    }
+  }
+
+  const cleanOcrTx = sanitizeText(ocr.transactionId, 48).replace(/\s+/g, '');
+  const cleanManual = sanitizeText(manualRef, 48).replace(/\s+/g, '');
+  const effectiveRef = cleanOcrTx.length >= 4 ? cleanOcrTx : cleanManual;
+
+  if (slipHash && isPaymentRefUsed(`slip:${slipHash}`)) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      status: 'rejected',
+      error: 'រូបវិក្កយបត្រ (Slip) នេះធ្លាប់បានប្រើប្រាស់សម្រាប់ការកម្ម៉ង់មុនរួចហើយ! ហាមប្រើម្តងទៀត។',
+    };
+  }
+  if (effectiveRef && isPaymentRefUsed(`ref:${effectiveRef.toLowerCase()}`)) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      status: 'rejected',
+      error: `លេខប្រតិបត្តិការណ៍ (${effectiveRef}) នេះធ្លាប់បានប្រើប្រាស់រួចហើយ!`,
+    };
+  }
+
+  return {
+    ok: true,
+    paidAmount: paidAmt,
+    paidCurrency: ocr.currency === 'KHR' ? 'KHR' : 'USD',
+    effectiveRef: effectiveRef || `SLIP-${slipHash.slice(0, 8).toUpperCase()}`,
+    bankName: sanitizeText(ocr.bankName, 40) || 'Bank Transfer',
+  };
 }
 
 function verifyPaymentProofToken(token: unknown): PaymentProofPayload | null {
@@ -499,7 +810,58 @@ function requireAdmin(req: express.Request, res: express.Response): TokenPayload
   return payload;
 }
 
+function toPublicMember(rec: MemberRecord) {
+  return {
+    id: rec.id,
+    name: rec.name,
+    phone: rec.phone,
+    phoneVerified: rec.phoneVerified,
+    telegramUsername: rec.telegramUsername,
+    telegramId: rec.telegramId,
+    telegramPhotoUrl: rec.telegramPhotoUrl,
+    telegramVerified: rec.telegramVerified,
+    points: rec.points,
+    hasPin: Boolean(rec.pinHash && rec.pinSalt),
+    createdAt: rec.createdAt,
+    lastLoginAt: rec.lastLoginAt,
+  };
+}
+
+function isValidMemberPin(pin: string): boolean {
+  return /^\d{4,8}$/.test(pin);
+}
+
+function isWeakMemberPin(pin: string): boolean {
+  if (/^(\d)\1+$/.test(pin)) return true;
+  const weakSet = new Set([
+    '1234',
+    '4321',
+    '0123',
+    '3210',
+    '12345',
+    '54321',
+    '123456',
+    '654321',
+    '1122',
+    '2211',
+    '1212',
+    '2121',
+    '112233',
+  ]);
+  return weakSet.has(pin);
+}
+
+function getAuthenticatedMember(req: express.Request): { member: MemberRecord; payload: TokenPayload } | null {
+  const payload = verifySessionToken(extractBearer(req));
+  if (!payload || payload.role !== 'member') return null;
+  const member = membersById.get(payload.sub);
+  if (!member) return null;
+  if ((payload.ver ?? 1) !== (member.tokenVersion ?? 1)) return null;
+  return { member, payload };
+}
+
 function upsertMember(params: {
+  targetMemberId?: string;
   name?: string;
   phone?: string;
   phoneVerified?: boolean;
@@ -508,14 +870,65 @@ function upsertMember(params: {
   telegramPhotoUrl?: string;
   telegramVerified?: boolean;
   pointsDelta?: number;
-}): MemberRecord {
+}): { ok: true; member: MemberRecord } | { ok: false; error: string } {
+  // Never match/hijack accounts via unverified phone or unverified telegramUsername.
   let existingId: string | undefined;
-  if (params.telegramId && memberIdByTgId.has(params.telegramId)) {
+  if (params.targetMemberId && membersById.has(params.targetMemberId)) {
+    existingId = params.targetMemberId;
+  } else if (params.telegramId && memberIdByTgId.has(params.telegramId)) {
     existingId = memberIdByTgId.get(params.telegramId);
-  } else if (params.phone && memberIdByPhone.has(params.phone)) {
-    existingId = memberIdByPhone.get(params.phone);
-  } else if (params.telegramUsername && memberIdByTgUsername.has(params.telegramUsername.toLowerCase())) {
-    existingId = memberIdByTgUsername.get(params.telegramUsername.toLowerCase());
+  } else if (params.phone && params.phoneVerified && memberIdByPhone.has(params.phone)) {
+    const holderId = memberIdByPhone.get(params.phone)!;
+    const holder = membersById.get(holderId);
+    if (holder) {
+      if (holder.phoneVerified) {
+        if (params.telegramId && holder.telegramId && holder.telegramId !== params.telegramId) {
+          return {
+            ok: false,
+            error: 'លេខទូរស័ព្ទនេះត្រូវបានផ្ទៀងផ្ទាត់ជាមួយគណនី Telegram ផ្សេងរួចហើយ!',
+          };
+        }
+        existingId = holder.id;
+      } else {
+        // Strip unverified phone from unverified squatter so the real SIM owner gets a clean verified account
+        memberIdByPhone.delete(params.phone);
+        holder.phone = '';
+        holder.phoneVerified = false;
+        holder.tokenVersion = (holder.tokenVersion || 1) + 1;
+      }
+    }
+  }
+
+  // Enforce verified phone exclusivity across different accounts
+  if (params.phone && params.phoneVerified) {
+    const holderId = memberIdByPhone.get(params.phone);
+    if (holderId && holderId !== existingId) {
+      const holder = membersById.get(holderId);
+      if (holder) {
+        if (holder.phoneVerified) {
+          return {
+            ok: false,
+            error: 'លេខទូរស័ព្ទនេះត្រូវបានផ្ទៀងផ្ទាត់ជាមួយគណនីផ្សេងរួចហើយ!',
+          };
+        }
+        memberIdByPhone.delete(params.phone);
+        holder.phone = '';
+        holder.phoneVerified = false;
+        holder.tokenVersion = (holder.tokenVersion || 1) + 1;
+      }
+    }
+  }
+
+  // If a cryptographically verified Telegram user claims a @username held unverified by another phone-only account, release it
+  if (params.telegramVerified && params.telegramUsername) {
+    const holderId = memberIdByTgUsername.get(params.telegramUsername.toLowerCase());
+    if (holderId && holderId !== existingId) {
+      const holder = membersById.get(holderId);
+      if (holder && !holder.telegramId) {
+        holder.telegramUsername = '';
+        memberIdByTgUsername.delete(params.telegramUsername.toLowerCase());
+      }
+    }
   }
 
   const now = Date.now();
@@ -523,26 +936,35 @@ function upsertMember(params: {
   if (existingId && membersById.has(existingId)) {
     rec = membersById.get(existingId)!;
     if (params.name) rec.name = params.name;
-    if (params.phone) rec.phone = params.phone;
-    if (params.phoneVerified) rec.phoneVerified = true;
-    if (params.telegramUsername) rec.telegramUsername = params.telegramUsername;
+    if (params.phone && params.phoneVerified) {
+      if (rec.phone && rec.phone !== params.phone) {
+        memberIdByPhone.delete(rec.phone);
+      }
+      rec.phone = params.phone;
+      rec.phoneVerified = true;
+    }
+    if (params.telegramUsername && (params.telegramVerified || !rec.telegramUsername)) {
+      rec.telegramUsername = params.telegramUsername;
+    }
     if (params.telegramId) rec.telegramId = params.telegramId;
     if (params.telegramPhotoUrl) rec.telegramPhotoUrl = params.telegramPhotoUrl;
     if (params.telegramVerified) rec.telegramVerified = true;
     if (params.pointsDelta) rec.points += params.pointsDelta;
+    if (!rec.tokenVersion) rec.tokenVersion = 1;
     rec.lastLoginAt = now;
   } else {
     const id = `MBR-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
     rec = {
       id,
       name: params.name || 'អតិថិជន Emerald Brew',
-      phone: params.phone || '',
-      phoneVerified: Boolean(params.phoneVerified),
+      phone: params.phoneVerified && params.phone ? params.phone : '',
+      phoneVerified: Boolean(params.phoneVerified && params.phone),
       telegramUsername: params.telegramUsername || '',
       telegramId: params.telegramId,
       telegramPhotoUrl: params.telegramPhotoUrl,
       telegramVerified: Boolean(params.telegramVerified),
       points: Math.max(1, params.pointsDelta || 1),
+      tokenVersion: 1,
       createdAt: now,
       lastLoginAt: now,
     };
@@ -553,7 +975,7 @@ function upsertMember(params: {
   if (rec.telegramId) memberIdByTgId.set(rec.telegramId, rec.id);
   if (rec.telegramUsername) memberIdByTgUsername.set(rec.telegramUsername.toLowerCase(), rec.id);
   flushDb();
-  return rec;
+  return { ok: true, member: rec };
 }
 
 async function sendTelegramBotMessage(
@@ -747,7 +1169,9 @@ function buildOrderTelegramMessageText(order: Record<string, unknown>, statusFoo
               ? 'Telegram Approved'
               : order.paymentVerifiedBy === 'web_admin'
                 ? 'Website Approved'
-                : 'Slip Verified'
+                : order.paymentVerifiedBy === 'auto_slip_ocr'
+                  ? `Auto Slip Verified${order.paymentBankName ? ` · ${order.paymentBankName}` : ''}`
+                  : 'Slip Verified'
         })${order.paymentRef ? ` · Ref: <code>${order.paymentRef}</code>` : ''}`
       : `💵 ទូទាត់៖ ${order.payment}`;
   const st = String(order.status || 'Pending');
@@ -759,9 +1183,16 @@ function buildOrderTelegramMessageText(order: Record<string, unknown>, statusFoo
         : st === 'Completed'
           ? '✔️ <b>ស្ថានភាព៖ បានបញ្ចប់ជោគជ័យ (Completed)</b>'
           : '⏳ <b>ស្ថានភាព៖ រង់ចាំការបញ្ជាក់ (Pending)</b>';
+  const phoneBadge = cust.phone
+    ? cust.phoneVerified
+      ? ' ✅ Verified'
+      : cust.memberVerified
+        ? ' 🔐 Member'
+        : ' ⚠️ មិនទាន់ផ្ទៀងផ្ទាត់'
+    : '';
   return [
     `🔔 <b>កម្ម៉ង់ ${order.id}</b> (${order.timestamp})`,
-    `👤 ${cust.name || '-'} (${cust.phone || '-'})`,
+    `👤 ${cust.name || '-'} (${cust.phone || '-'}${phoneBadge})`,
     locTxt,
     '',
     itemsTxt,
@@ -958,13 +1389,16 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
           };
 
           if (targetSess.mode === 'contact') {
+            const expectedLine = targetSess.expectedPhone
+              ? `\n📱 លេខទូរស័ព្ទត្រូវផ្ទៀងផ្ទាត់៖ <b>${targetSess.expectedPhone}</b>`
+              : '';
             await sendTelegramBotMessage(
               botToken,
               String(from.id),
               `🌿 <b>សូមស្វាគមន៍មកកាន់ ${shopBrand}!</b>\n` +
                 `<i>ចុះឈ្មោះសមាជិក & ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ (Free ១០០%)</i>\n\n` +
-                `👋 សួស្តី <b>${fullFirstName}</b>!\n` +
-                `ដើម្បីបញ្ចប់ការចុះឈ្មោះ និងទទួលការដឹកជញ្ជូនរហ័សទាន់ចិត្ត សូមចុចប៊ូតុង <b>«📱 ចែករំលែកលេខទូរស័ព្ទចុះឈ្មោះ (Free)»</b> ខាងក្រោម 👇`,
+                `👋 សួស្តី <b>${fullFirstName}</b>!${expectedLine}\n` +
+                `ដើម្បីផ្ទៀងផ្ទាត់លេខទូរស័ព្ទពិតប្រាកដ សូមចុចប៊ូតុង <b>«📱 ចែករំលែកលេខទូរស័ព្ទចុះឈ្មោះ (Free)»</b> ខាងក្រោម 👇`,
               {
                 keyboard: [
                   [
@@ -995,45 +1429,48 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
           }
         } else {
           // Direct /start or /register in Telegram Bot without web nonce
-          const registered = upsertMember({
+          const upsertRes = upsertMember({
             name: fullFirstName,
             telegramId: String(from.id),
             telegramUsername: from.username ? `@${from.username}` : '',
             telegramVerified: true,
           });
-          await sendTelegramBotMessage(
-            botToken,
-            String(from.id),
-            `🌿 <b>សូមស្វាគមន៍មកកាន់ ${shopBrand}!</b>\n` +
-              `<i>Member Registration & Ordering Assistant</i>\n\n` +
-              `👋 សួស្តី <b>${registered.name}</b>!\n` +
-              `🆔 លេខកូដសមាជិក៖ <code>${registered.id}</code>\n` +
-              `⭐ ពិន្ទុសន្សំបច្ចុប្បន្ន៖ <b>${registered.points || 1} ★</b>\n` +
-              `${registered.phone ? `📱 លេខទូរស័ព្ទ៖ <b>${registered.phone}</b> ✅\n` : ''}\n` +
-              `🎁 <b>អត្ថប្រយោជន៍សមាជិក៖</b>\n` +
-              `• កម្ម៉ង់ភេសជ្ជៈ & អាហារងាយស្រួលទាំង ២ ភាសា\n` +
-              `• សន្សំពិន្ទុប្តូររង្វាន់រាល់ការកម្ម៉ង់\n` +
-              `• ទទួលដំណឹងពេលហាងទទួលលុយ និងដឹកជញ្ជូនដល់ទីតាំង\n\n` +
-              `${
-                registered.phoneVerified
-                  ? '✅ គណនីសមាជិករបស់អ្នកត្រូវបានផ្ទៀងផ្ទាត់ពេញលេញរួចរាល់!'
-                  : '👇 ចុចប៊ូតុងខាងក្រោមដើម្បីភ្ជាប់លេខទូរស័ព្ទជាមួយគណនីសមាជិករបស់អ្នក (Free ១០០%)៖'
-              }`,
-            registered.phoneVerified
-              ? undefined
-              : {
-                  keyboard: [
-                    [
-                      {
-                        text: '📱 ចុះឈ្មោះលេខទូរស័ព្ទសមាជិក (Free)',
-                        request_contact: true,
-                      },
+          if (upsertRes.ok) {
+            const registered = upsertRes.member;
+            await sendTelegramBotMessage(
+              botToken,
+              String(from.id),
+              `🌿 <b>សូមស្វាគមន៍មកកាន់ ${shopBrand}!</b>\n` +
+                `<i>Member Registration & Ordering Assistant</i>\n\n` +
+                `👋 សួស្តី <b>${registered.name}</b>!\n` +
+                `🆔 លេខកូដសមាជិក៖ <code>${registered.id}</code>\n` +
+                `⭐ ពិន្ទុសន្សំបច្ចុប្បន្ន៖ <b>${registered.points || 1} ★</b>\n` +
+                `${registered.phone ? `📱 លេខទូរស័ព្ទ៖ <b>${registered.phone}</b> ${registered.phoneVerified ? '✅' : '(មិនទាន់ផ្ទៀងផ្ទាត់)'}\n` : ''}\n` +
+                `🎁 <b>អត្ថប្រយោជន៍សមាជិក៖</b>\n` +
+                `• កម្ម៉ង់ភេសជ្ជៈ & អាហារងាយស្រួលទាំង ២ ភាសា\n` +
+                `• សន្សំពិន្ទុប្តូររង្វាន់រាល់ការកម្ម៉ង់\n` +
+                `• ទទួលដំណឹងពេលហាងទទួលលុយ និងដឹកជញ្ជូនដល់ទីតាំង\n\n` +
+                `${
+                  registered.phoneVerified
+                    ? '✅ គណនីសមាជិករបស់អ្នកត្រូវបានផ្ទៀងផ្ទាត់ពេញលេញរួចរាល់!'
+                    : '👇 ចុចប៊ូតុងខាងក្រោមដើម្បីភ្ជាប់លេខទូរស័ព្ទជាមួយគណនីសមាជិករបស់អ្នក (Free ១០០%)៖'
+                }`,
+              registered.phoneVerified
+                ? undefined
+                : {
+                    keyboard: [
+                      [
+                        {
+                          text: '📱 ចុះឈ្មោះលេខទូរស័ព្ទសមាជិក (Free)',
+                          request_contact: true,
+                        },
+                      ],
                     ],
-                  ],
-                  resize_keyboard: true,
-                  one_time_keyboard: true,
-                }
-          );
+                    resize_keyboard: true,
+                    one_time_keyboard: true,
+                  }
+            );
+          }
         }
       }
 
@@ -1042,6 +1479,9 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
         const verifiedPhone = normalizePhone(msg.contact.phone_number);
         if (isValidPhone(verifiedPhone)) {
           let linkedSessionFound = false;
+          let linkedMemberId: string | undefined;
+          let matchedCand: TelegramLinkSession | undefined;
+          let expectedPhoneMismatch = false;
           for (const cand of tgLinkStore.values()) {
             if (
               cand.mode === 'contact' &&
@@ -1049,37 +1489,66 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
               cand.startedByTelegramId === String(from.id)
             ) {
               linkedSessionFound = true;
-              cand.verifiedPhone = verifiedPhone;
-              cand.verifiedUser = cand.verifiedUser || {
-                id: String(from.id),
-                username: from.username || '',
-                firstName: fullFirstName,
-              };
+              linkedMemberId = cand.memberId;
+              matchedCand = cand;
+              if (cand.expectedPhone && cand.expectedPhone !== verifiedPhone) {
+                expectedPhoneMismatch = true;
+                cand.error = `លេខទូរស័ព្ទដែលបាន Share តាម Telegram (${verifiedPhone}) មិនត្រូវគ្នានឹងលេខ (${cand.expectedPhone}) ទេ! សូមប្រើ Telegram ដែលកាន់លេខ ${cand.expectedPhone} ឬទុកប្រអប់លេខរំពឹងទុកទំនេរ។`;
+              } else {
+                cand.verifiedPhone = verifiedPhone;
+                cand.verifiedUser = cand.verifiedUser || {
+                  id: String(from.id),
+                  username: from.username || '',
+                  firstName: fullFirstName,
+                };
+              }
             }
           }
-          const member = upsertMember({
-            name: fullFirstName,
-            phone: verifiedPhone,
-            phoneVerified: true,
-            telegramId: String(from.id),
-            telegramUsername: from.username ? `@${from.username}` : '',
-            telegramVerified: true,
-          });
-          await sendTelegramBotMessage(
-            botToken,
-            String(from.id),
-            `🎉 <b>ចុះឈ្មោះសមាជិកជោគជ័យ · ${shopBrand}</b>\n\n` +
-              `👤 ឈ្មោះ៖ <b>${member.name}</b>\n` +
-              `📱 លេខទូរស័ព្ទ៖ <b>${verifiedPhone}</b> ✅ (Verified Free)\n` +
-              `🆔 កូដសមាជិក៖ <code>${member.id}</code>\n` +
-              `⭐ ពិន្ទុសន្សំ៖ <b>${member.points || 1} ★</b>\n\n` +
-              `${
-                linkedSessionFound
-                  ? '📲 សូមត្រឡប់ទៅគេហទំព័រវិញ ប្រព័ន្ធនឹងបើកគណនីរបស់អ្នកភ្លាមៗ!'
-                  : '☕ សូមអរគុណ! លោកអ្នកអាចប្រើលេខទូរស័ព្ទ ឬ Telegram នេះដើម្បីកម្ម៉ង់ភ្លាមៗនៅលើគេហទំព័រ។'
-              }`,
-            { remove_keyboard: true }
-          );
+
+          if (expectedPhoneMismatch && matchedCand?.error) {
+            await sendTelegramBotMessage(
+              botToken,
+              String(from.id),
+              `⚠️ <b>លេខទូរស័ព្ទមិនត្រូវគ្នា</b>\n\n${matchedCand.error}`,
+              { remove_keyboard: true }
+            );
+          } else {
+            const upsertRes = upsertMember({
+              targetMemberId: linkedMemberId,
+              name: matchedCand?.name || fullFirstName,
+              phone: verifiedPhone,
+              phoneVerified: true,
+              telegramId: String(from.id),
+              telegramUsername: from.username ? `@${from.username}` : '',
+              telegramVerified: true,
+            });
+            if (!upsertRes.ok) {
+              if (matchedCand) matchedCand.error = upsertRes.error;
+              await sendTelegramBotMessage(
+                botToken,
+                String(from.id),
+                `⚠️ <b>មិនអាចភ្ជាប់លេខទូរស័ព្ទ ${verifiedPhone} បានទេ</b>\n\n${upsertRes.error}`,
+                { remove_keyboard: true }
+              );
+            } else {
+              const member = upsertRes.member;
+              await sendTelegramBotMessage(
+                botToken,
+                String(from.id),
+                `🎉 <b>ចុះឈ្មោះសមាជិកជោគជ័យ · ${shopBrand}</b>\n\n` +
+                  `👤 ឈ្មោះ៖ <b>${member.name}</b>\n` +
+                  `📱 លេខទូរស័ព្ទ៖ <b>${verifiedPhone}</b> ✅ (Verified Free)\n` +
+                  `🆔 កូដសមាជិក៖ <code>${member.id}</code>\n` +
+                  `⭐ ពិន្ទុសន្សំ៖ <b>${member.points || 1} ★</b>\n\n` +
+                  `${
+                    linkedSessionFound
+                      ? '📲 សូមត្រឡប់ទៅគេហទំព័រវិញ ប្រព័ន្ធនឹងបើកគណនីរបស់អ្នកភ្លាមៗ!'
+                      : '☕ សូមអរគុណ! លោកអ្នកអាចប្រើលេខទូរស័ព្ទ ឬ Telegram នេះដើម្បីកម្ម៉ង់ភ្លាមៗនៅលើគេហទំព័រ។'
+                  }`,
+                { remove_keyboard: true }
+              );
+            }
+          }
         }
       }
     }
@@ -1124,10 +1593,156 @@ app.get('/api/auth/capabilities', async (_req, res) => {
     telegramContactReady: botReady,
     telegramOrderVerifyReady: Boolean(botToken && chatId),
     bakongVerifyReady: Boolean(getEffectiveBakongToken()),
+    slipAutoVerifyReady: Boolean(getEffectiveGeminiKey()),
     phoneOtpReady: phoneOtpChannel !== 'none',
     phoneOtpChannel,
     botUsername,
   });
+});
+
+// ---- Secure Phone + PIN Sign-In / Registration (Anti-Spoofing & Brute-Force Protected) ----
+app.post('/api/auth/quick-login', (req, res) => {
+  const ip = getClientIp(req);
+  const rl = checkRateLimit(`quick_login_${ip}`, 15, 5 * 60 * 1000);
+  if (!rl.allowed) {
+    return res
+      .status(429)
+      .json({ ok: false, error: `សូមរង់ចាំ ${rl.retryAfterSec} វិនាទី មុននឹងព្យាយាមម្តងទៀត` });
+  }
+
+  const phone = normalizePhone(String(req.body?.phone || ''));
+  const name = sanitizeText(req.body?.name, 60);
+  const tgUsername = normalizeTgUsername(req.body?.telegramUsername);
+  const pin = String(req.body?.pin || '').trim();
+
+  if (!isValidPhone(phone)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'លេខទូរស័ព្ទមិនត្រឹមត្រូវទេ (ឧ. 012 345 678)',
+    });
+  }
+
+  if (pin && !isValidMemberPin(pin)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'កូដ PIN សុវត្ថិភាពត្រូវតែមានលេខ ៤ ដល់ ៨ ខ្ទង់',
+    });
+  }
+
+  const existingId = memberIdByPhone.get(phone);
+  const existing = existingId ? membersById.get(existingId) : undefined;
+
+  if (existing) {
+    // Existing account WITHOUT a PIN cannot be hijacked via quick-login — must authenticate via verified channel first
+    if (!existing.pinHash || !existing.pinSalt) {
+      return res.status(403).json({
+        ok: false,
+        requiresChannelVerification: true,
+        hasTelegram: Boolean(existing.telegramId || existing.telegramUsername),
+        memberName: existing.name,
+        error:
+          'គណនីនេះត្រូវបានការពាររួចហើយ! ដើម្បីការពារការបន្លំ សូមចូលតាម Telegram ឬ OTP វិញ (រួចអាចកំណត់កូដ PIN ក្នុងគណនី)។',
+      });
+    }
+
+    const lockKey = `mbr_phone_${phone}`;
+    const lock = pinLockoutMap.get(lockKey);
+    if (lock && lock.lockedUntil > Date.now()) {
+      const secs = Math.ceil((lock.lockedUntil - Date.now()) / 1000);
+      return res.status(429).json({
+        ok: false,
+        locked: true,
+        retryAfterSec: secs,
+        error: `បញ្ចូលកូដ PIN ខុសច្រើនដង! គណនីត្រូវបានចាក់សោបណ្តោះអាសន្ន ${secs} វិនាទី`,
+      });
+    }
+
+    if (!pin) {
+      return res.status(401).json({
+        ok: false,
+        requiresPin: true,
+        memberName: existing.name,
+        error: 'គណនីនេះមានកូដ PIN ការពារ! សូមបញ្ចូលកូដ PIN ដើម្បីចូល។',
+      });
+    }
+
+    const candidateHash = hashOtp(pin, existing.pinSalt);
+    if (!safeEqualHex(candidateHash, existing.pinHash)) {
+      const failures = (lock?.failures || 0) + 1;
+      if (failures >= 5) {
+        pinLockoutMap.set(lockKey, { failures: 0, lockedUntil: Date.now() + 5 * 60_000 });
+        return res.status(429).json({
+          ok: false,
+          locked: true,
+          retryAfterSec: 300,
+          error: 'បញ្ចូលកូដ PIN ខុស ៥ ដង! ត្រូវបានចាក់សោ ៥ នាទីដើម្បីការពារគណនី',
+        });
+      }
+      pinLockoutMap.set(lockKey, { failures, lockedUntil: 0 });
+      return res.status(401).json({
+        ok: false,
+        requiresPin: true,
+        memberName: existing.name,
+        attemptsRemaining: 5 - failures,
+        error: `កូដ PIN មិនត្រឹមត្រូវទេ (នៅសល់ ${5 - failures} ដង)!`,
+      });
+    }
+
+    pinLockoutMap.delete(lockKey);
+    existing.lastLoginAt = Date.now();
+    flushDb();
+    const token = signSessionToken(existing.id, 'member', 7 * 24 * 60 * 60 * 1000, existing.tokenVersion || 1);
+    return res.json({ ok: true, isNew: false, token, member: toPublicMember(existing) });
+  }
+
+  // New Quick-Phone Registration: require Name and strong Security PIN
+  if (!name) {
+    return res.status(400).json({
+      ok: false,
+      isNewAccountAttempt: true,
+      error: 'សូមបញ្ចូលឈ្មោះរបស់អ្នកដើម្បីបង្កើតគណនីថ្មី',
+    });
+  }
+  if (!pin) {
+    return res.status(400).json({
+      ok: false,
+      isNewAccountAttempt: true,
+      error: 'ដើម្បីការពារការបន្លំគណនី សូមកំណត់កូដ PIN ការពារ (លេខ ៤–៨ ខ្ទង់)',
+    });
+  }
+  if (isWeakMemberPin(pin)) {
+    return res.status(400).json({
+      ok: false,
+      isNewAccountAttempt: true,
+      error: 'កូដ PIN ងាយទាយពេក! សូមជ្រើសរើសលេខផ្សេង (ជៀសវាង 1234 ឬលេខដូចៗគ្នា)',
+    });
+  }
+
+  const now = Date.now();
+  const salt = crypto.randomBytes(16).toString('hex');
+  const safeTgUsername =
+    tgUsername && !memberIdByTgUsername.has(tgUsername.toLowerCase()) ? tgUsername : '';
+  const member: MemberRecord = {
+    id: `MBR-${crypto.randomBytes(6).toString('hex').toUpperCase()}`,
+    name,
+    phone,
+    phoneVerified: false,
+    telegramUsername: safeTgUsername,
+    telegramVerified: false,
+    points: 1,
+    pinSalt: salt,
+    pinHash: hashOtp(pin, salt),
+    tokenVersion: 1,
+    createdAt: now,
+    lastLoginAt: now,
+  };
+  membersById.set(member.id, member);
+  memberIdByPhone.set(phone, member.id);
+  if (safeTgUsername) memberIdByTgUsername.set(safeTgUsername.toLowerCase(), member.id);
+  flushDb();
+
+  const token = signSessionToken(member.id, 'member', 7 * 24 * 60 * 60 * 1000, member.tokenVersion);
+  return res.json({ ok: true, isNew: true, token, member: toPublicMember(member) });
 });
 
 // ---- Official Phone OTP Delivery (Telegram Gateway / Twilio / SMS Webhook ONLY — Zero Demo Preview) ----
@@ -1337,14 +1952,20 @@ app.post('/api/auth/phone/verify-otp', (req, res) => {
   }
 
   otpStore.delete(`phone:${phone}`);
-  const member = upsertMember({
+  const authMember = getAuthenticatedMember(req);
+  const upsertRes = upsertMember({
+    targetMemberId: authMember?.member.id,
     name: sanitizeText(req.body?.name, 60) || challenge.name,
     phone,
     phoneVerified: true,
     telegramUsername: normalizeTgUsername(req.body?.telegramUsername) || challenge.telegramUsername,
   });
-  const token = signSessionToken(member.id, 'member');
-  return res.json({ ok: true, token, member });
+  if (!upsertRes.ok) {
+    return res.status(409).json({ ok: false, error: upsertRes.error });
+  }
+  const member = upsertRes.member;
+  const token = signSessionToken(member.id, 'member', 7 * 24 * 60 * 60 * 1000, member.tokenVersion || 1);
+  return res.json({ ok: true, token, member: toPublicMember(member) });
 });
 
 // ---- Official Telegram Login Widget HMAC-SHA256 Verification ----
@@ -1388,15 +2009,19 @@ app.post('/api/auth/telegram/verify-widget', (req, res) => {
       .join(' ') || 'Telegram User';
   const username = normalizeTgUsername(user.username);
 
-  const member = upsertMember({
+  const upsertRes = upsertMember({
     name: fullName,
     telegramId: String(user.id),
     telegramUsername: username,
     telegramPhotoUrl: typeof user.photo_url === 'string' ? user.photo_url : undefined,
     telegramVerified: true,
   });
-  const token = signSessionToken(member.id, 'member');
-  return res.json({ ok: true, token, member });
+  if (!upsertRes.ok) {
+    return res.status(409).json({ ok: false, error: upsertRes.error });
+  }
+  const member = upsertRes.member;
+  const token = signSessionToken(member.id, 'member', 7 * 24 * 60 * 60 * 1000, member.tokenVersion || 1);
+  return res.json({ ok: true, token, member: toPublicMember(member) });
 });
 
 // ---- Official Telegram Bot 1-Click Deep Link & Free Share-Contact Phone Verification ----
@@ -1426,13 +2051,22 @@ app.post('/api/auth/telegram/init-link', async (req, res) => {
   }
 
   const mode = req.body?.mode === 'contact' ? 'contact' : 'login';
+  const rawExpected = req.body?.expectedPhone ? normalizePhone(String(req.body.expectedPhone)) : '';
+  if (req.body?.expectedPhone && String(req.body.expectedPhone).trim() && !isValidPhone(rawExpected)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'លេខទូរស័ព្ទដែលត្រូវផ្ទៀងផ្ទាត់មិនត្រឹមត្រូវទេ (ឧ. 012 345 678)',
+    });
+  }
+  const authMember = getAuthenticatedMember(req);
   const prefix = mode === 'contact' ? 'ph' : 'eb';
   const nonce = `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
   tgLinkStore.set(nonce, {
     nonce,
     mode,
     name: sanitizeText(req.body?.name, 60),
-    phone: normalizePhone(String(req.body?.phone || '')) || undefined,
+    memberId: authMember?.member.id,
+    expectedPhone: mode === 'contact' && rawExpected ? rawExpected : undefined,
     createdAt: Date.now(),
     expiresAt: Date.now() + 10 * 60 * 1000,
   });
@@ -1449,17 +2083,32 @@ app.post('/api/auth/telegram/init-link', async (req, res) => {
 
 function completeTelegramSession(nonce: string, session: TelegramLinkSession) {
   tgLinkStore.delete(nonce);
-  const verifiedPhone = session.verifiedPhone || session.phone;
-  const member = upsertMember({
+  if (session.error) {
+    return { ok: false, error: session.error };
+  }
+  // Never treat user-typed phone as verified; ONLY accept session.verifiedPhone from Telegram Share Contact
+  const verifiedPhone = session.verifiedPhone;
+  if (session.expectedPhone && verifiedPhone && session.expectedPhone !== verifiedPhone) {
+    return {
+      ok: false,
+      error: `លេខទូរស័ព្ទដែលបាន Share តាម Telegram (${verifiedPhone}) មិនត្រូវគ្នានឹងលេខ (${session.expectedPhone}) ទេ!`,
+    };
+  }
+  const upsertRes = upsertMember({
+    targetMemberId: session.memberId,
     name: session.name || session.verifiedUser?.firstName || 'Telegram User',
     phone: verifiedPhone,
-    phoneVerified: Boolean(session.verifiedPhone || session.phone),
+    phoneVerified: Boolean(verifiedPhone),
     telegramUsername: session.verifiedUser?.username ? `@${session.verifiedUser.username}` : '',
     telegramId: session.verifiedUser?.id,
     telegramVerified: true,
   });
-  const token = signSessionToken(member.id, 'member');
-  return { ok: true, linked: true, token, member };
+  if (!upsertRes.ok) {
+    return { ok: false, error: upsertRes.error };
+  }
+  const member = upsertRes.member;
+  const token = signSessionToken(member.id, 'member', 7 * 24 * 60 * 60 * 1000, member.tokenVersion || 1);
+  return { ok: true, linked: true, token, member: toPublicMember(member) };
 }
 
 app.post('/api/auth/telegram/poll-link', async (req, res) => {
@@ -1469,11 +2118,17 @@ app.post('/api/auth/telegram/poll-link', async (req, res) => {
     return res.status(404).json({ ok: false, error: 'តំណភ្ជាប់ផុតកំណត់ហើយ' });
   }
 
+  if (session.error) {
+    tgLinkStore.delete(nonce);
+    return res.status(409).json({ ok: false, error: session.error });
+  }
   if (session.mode === 'login' && session.verifiedUser) {
-    return res.json(completeTelegramSession(nonce, session));
+    const out = completeTelegramSession(nonce, session);
+    return res.status(out.ok ? 200 : 409).json(out);
   }
   if (session.mode === 'contact' && session.verifiedUser && session.verifiedPhone) {
-    return res.json(completeTelegramSession(nonce, session));
+    const out = completeTelegramSession(nonce, session);
+    return res.status(out.ok ? 200 : 409).json(out);
   }
 
   const botToken = getEffectiveBotToken();
@@ -1483,11 +2138,17 @@ app.post('/api/auth/telegram/poll-link', async (req, res) => {
 
   const updated = tgLinkStore.get(nonce);
   if (updated) {
+    if (updated.error) {
+      tgLinkStore.delete(nonce);
+      return res.status(409).json({ ok: false, error: updated.error });
+    }
     if (updated.mode === 'login' && updated.verifiedUser) {
-      return res.json(completeTelegramSession(nonce, updated));
+      const out = completeTelegramSession(nonce, updated);
+      return res.status(out.ok ? 200 : 409).json(out);
     }
     if (updated.mode === 'contact' && updated.verifiedUser && updated.verifiedPhone) {
-      return res.json(completeTelegramSession(nonce, updated));
+      const out = completeTelegramSession(nonce, updated);
+      return res.status(out.ok ? 200 : 409).json(out);
     }
     return res.json({
       ok: true,
@@ -1552,6 +2213,7 @@ app.post('/api/payments/khqr/create', (req, res) => {
     expiresInSeconds: 600,
     bakongVerifyReady: Boolean(getEffectiveBakongToken()),
     telegramOrderVerifyReady: Boolean(getEffectiveBotToken() && getEffectiveChatId()),
+    slipAutoVerifyReady: Boolean(getEffectiveGeminiKey()),
   });
 });
 
@@ -1804,69 +2466,120 @@ app.post('/api/payments/khqr/request-telegram-verify', async (req, res) => {
   });
 });
 
-app.post('/api/payments/khqr/verify-slip', (req, res) => {
+app.post('/api/payments/khqr/verify-slip', async (req, res) => {
+  const ip = getClientIp(req);
+  const rl = checkRateLimit(`slip_auto_${ip}`, 12, 5 * 60 * 1000);
+  if (!rl.allowed) {
+    return res
+      .status(429)
+      .json({ ok: false, error: `សូមរង់ចាំ ${rl.retryAfterSec} វិនាទី មុននឹងស្កេនវិក្កយបត្រម្តងទៀត` });
+  }
+
   const sessionId = String(req.body?.sessionId || '').trim();
   const sess = paymentSessionStore.get(sessionId);
   if (!sess || sess.expiresAt < Date.now()) {
     return res.status(404).json({ ok: false, error: 'វគ្គទូទាត់ផុតកំណត់ហើយ សូមបង្កើត QR ថ្មី' });
   }
 
-  const paidAmountRaw = Number(req.body?.paidAmount);
-  const tol = sess.currency === 'KHR' ? 100 : 0.01;
-  if (!Number.isFinite(paidAmountRaw) || paidAmountRaw <= 0) {
-    return res.status(400).json({ ok: false, error: 'សូមបញ្ចូលចំនួនទឹកប្រាក់ដែលអ្នកបានវេរពិតប្រាកដ' });
-  }
-  if (paidAmountRaw + tol < sess.expectedAmount) {
-    sess.status = 'amount_mismatch';
-    sess.paidAmount = paidAmountRaw;
-    return res.status(400).json({
-      ok: false,
-      status: 'amount_mismatch',
-      error: `ចំនួនលុយមិនគ្រប់ទេ! ទទួលបញ្ចូល ${paidAmountRaw} ${sess.currency} ≠ ត្រូវបង់ ${
-        sess.currency === 'KHR'
-          ? `${Math.round(sess.expectedAmount).toLocaleString()} ៛`
-          : `$${sess.expectedAmountUsd.toFixed(2)}`
-      }`,
+  if (sess.status === 'verified') {
+    return res.json({
+      ok: true,
+      status: 'verified',
+      verified: true,
+      verifiedBy: sess.verifiedBy || 'auto_slip_ocr',
+      paidAmount: sess.paidAmount ?? sess.expectedAmount,
+      currency: sess.paidCurrency || sess.currency,
+      transactionRef: sess.transactionRef || sess.billNumber,
+      bankName: sess.bankName,
+      slipHash: sess.slipHash,
+      proofToken: signPaymentProofToken(sess),
     });
   }
 
-  const cleanRef = sanitizeText(req.body?.paymentRef, 40);
+  const cleanRef = sanitizeText(req.body?.paymentRef, 48);
   const slipImg =
     typeof req.body?.slipImg === 'string' && req.body.slipImg.startsWith('data:image/')
       ? req.body.slipImg.slice(0, 750_000)
       : '';
 
-  if (cleanRef.length < 6 && !slipImg) {
+  if (!slipImg) {
     return res.status(400).json({
       ok: false,
-      error: 'សូមបញ្ចូលលេខប្រតិបត្តិការណ៍ធនាគារ (យ៉ាងតិច ៦ តួ) ឬ Upload រូបវិក្កយបត្រវេរលុយ (Slip)!',
+      error: 'ដើម្បីសុវត្ថិភាពខ្ពស់បំផុត សូម Upload រូបវិក្កយបត្រវេរលុយពីធនាគារ (Bank Slip Screenshot)!',
     });
   }
 
-  if (cleanRef && isPaymentRefUsed(`ref:${cleanRef.toLowerCase()}`)) {
-    return res.status(400).json({
+  const slipHash = computeSlipSha256(slipImg);
+  if (isPaymentRefUsed(`slip:${slipHash}`)) {
+    sess.status = 'rejected';
+    sess.error = 'រូបវិក្កយបត្រ (Slip) នេះធ្លាប់បានប្រើប្រាស់រួចហើយ! ហាមប្រើវិក្កយបត្រចាស់ម្តងទៀត។';
+    return res.status(409).json({
       ok: false,
-      error: 'លេខប្រតិបត្តិការណ៍ (Transaction ID) នេះធ្លាប់បានប្រើប្រាស់រួចហើយ!',
+      status: 'rejected',
+      error: sess.error,
     });
   }
 
-  sess.status = 'verified';
-  sess.verifiedBy = 'slip_ref';
-  sess.paidAmount = paidAmountRaw;
-  sess.transactionRef = cleanRef || sess.billNumber;
-  if (slipImg) sess.slipImg = slipImg;
-  sess.error = undefined;
+  const geminiKey = getEffectiveGeminiKey();
+  if (!geminiKey) {
+    return res.status(503).json({
+      ok: false,
+      needsOwnerReview: true,
+      error:
+        'មិនទាន់បានកំណត់សេវាស្កេនវិក្កយបត្រ Auto (GEMINI_API_KEY) លើ Server ទេ! សូមចុច «ផ្ញើទៅ Telegram Bot ហាង» ដើម្បីឱ្យម្ចាស់ហាងចុចបញ្ជាក់ដោយសុវត្ថិភាព។',
+    });
+  }
 
-  return res.json({
-    ok: true,
-    status: 'verified',
-    verified: true,
-    verifiedBy: 'slip_ref',
-    paidAmount: sess.paidAmount,
-    currency: sess.currency,
-    transactionRef: sess.transactionRef,
-    proofToken: signPaymentProofToken(sess),
-  });
+  try {
+    const ocr = await analyzeBankSlipWithGemini(geminiKey, slipImg, sess);
+    const verdict = validateReceiptAgainstSession(ocr, sess, slipHash, cleanRef);
+    if (!verdict.ok) {
+      sess.status = verdict.status;
+      sess.error = verdict.error;
+      return res.status(verdict.httpStatus).json({
+        ok: false,
+        status: verdict.status,
+        error: verdict.error,
+        detected: {
+          bankName: ocr.bankName,
+          paidAmount: ocr.paidAmount,
+          currency: ocr.currency,
+          transactionId: ocr.transactionId,
+          transferStatus: ocr.transferStatus,
+        },
+      });
+    }
+
+    sess.status = 'verified';
+    sess.verifiedBy = 'auto_slip_ocr';
+    sess.paidAmount = verdict.paidAmount;
+    sess.paidCurrency = verdict.paidCurrency;
+    sess.transactionRef = verdict.effectiveRef;
+    sess.bankName = verdict.bankName;
+    sess.slipHash = slipHash;
+    sess.slipImg = slipImg;
+    sess.error = undefined;
+
+    return res.json({
+      ok: true,
+      status: 'verified',
+      verified: true,
+      verifiedBy: 'auto_slip_ocr',
+      paidAmount: verdict.paidAmount,
+      currency: verdict.paidCurrency,
+      transactionRef: verdict.effectiveRef,
+      bankName: verdict.bankName,
+      slipHash,
+      proofToken: signPaymentProofToken(sess),
+    });
+  } catch (err) {
+    console.error('Slip OCR verification error:', err instanceof Error ? err.message : err);
+    return res.status(502).json({
+      ok: false,
+      needsOwnerReview: true,
+      error: 'ប្រព័ន្ធស្កេនវិក្កយបត្រមានភាពរអាក់រអួលបណ្តោះអាសន្ន! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។',
+    });
+  }
 });
 
 app.get('/api/payments/khqr/pending', (req, res) => {
@@ -1980,29 +2693,192 @@ app.post('/api/auth/telegram/verify-webapp', (req, res) => {
     if (!tgUser?.id) return res.status(400).json({ ok: false, error: 'Invalid Telegram user payload' });
 
     const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || 'Telegram User';
-    const member = upsertMember({
+    const upsertRes = upsertMember({
       name: fullName,
       telegramId: String(tgUser.id),
       telegramUsername: tgUser.username ? `@${tgUser.username}` : '',
       telegramPhotoUrl: tgUser.photo_url,
       telegramVerified: true,
     });
-    const token = signSessionToken(member.id, 'member');
-    return res.json({ ok: true, token, member });
+    if (!upsertRes.ok) {
+      return res.status(409).json({ ok: false, error: upsertRes.error });
+    }
+    const member = upsertRes.member;
+    const token = signSessionToken(member.id, 'member', 7 * 24 * 60 * 60 * 1000, member.tokenVersion || 1);
+    return res.json({ ok: true, token, member: toPublicMember(member) });
   } catch {
     return res.status(400).json({ ok: false, error: 'Failed to parse Telegram WebApp data' });
   }
 });
 
-// ---- Session Inspection & Logout ----
+// ---- Session Inspection, Profile Update & Logout ----
 app.get('/api/auth/me', (req, res) => {
-  const payload = verifySessionToken(extractBearer(req));
-  if (!payload || payload.role !== 'member') {
-    return res.status(401).json({ ok: false });
+  const auth = getAuthenticatedMember(req);
+  if (!auth) return res.status(401).json({ ok: false });
+  return res.json({ ok: true, member: toPublicMember(auth.member), expiresAt: auth.payload.exp });
+});
+
+app.put('/api/auth/me', (req, res) => {
+  const auth = getAuthenticatedMember(req);
+  if (!auth) {
+    return res.status(401).json({ ok: false, error: 'សូមចូលគណនីជាមុនសិន' });
   }
-  const member = membersById.get(payload.sub);
-  if (!member) return res.status(404).json({ ok: false });
-  return res.json({ ok: true, member, expiresAt: payload.exp });
+  const { member, payload } = auth;
+
+  const rawName = req.body?.name;
+  const rawPhone = req.body?.phone;
+  const rawTg = req.body?.telegramUsername;
+  const rawPin = typeof req.body?.pin === 'string' ? req.body.pin.trim() : '';
+  const currentPin = typeof req.body?.currentPin === 'string' ? req.body.currentPin.trim() : '';
+  const clearPin = req.body?.clearPin === true;
+
+  if (clearPin && !member.telegramVerified && !member.phoneVerified) {
+    return res.status(400).json({
+      ok: false,
+      error: 'គណនីចុះឈ្មោះតាមទូរស័ព្ទត្រូវតែរក្សាទុកកូដ PIN ដើម្បីការពារការបន្លំ!',
+    });
+  }
+
+  const isChangingPhone =
+    typeof rawPhone === 'string' &&
+    ((!rawPhone.trim() && Boolean(member.phone)) ||
+      (Boolean(rawPhone.trim()) && normalizePhone(rawPhone.trim()) !== member.phone));
+
+  if ((rawPin || clearPin || isChangingPhone) && member.pinHash && member.pinSalt) {
+    const editLockKey = `mbr_edit_${member.id}`;
+    const lock = pinLockoutMap.get(editLockKey);
+    if (lock && lock.lockedUntil > Date.now()) {
+      const secs = Math.ceil((lock.lockedUntil - Date.now()) / 1000);
+      return res.status(429).json({ ok: false, error: `បញ្ចូល PIN ចាស់ខុសច្រើនដង! សូមរង់ចាំ ${secs} វិនាទី` });
+    }
+    if (!currentPin || !safeEqualHex(hashOtp(currentPin, member.pinSalt), member.pinHash)) {
+      const failures = (lock?.failures || 0) + 1;
+      if (failures >= 5) {
+        pinLockoutMap.set(editLockKey, { failures: 0, lockedUntil: Date.now() + 5 * 60_000 });
+        revokedTokens.add(payload.jti);
+        return res.status(401).json({
+          ok: false,
+          sessionRevoked: true,
+          error: 'បញ្ចូលកូដ PIN ចាស់ខុស ៥ ដង! សម័យចូលត្រូវបានផ្តាច់ដើម្បីសុវត្ថិភាព',
+        });
+      }
+      pinLockoutMap.set(editLockKey, { failures, lockedUntil: 0 });
+      return res.status(401).json({
+        ok: false,
+        error: `កូដ PIN ចាស់មិនត្រឹមត្រូវទេ (នៅសល់ ${5 - failures} ដង)!`,
+      });
+    }
+    pinLockoutMap.delete(editLockKey);
+  }
+
+  if (rawPin) {
+    if (!isValidMemberPin(rawPin)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'កូដ PIN ថ្មីត្រូវតែមានលេខ ៤ ដល់ ៨ ខ្ទង់',
+      });
+    }
+    if (isWeakMemberPin(rawPin)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'កូដ PIN ថ្មីងាយទាយពេក! សូមជ្រើសរើសលេខផ្សេង (ជៀសវាង 1234 ឬលេខដូចគ្នា)',
+      });
+    }
+  }
+
+  if (typeof rawName === 'string') {
+    const cleanName = sanitizeText(rawName, 60);
+    if (!cleanName) {
+      return res.status(400).json({ ok: false, error: 'សូមបញ្ចូលឈ្មោះរបស់អ្នក' });
+    }
+    member.name = cleanName;
+  }
+
+  if (typeof rawPhone === 'string') {
+    const trimmed = rawPhone.trim();
+    if (!trimmed) {
+      if (!member.telegramId) {
+        return res.status(400).json({ ok: false, error: 'សូមរក្សាទុកលេខទូរស័ព្ទយ៉ាងតិច ១ ខ្សែ' });
+      }
+      if (member.phone) memberIdByPhone.delete(member.phone);
+      member.phone = '';
+      member.phoneVerified = false;
+    } else {
+      const nextPhone = normalizePhone(trimmed);
+      if (!isValidPhone(nextPhone)) {
+        return res.status(400).json({
+          ok: false,
+          error: 'លេខទូរស័ព្ទមិនត្រឹមត្រូវទេ (ឧ. 012 345 678)',
+        });
+      }
+      if (nextPhone !== member.phone) {
+        const existingPhoneOwner = memberIdByPhone.get(nextPhone);
+        if (existingPhoneOwner && existingPhoneOwner !== member.id) {
+          return res.status(409).json({
+            ok: false,
+            error: 'លេខទូរស័ព្ទនេះមានគណនីផ្សេងប្រើរួចហើយ!',
+          });
+        }
+        if (member.phone) memberIdByPhone.delete(member.phone);
+        member.phone = nextPhone;
+        member.phoneVerified = false;
+        memberIdByPhone.set(nextPhone, member.id);
+      }
+    }
+  }
+
+  if (typeof rawTg === 'string') {
+    const nextTg = normalizeTgUsername(rawTg);
+    if (nextTg !== member.telegramUsername) {
+      if (nextTg) {
+        const existingTgOwner = memberIdByTgUsername.get(nextTg.toLowerCase());
+        if (existingTgOwner && existingTgOwner !== member.id) {
+          return res.status(409).json({
+            ok: false,
+            error: 'Telegram @username នេះត្រូវបានភ្ជាប់ជាមួយគណនីផ្សេងរួចហើយ!',
+          });
+        }
+      }
+      if (member.telegramUsername) {
+        memberIdByTgUsername.delete(member.telegramUsername.toLowerCase());
+      }
+      member.telegramUsername = nextTg;
+      if (nextTg) {
+        memberIdByTgUsername.set(nextTg.toLowerCase(), member.id);
+      }
+    }
+  }
+
+  let rotatedToken: string | undefined;
+  if (clearPin) {
+    delete member.pinHash;
+    delete member.pinSalt;
+    member.tokenVersion = (member.tokenVersion || 1) + 1;
+    rotatedToken = signSessionToken(member.id, 'member', 7 * 24 * 60 * 60 * 1000, member.tokenVersion);
+  } else if (rawPin) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    member.pinSalt = salt;
+    member.pinHash = hashOtp(rawPin, salt);
+    member.tokenVersion = (member.tokenVersion || 1) + 1;
+    rotatedToken = signSessionToken(member.id, 'member', 7 * 24 * 60 * 60 * 1000, member.tokenVersion);
+  }
+
+  member.lastLoginAt = Date.now();
+  flushDb();
+  return res.json({
+    ok: true,
+    member: toPublicMember(member),
+    ...(rotatedToken ? { token: rotatedToken } : {}),
+  });
+});
+
+app.post('/api/auth/logout-all', (req, res) => {
+  const auth = getAuthenticatedMember(req);
+  if (!auth) return res.status(401).json({ ok: false, error: 'សូមចូលគណនីជាមុនសិន' });
+  auth.member.tokenVersion = (auth.member.tokenVersion || 1) + 1;
+  revokedTokens.add(auth.payload.jti);
+  flushDb();
+  return res.json({ ok: true });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -2049,7 +2925,7 @@ app.get('/api/admin/config', (req, res) => {
   return res.json({
     ok: true,
     secrets: db.secrets,
-    members: Array.from(membersById.values()),
+    members: Array.from(membersById.values()).map(toPublicMember),
   });
 });
 
@@ -2070,6 +2946,93 @@ app.put('/api/admin/config', (req, res) => {
   };
   flushDb();
   return res.json({ ok: true, secrets: db.secrets });
+});
+
+app.post('/api/admin/telegram/test', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const candidateToken = String(req.body?.botToken ?? getEffectiveBotToken()).trim();
+  const candidateGateway = String(req.body?.telegramGatewayToken ?? getEffectiveGatewayToken()).trim();
+
+  if (!candidateToken && !candidateGateway) {
+    return res.status(400).json({
+      ok: false,
+      error: 'សូមបញ្ចូល Telegram Bot Token (@BotFather) ឬ Telegram Gateway Token ជាមុនសិន',
+    });
+  }
+
+  let botUsername = '';
+  let botFirstName = '';
+  let detectedChatId = '';
+  let detectedChatTitle = '';
+
+  if (candidateToken) {
+    try {
+      const meRes = await fetchWithTimeout(
+        `https://api.telegram.org/bot${candidateToken}/getMe`,
+        {},
+        5000
+      );
+      const meData = (await meRes.json()) as {
+        ok?: boolean;
+        description?: string;
+        result?: { username?: string; first_name?: string };
+      };
+      if (!meData.ok || !meData.result?.username) {
+        return res.status(400).json({
+          ok: false,
+          error: `Bot Token មិនត្រឹមត្រូវទេ៖ ${meData.description || 'Invalid Telegram Bot Token'}`,
+        });
+      }
+      botUsername = meData.result.username;
+      botFirstName = meData.result.first_name || botUsername;
+      botUsernameCache.set(candidateToken, botUsername);
+
+      if (!getEffectiveChatId()) {
+        try {
+          const updRes = await fetchWithTimeout(
+            `https://api.telegram.org/bot${candidateToken}/getUpdates?limit=10&timeout=0`,
+            {},
+            4000
+          );
+          const updData = (await updRes.json()) as {
+            ok?: boolean;
+            result?: Array<{
+              message?: { chat?: { id?: number | string; title?: string; username?: string; first_name?: string } };
+              my_chat_member?: { chat?: { id?: number | string; title?: string; username?: string; first_name?: string } };
+            }>;
+          };
+          if (updData.ok && Array.isArray(updData.result)) {
+            for (let i = updData.result.length - 1; i >= 0; i--) {
+              const chat = updData.result[i]?.message?.chat || updData.result[i]?.my_chat_member?.chat;
+              if (chat?.id !== undefined) {
+                detectedChatId = String(chat.id);
+                detectedChatTitle = chat.title || chat.first_name || chat.username || '';
+                break;
+              }
+            }
+          }
+        } catch {
+          // optional chat discovery
+        }
+      }
+    } catch {
+      return res.status(502).json({
+        ok: false,
+        error: 'មិនអាចភ្ជាប់ទៅ Telegram API (api.telegram.org) បានទេ',
+      });
+    }
+  }
+
+  return res.json({
+    ok: true,
+    botValid: Boolean(botUsername),
+    botUsername,
+    botFirstName,
+    detectedChatId,
+    detectedChatTitle,
+    gatewayConfigured: Boolean(candidateGateway),
+  });
 });
 
 // ---- Persistent Public Shop & Orders Sync ----
@@ -2116,6 +3079,83 @@ app.post('/api/orders', async (req, res) => {
     ? { ...existingOrder, ...rawOrder }
     : { ...rawOrder };
   const isNew = !existingOrder;
+  const authMemberSession = getAuthenticatedMember(req);
+  const callerIsAdmin = verifySessionToken(extractBearer(req))?.role === 'admin';
+
+  if (isNew) {
+    const rawCust =
+      order.customer && typeof order.customer === 'object'
+        ? { ...(order.customer as Record<string, unknown>) }
+        : {};
+    const rawPhoneStr = typeof rawCust.phone === 'string' ? rawCust.phone.trim() : '';
+    const normCustPhone = rawPhoneStr ? normalizePhone(rawPhoneStr) : '';
+
+    if (order.type === 'delivery' && !isValidPhone(normCustPhone)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'សូមបញ្ចូលលេខទូរស័ព្ទឲ្យបានត្រឹមត្រូវសម្រាប់ការដឹកជញ្ជូន (ឧ. 012 345 678)',
+      });
+    }
+    if (normCustPhone) {
+      rawCust.phone = normCustPhone;
+      const ownerId = memberIdByPhone.get(normCustPhone);
+      const phoneOwner = ownerId ? membersById.get(ownerId) : undefined;
+      if (
+        phoneOwner &&
+        (phoneOwner.phoneVerified || phoneOwner.pinHash || phoneOwner.telegramVerified) &&
+        authMemberSession?.member.id !== phoneOwner.id
+      ) {
+        return res.status(403).json({
+          ok: false,
+          requiresPhoneAuth: true,
+          phone: normCustPhone,
+          error:
+            'លេខទូរស័ព្ទនេះបានចុះឈ្មោះសមាជិករួចហើយ! សូមចូលគណនី (PIN / Telegram / OTP) ជាមុនសិន ដើម្បីការពារការបន្លំលេខទូរស័ព្ទ។',
+        });
+      }
+    }
+
+    if (authMemberSession) {
+      rawCust.memberId = authMemberSession.member.id;
+      rawCust.memberVerified = true;
+      rawCust.phoneVerified = Boolean(
+        authMemberSession.member.phoneVerified &&
+          normCustPhone &&
+          normCustPhone === authMemberSession.member.phone
+      );
+    } else {
+      // Never trust client-supplied memberId or phoneVerified without a verified Bearer session token
+      delete rawCust.memberId;
+      rawCust.memberVerified = false;
+      rawCust.phoneVerified = false;
+    }
+    order.customer = rawCust;
+  } else if (existingOrder && !callerIsAdmin) {
+    // Lock sensitive identity & verified payment fields on non-admin updates
+    const prevCust =
+      existingOrder.customer && typeof existingOrder.customer === 'object'
+        ? (existingOrder.customer as Record<string, unknown>)
+        : {};
+    const nextCust =
+      order.customer && typeof order.customer === 'object'
+        ? { ...(order.customer as Record<string, unknown>) }
+        : { ...prevCust };
+    if (prevCust.memberId !== undefined) nextCust.memberId = prevCust.memberId;
+    else delete nextCust.memberId;
+    nextCust.memberVerified = Boolean(prevCust.memberVerified);
+    nextCust.phoneVerified = Boolean(prevCust.phoneVerified);
+    order.customer = nextCust;
+
+    order.grandTotal = existingOrder.grandTotal;
+    order.paymentVerified = existingOrder.paymentVerified;
+    order.paymentVerifiedBy = existingOrder.paymentVerifiedBy;
+    order.paymentPaidAmount = existingOrder.paymentPaidAmount;
+    order.paymentCurrency = existingOrder.paymentCurrency;
+    order.paymentRef = existingOrder.paymentRef;
+    order.paymentBankName = existingOrder.paymentBankName;
+    order.paymentSlipHash = existingOrder.paymentSlipHash;
+    order.paymentMd5 = existingOrder.paymentMd5;
+  }
 
   if (isNew && order.payment === 'KHQR / ABA') {
     const proof = verifyPaymentProofToken(order.paymentProofToken);
@@ -2129,13 +3169,18 @@ app.post('/api/orders', async (req, res) => {
     }
     const refKey = proof.ref && proof.ref !== '-' ? `ref:${proof.ref.toLowerCase()}` : '';
     const md5Key = proof.by === 'bakong_md5' && proof.md5 ? `md5:${proof.md5}` : '';
-    if ((md5Key && isPaymentRefUsed(md5Key)) || (refKey && isPaymentRefUsed(refKey))) {
+    const slipKey = proof.slipHash ? `slip:${proof.slipHash}` : '';
+    if (
+      (md5Key && isPaymentRefUsed(md5Key)) ||
+      (refKey && isPaymentRefUsed(refKey)) ||
+      (slipKey && isPaymentRefUsed(slipKey))
+    ) {
       return res.status(409).json({
         ok: false,
-        error: 'ការទូទាត់ / លេខយោងប្រតិបត្តិការណ៍នេះត្រូវបានប្រើសម្រាប់ការកម្ម៉ង់មុនរួចហើយ!',
+        error: 'ការទូទាត់ / វិក្កយបត្រ / លេខយោងប្រតិបត្តិការណ៍នេះត្រូវបានប្រើសម្រាប់ការកម្ម៉ង់មុនរួចហើយ!',
       });
     }
-    markPaymentRefUsed([md5Key, refKey]);
+    markPaymentRefUsed([md5Key, refKey, slipKey]);
     paymentSessionStore.delete(proof.sid);
 
     order.paymentVerified = true;
@@ -2143,6 +3188,8 @@ app.post('/api/orders', async (req, res) => {
     order.paymentPaidAmount = proof.amtCur;
     order.paymentCurrency = proof.cur;
     order.paymentRef = proof.ref;
+    if (proof.bankName) order.paymentBankName = proof.bankName;
+    if (proof.slipHash) order.paymentSlipHash = proof.slipHash;
     order.paymentMd5 = proof.md5;
   }
   delete order.paymentProofToken;
@@ -2154,19 +3201,13 @@ app.post('/api/orders', async (req, res) => {
     const items = Array.isArray(order.items) ? (order.items as Array<Record<string, unknown>>) : [];
     const earnedPoints = items.reduce((sum, it) => sum + Math.max(1, Number(it.qty) || 1), 0);
     if (earnedPoints > 0) {
-      let targetMember: MemberRecord | undefined;
-      if (cust.memberId !== undefined && cust.memberId !== null) {
-        targetMember = membersById.get(String(cust.memberId));
-      }
-      if (!targetMember && typeof cust.phone === 'string' && cust.phone.trim()) {
-        const norm = normalizePhone(cust.phone);
-        const byPhone = norm ? memberIdByPhone.get(norm) : undefined;
-        if (byPhone) targetMember = membersById.get(byPhone);
-      }
-      if (!targetMember && typeof cust.tg === 'string' && cust.tg.trim()) {
-        const tgKey = cust.tg.replace(/^@+/, '').trim().toLowerCase();
-        const byTg = tgKey ? memberIdByTgUsername.get(tgKey) : undefined;
-        if (byTg) targetMember = membersById.get(byTg);
+      let targetMember: MemberRecord | undefined = authMemberSession?.member;
+      if (!targetMember && order.payment === 'KHQR / ABA' && order.paymentVerified) {
+        if (typeof cust.phone === 'string' && cust.phone.trim()) {
+          const norm = normalizePhone(cust.phone);
+          const byPhone = norm ? memberIdByPhone.get(norm) : undefined;
+          if (byPhone) targetMember = membersById.get(byPhone);
+        }
       }
       if (targetMember) {
         targetMember.points = (targetMember.points || 0) + earnedPoints;

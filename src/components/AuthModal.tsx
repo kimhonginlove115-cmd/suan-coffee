@@ -1,208 +1,342 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'motion/react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { motion } from 'motion/react';
 import {
-  Award,
+  Check,
   CheckCircle2,
-  Clock,
-  History,
+  Copy,
+  Edit3,
+  ExternalLink,
   KeyRound,
+  Loader2,
   LogOut,
+  MapPin,
   MessageSquare,
   Phone,
+  RefreshCw,
   RotateCcw,
   Send,
   ShieldCheck,
-  ShoppingBag,
-  Smartphone,
   Star,
+  User as UserIcon,
   X,
 } from 'lucide-react';
-import type { AppLang, AuthCapabilities, Member, Order, ShopSettings } from '../types';
-import { CAFE_ASSETS, fetchWithTimeout, handleImgFallback, resolveAssetUrl } from '../utils/cafeUtils';
-import { getOrderStatusText } from '../utils/i18n';
-import { SecurityShieldIllustration } from './AnimatedIllustrations';
+import type { AppLang, Member, Order, ShopSettings } from '../types';
+import { fetchWithTimeout } from '../utils/cafeUtils';
+
+interface AuthCapabilities {
+  telegramWidgetReady: boolean;
+  telegramBotReady: boolean;
+  telegramContactReady: boolean;
+  phoneOtpReady: boolean;
+  phoneOtpChannel: string;
+  botUsername: string;
+}
 
 interface AuthModalProps {
-  lang?: AppLang;
+  lang: AppLang;
   isOpen: boolean;
   onClose: () => void;
   currentMember: Member | null;
   authToken: string | null;
   shopSettings: ShopSettings;
   orders: Order[];
+  myOrderIds?: string[];
+  prefillPhone?: string;
   onAuthenticated: (member: Member, token: string | null) => void;
   onLogout: () => void;
   onReorder: (order: Order) => void;
-  onSubmitFeedback: (orderId: string, rating: number, comment: string) => Promise<boolean>;
-  onRefreshOrders?: () => void;
+  onSubmitFeedback: (orderId: string, rating: number, comment: string) => Promise<boolean> | Promise<void> | void;
+  onRefreshOrders: () => Promise<void> | void;
+  onOpenLiveTrack: (orderId: string) => void;
   onToast: (msg: string) => void;
 }
 
-function normalizePhoneMatch(raw?: string): string {
-  const digits = String(raw || '').replace(/\D/g, '');
+function normalizePhoneMatch(p: string | undefined | null): string {
+  const digits = String(p || '').replace(/\D/g, '');
   if (!digits) return '';
-  if (digits.startsWith('855')) return `0${digits.slice(3)}`;
-  return digits.startsWith('0') ? digits : `0${digits}`;
+  if (digits.startsWith('855')) return '0' + digits.slice(3);
+  return digits;
 }
 
-const ORDER_STATUS_CLS: Record<string, string> = {
-  Pending: 'bg-amber-100 text-amber-800',
-  Brewing: 'bg-sky-100 text-sky-800',
-  Ready: 'bg-emerald-100 text-[#0D4A3E]',
-  Completed: 'bg-slate-100 text-slate-600',
-};
+function getOrderTypeLabel(type: Order['type'], isEn: boolean): string {
+  if (type === 'delivery') return isEn ? 'Delivery' : 'ដឹកជញ្ជូន';
+  return isEn ? 'Dine-In' : 'ញ៉ាំនៅហាង';
+}
 
-type AuthTab = 'telegram' | 'phone';
-
-declare global {
-  interface Window {
-    onEmeraldTelegramAuth?: (user: Record<string, unknown>) => void;
+function getOrderStatusText(status: Order['status'], isEn: boolean): { label: string; tone: string } {
+  if (status === 'Completed') {
+    return {
+      label: isEn ? 'Completed' : 'បានបញ្ចប់',
+      tone: 'text-emerald-700',
+    };
   }
+  if (status === 'Ready') {
+    return {
+      label: isEn ? 'Ready / On the way' : 'រួចរាល់ / កំពុងដឹក',
+      tone: 'text-sky-700',
+    };
+  }
+  if (status === 'Brewing') {
+    return {
+      label: isEn ? 'Brewing' : 'កំពុងឆុង',
+      tone: 'text-amber-700',
+    };
+  }
+  return {
+    label: isEn ? 'Pending' : 'កំពុងរង់ចាំ',
+    tone: 'text-stone-600',
+  };
 }
 
-export function AuthModal({
-  lang = 'km',
+export const AuthModal: React.FC<AuthModalProps> = ({
+  lang,
   isOpen,
   onClose,
   currentMember,
+  authToken,
   shopSettings,
   orders,
+  myOrderIds = [],
+  prefillPhone,
   onAuthenticated,
   onLogout,
   onReorder,
   onSubmitFeedback,
   onRefreshOrders,
+  onOpenLiveTrack,
   onToast,
-}: AuthModalProps) {
+}) => {
   const isEn = lang === 'en';
-  const [activeTab, setActiveTab] = useState<AuthTab>('telegram');
-  const [capabilities, setCapabilities] = useState<AuthCapabilities | null>(null);
 
-  // Shared fields
-  const [name, setName] = useState('');
-  const [phone, setPhone] = useState('');
+  // Primary auth method tabs: Quick Phone (always works) vs Telegram / SMS OTP (optional)
+  const [authTab, setAuthTab] = useState<'quick' | 'telegram'>('quick');
+  const [caps, setCaps] = useState<AuthCapabilities | null>(null);
+  const [capsLoading, setCapsLoading] = useState(false);
 
-  // Phone OTP verification state (100% real provider delivery — no demo codes)
-  const [otpStep, setOtpStep] = useState<'input' | 'verify'>('input');
-  const [otpDigits, setOtpDigits] = useState(['', '', '', '', '', '']);
-  const [otpCountdown, setOtpCountdown] = useState(0);
-  const [normalizedPhone, setNormalizedPhone] = useState('');
-  const [deliveredChannel, setDeliveredChannel] = useState('');
-  const otpInputsRef = useRef<Array<HTMLInputElement | null>>([]);
-  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Quick phone + PIN sign-in state
+  const [quickPhone, setQuickPhone] = useState('');
+  const [quickName, setQuickName] = useState('');
+  const [quickTg, setQuickTg] = useState('');
+  const [quickPin, setQuickPin] = useState('');
+  const [showOptionalExtras, setShowOptionalExtras] = useState(false);
+  const [pinRequiredName, setPinRequiredName] = useState<string | null>(null);
+  const [channelVerifyPrompt, setChannelVerifyPrompt] = useState<string | null>(null);
+  const [quickBusy, setQuickBusy] = useState(false);
+  const quickPinInputRef = useRef<HTMLInputElement | null>(null);
+  const quickNameInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Telegram Bot 1-click link & Share Contact state
-  const [tgLinkNonce, setTgLinkNonce] = useState<string | null>(null);
-  const [tgLinkMode, setTgLinkMode] = useState<'login' | 'contact'>('login');
-  const [tgDeepLink, setTgDeepLink] = useState<string>('');
-  const [tgPollStep, setTgPollStep] = useState<'awaiting_start' | 'awaiting_contact'>('awaiting_start');
-  const [isPollingTg, setIsPollingTg] = useState(false);
+  // Telegram Bot 1-Click & Contact Verification State
+  const [tgMode, setTgMode] = useState<'contact' | 'login'>('contact');
+  const [tgExpectedPhone, setTgExpectedPhone] = useState('');
+  const [tgLinkBusy, setTgLinkBusy] = useState(false);
+  const [tgDeepLink, setTgDeepLink] = useState<string | null>(null);
+  const [tgNonce, setTgNonce] = useState<string | null>(null);
+  const [tgBotUsername, setTgBotUsername] = useState('');
+  const [tgWaiting, setTgWaiting] = useState(false);
+  const [showFallbackWidget, setShowFallbackWidget] = useState(false);
+  const tgWidgetContainerRef = useRef<HTMLDivElement | null>(null);
 
-  // Order feedback form state
-  const [activeFeedbackOrderId, setActiveFeedbackOrderId] = useState<string | null>(null);
-  const [fbRating, setFbRating] = useState(5);
-  const [fbComment, setFbComment] = useState('');
-  const [submittingFeedback, setSubmittingFeedback] = useState(false);
+  // Official Telegram Gateway / SMS OTP Verification State
+  const [showSmsOtp, setShowSmsOtp] = useState(true);
+  const [otpPhone, setOtpPhone] = useState('');
+  const [otpName, setOtpName] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const [otpChannelLabel, setOtpChannelLabel] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [otpBusy, setOtpBusy] = useState(false);
+  const [otpCooldown, setOtpCooldown] = useState(0);
 
-  // Official Telegram Login Widget container (lazy-loaded only when user opens Web Widget fallback)
-  const widgetContainerRef = useRef<HTMLDivElement | null>(null);
-  const [showWebWidget, setShowWebWidget] = useState(false);
+  // Signed-in Profile Edit & Orders State
+  const [copiedId, setCopiedId] = useState(false);
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editTg, setEditTg] = useState('');
+  const [editCurrentPin, setEditCurrentPin] = useState('');
+  const [editNewPin, setEditNewPin] = useState('');
+  const [editBusy, setEditBusy] = useState(false);
 
-  const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
+  const [orderFilter, setOrderFilter] = useState<'all' | 'active' | 'completed'>('all');
+  const [refreshingOrders, setRefreshingOrders] = useState(false);
+  const [reviewOrderId, setReviewOrderId] = useState<string | null>(null);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewComment, setReviewComment] = useState('');
+  const [submittingReview, setSubmittingReview] = useState(false);
+  const [authError, setAuthError] = useState('');
 
+  // Load server auth capabilities when modal opens
   useEffect(() => {
-    if (!isOpen) {
-      setErrorMsg('');
-      setLoading(false);
-      setShowWebWidget(false);
-      setActiveFeedbackOrderId(null);
-      setFbComment('');
-      setFbRating(5);
-      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+    if (!isOpen) return;
+    let cancelled = false;
+    setCapsLoading(true);
+    fetchWithTimeout('/api/auth/capabilities', { cache: 'no-store' }, 7000)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d?.ok) {
+          setCaps(d);
+          if (d.botUsername) setTgBotUsername(d.botUsername);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setCapsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  // Sync profile edit fields & prefill OTP phone for unverified signed-in users
+  useEffect(() => {
+    if (!currentMember) {
+      setIsEditingProfile(false);
       return;
     }
-    if (currentMember) {
-      onRefreshOrders?.();
+    setEditName(currentMember.name || '');
+    setEditPhone(currentMember.phone || '');
+    setEditTg(currentMember.telegramUsername || currentMember.tg || '');
+    setEditCurrentPin('');
+    setEditNewPin('');
+    if (!currentMember.phoneVerified && currentMember.phone) {
+      setOtpPhone((prev) => prev || currentMember.phone || '');
+      setTgExpectedPhone((prev) => prev || currentMember.phone || '');
     }
-    const ctrl = new AbortController();
-    fetchWithTimeout('/api/auth/capabilities', { signal: ctrl.signal }, 8000)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data?.ok) setCapabilities(data);
-      })
-      .catch(() => {});
-    return () => ctrl.abort();
-  }, [isOpen, currentMember, onRefreshOrders]);
+  }, [currentMember, isEditingProfile]);
 
-  const memberOrders = useMemo(() => {
-    if (!currentMember) return [];
-    const mId = String(currentMember.id);
-    const mPhone = normalizePhoneMatch(currentMember.phone);
-    const mTg = (currentMember.telegramUsername || currentMember.tg || '').replace(/^@+/, '').trim().toLowerCase();
-    const mName = (currentMember.name || '').trim().toLowerCase();
-
-    return [...orders]
-      .filter((o) => {
-        const c = o.customer;
-        if (!c) return false;
-        if (c.memberId !== undefined && c.memberId !== null && String(c.memberId) === mId) return true;
-        const oPhone = normalizePhoneMatch(c.phone);
-        if (mPhone && oPhone && mPhone === oPhone) return true;
-        const oTg = (c.tg || '').replace(/^@+/, '').trim().toLowerCase();
-        if (mTg && oTg && mTg === oTg) return true;
-        if (mName && (c.name || '').trim().toLowerCase() === mName) return true;
-        return false;
-      })
-      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
-  }, [currentMember, orders]);
-
-  const totalPointsEarned = useMemo(() => {
-    if (!currentMember) return 0;
-    const fromOrders = memberOrders.reduce(
-      (sum, o) => sum + o.items.reduce((isum, it) => isum + Math.max(1, Number(it.qty) || 1), 0),
-      0
-    );
-    return Math.max(Number(currentMember.points || 0), fromOrders);
-  }, [currentMember, memberOrders]);
-
-  const totalSpent = useMemo(
-    () => memberOrders.reduce((sum, o) => sum + (Number(o.grandTotal) || 0), 0),
-    [memberOrders]
-  );
-
-  // Mount Official Telegram Login Widget only when explicitly opened by user
+  // Cooldown timer for OTP resend
   useEffect(() => {
-    if (!isOpen || !showWebWidget || activeTab !== 'telegram' || currentMember) return;
-    if (!capabilities?.telegramWidgetReady || !capabilities.botUsername) return;
-    const container = widgetContainerRef.current;
-    if (!container) return;
+    if (otpCooldown <= 0) return;
+    const t = setTimeout(() => setOtpCooldown((c) => Math.max(0, c - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [otpCooldown]);
 
-    window.onEmeraldTelegramAuth = async (tgUser: Record<string, unknown>) => {
-      setErrorMsg('');
-      setLoading(true);
+  // Reset transient error when switching tabs
+  useEffect(() => {
+    setAuthError('');
+    setChannelVerifyPrompt(null);
+  }, [authTab, tgMode]);
+
+  // Focus PIN input automatically when server requests PIN
+  useEffect(() => {
+    if (pinRequiredName && quickPinInputRef.current) {
+      quickPinInputRef.current.focus();
+    }
+  }, [pinRequiredName]);
+
+  // Prefill phone from checkout phone-protection challenge
+  useEffect(() => {
+    if (isOpen && prefillPhone && !currentMember) {
+      setAuthTab('quick');
+      setQuickPhone(prefillPhone);
+      setTgExpectedPhone(prefillPhone);
+      setOtpPhone(prefillPhone);
+      setTimeout(() => quickPinInputRef.current?.focus(), 60);
+    }
+  }, [isOpen, prefillPhone, currentMember]);
+
+  // Poll function for active Telegram bot link (used by interval + window focus/visibility)
+  const pollTelegramNonce = useCallback(
+    async (nonce: string) => {
       try {
         const res = await fetchWithTimeout(
-          '/api/auth/telegram/verify-widget',
+          '/api/auth/telegram/poll-link',
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(tgUser),
+            body: JSON.stringify({ nonce }),
           },
-          10000
+          7000
         );
         const data = await res.json();
-        if (!data.ok || !data.member) {
-          setErrorMsg(data.error || 'ការផ្ទៀងផ្ទាត់ Telegram មិនជោគជ័យទេ');
-          return;
+        if (data?.ok && data.linked && data.member) {
+          setTgWaiting(false);
+          setTgDeepLink(null);
+          setTgNonce(null);
+          onAuthenticated(data.member, data.token || null);
+          onToast(
+            isEn
+              ? `Signed in via Telegram as ${data.member.name}`
+              : `ចូលគណនី / ផ្ទៀងផ្ទាត់តាម Telegram ជោគជ័យ៖ ${data.member.name}`
+          );
+          return true;
         }
-        onAuthenticated(data.member, data.token || null);
-        onToast('ចូលគណនី Telegram ផ្លូវការបានជោគជ័យ!');
-        onClose();
+        if (data?.ok === false && data?.error) {
+          setTgWaiting(false);
+          setTgDeepLink(null);
+          setTgNonce(null);
+          setAuthError(data.error);
+          return true;
+        }
       } catch {
-        setErrorMsg('មានបញ្ហាភ្ជាប់ទៅ Server');
-      } finally {
-        setLoading(false);
+        // transient error, keep polling
+      }
+      return false;
+    },
+    [isEn, onAuthenticated, onToast]
+  );
+
+  // Poll Telegram deep link + re-poll immediately when customer returns from Telegram app
+  useEffect(() => {
+    if (!isOpen || !tgWaiting || !tgNonce) return;
+    let stopped = false;
+
+    const timer = setInterval(() => {
+      if (!stopped && document.visibilityState !== 'hidden') {
+        pollTelegramNonce(tgNonce);
+      }
+    }, 2200);
+
+    const handleReturnFromTelegram = () => {
+      if (!stopped && document.visibilityState !== 'hidden') {
+        pollTelegramNonce(tgNonce);
+      }
+    };
+    window.addEventListener('focus', handleReturnFromTelegram);
+    document.addEventListener('visibilitychange', handleReturnFromTelegram);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      window.removeEventListener('focus', handleReturnFromTelegram);
+      document.removeEventListener('visibilitychange', handleReturnFromTelegram);
+    };
+  }, [isOpen, tgWaiting, tgNonce, pollTelegramNonce]);
+
+  // Official Telegram Login Widget (Optional Fallback inside Telegram tab)
+  useEffect(() => {
+    if (!isOpen || currentMember || authTab !== 'telegram' || !showFallbackWidget || !caps?.telegramWidgetReady) {
+      return;
+    }
+    const container = tgWidgetContainerRef.current;
+    if (!container) return;
+
+    const botName = (tgBotUsername || caps?.botUsername || '').replace(/^@+/, '').trim();
+    if (!botName) return;
+
+    const w = window as unknown as Record<string, unknown>;
+    w.onEmeraldTelegramAuth = async (user: Record<string, unknown>) => {
+      setAuthError('');
+      try {
+        const res = await fetch('/api/auth/telegram/verify-widget', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(user),
+        });
+        const data = await res.json();
+        if (data?.ok && data.member) {
+          onAuthenticated(data.member, data.token || null);
+          onToast(
+            isEn
+              ? `Signed in via Telegram as ${data.member.name}`
+              : `ចូលគណនី Telegram ជោគជ័យ៖ ${data.member.name}`
+          );
+        } else {
+          setAuthError(
+            data?.error || (isEn ? 'Telegram signature verification failed.' : 'ការផ្ទៀងផ្ទាត់ Telegram បរាជ័យ')
+          );
+        }
+      } catch {
+        setAuthError(isEn ? 'Cannot reach authentication server.' : 'មិនអាចភ្ជាប់ទៅកាន់ Server បានទេ');
       }
     };
 
@@ -210,7 +344,7 @@ export function AuthModal({
     const script = document.createElement('script');
     script.src = 'https://telegram.org/js/telegram-widget.js?22';
     script.async = true;
-    script.setAttribute('data-telegram-login', capabilities.botUsername);
+    script.setAttribute('data-telegram-login', botName);
     script.setAttribute('data-size', 'large');
     script.setAttribute('data-radius', '12');
     script.setAttribute('data-onauth', 'onEmeraldTelegramAuth(user)');
@@ -219,1048 +353,1574 @@ export function AuthModal({
 
     return () => {
       container.innerHTML = '';
-      delete window.onEmeraldTelegramAuth;
+      delete w.onEmeraldTelegramAuth;
     };
-  }, [isOpen, showWebWidget, activeTab, currentMember, capabilities, onAuthenticated, onToast, onClose]);
+  }, [isOpen, currentMember, authTab, showFallbackWidget, caps, tgBotUsername, isEn, onAuthenticated, onToast]);
 
-  // OTP Countdown Timer
-  useEffect(() => {
-    if (otpCountdown <= 0) return;
-    const timer = setInterval(() => {
-      setOtpCountdown((prev) => (prev > 0 ? prev - 1 : 0));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [otpCountdown]);
+  const myOrders = useMemo(() => {
+    if (!currentMember) return [];
+    const memberPhone = normalizePhoneMatch(currentMember.phone);
+    return orders
+      .filter((o) => {
+        if (o.customer?.memberId && String(o.customer.memberId) === String(currentMember.id)) {
+          return true;
+        }
+        const otherMemberId =
+          o.customer?.memberId && String(o.customer.memberId) !== String(currentMember.id);
+        if (otherMemberId) return false;
+        if (myOrderIds.includes(o.id)) {
+          return true;
+        }
+        // Anti-phone-spoofing: only match unattached guest orders by phone if this member actually verified their phone number
+        if (currentMember.phoneVerified && memberPhone) {
+          const orderPhone = normalizePhoneMatch(o.customer?.phone);
+          if (orderPhone && memberPhone === orderPhone) {
+            return true;
+          }
+        }
+        return false;
+      })
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  }, [orders, currentMember, myOrderIds]);
 
-  // Real-time poll for Telegram Bot /start <nonce> & Share Contact confirmation
-  useEffect(() => {
-    if (!isOpen || !tgLinkNonce || currentMember) return;
-    setIsPollingTg(true);
-    let inFlight = false;
-    let consecutiveErrors = 0;
-    const ctrl = new AbortController();
+  const activeOrdersCount = useMemo(
+    () => myOrders.filter((o) => o.status !== 'Completed').length,
+    [myOrders]
+  );
+  const completedOrdersCount = useMemo(
+    () => myOrders.filter((o) => o.status === 'Completed').length,
+    [myOrders]
+  );
 
-    const interval = setInterval(async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const res = await fetchWithTimeout(
-          '/api/auth/telegram/poll-link',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ nonce: tgLinkNonce }),
-            signal: ctrl.signal,
-          },
-          8000
+  const filteredOrders = useMemo(() => {
+    if (orderFilter === 'active') return myOrders.filter((o) => o.status !== 'Completed');
+    if (orderFilter === 'completed') return myOrders.filter((o) => o.status === 'Completed');
+    return myOrders;
+  }, [myOrders, orderFilter]);
+
+  const totalSpent = useMemo(
+    () => myOrders.reduce((sum, o) => sum + (Number(o.grandTotal) || 0), 0),
+    [myOrders]
+  );
+
+  // Secure Phone + PIN Sign-In / Registration
+  const handleQuickLogin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setAuthError('');
+    setChannelVerifyPrompt(null);
+    const phoneDigits = quickPhone.replace(/\D/g, '');
+    if (phoneDigits.length < 8) {
+      setAuthError(
+        isEn
+          ? 'Please enter a valid phone number (e.g. 012 345 678).'
+          : 'សូមបញ្ចូលលេខទូរស័ព្ទឲ្យបានត្រឹមត្រូវ (យ៉ាងតិច ៨ ខ្ទង់)'
+      );
+      return;
+    }
+
+    const cleanPin = quickPin.trim();
+    if (!cleanPin || !/^\d{4,8}$/.test(cleanPin)) {
+      setAuthError(
+        isEn
+          ? 'Please enter a 4–8 digit Security PIN to protect your account.'
+          : 'សូមបញ្ចូលកូដ PIN ការពារ (លេខ ៤–៨ ខ្ទង់) ដើម្បីការពារការបន្លំគណនី'
+      );
+      quickPinInputRef.current?.focus();
+      return;
+    }
+
+    setQuickBusy(true);
+    try {
+      const res = await fetchWithTimeout(
+        '/api/auth/quick-login',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone: quickPhone.trim(),
+            name: quickName.trim(),
+            telegramUsername: quickTg.trim(),
+            pin: cleanPin,
+          }),
+        },
+        9000
+      );
+      const data = await res.json();
+      if (data?.ok && data.member) {
+        setPinRequiredName(null);
+        setChannelVerifyPrompt(null);
+        setQuickPin('');
+        onAuthenticated(data.member, data.token || null);
+        onToast(
+          isEn
+            ? data.isNew
+              ? `Account created! Welcome ${data.member.name}`
+              : `Welcome back, ${data.member.name}`
+            : data.isNew
+            ? `បង្កើតគណនីការពារដោយ PIN ជោគជ័យ! សូមស្វាគមន៍ ${data.member.name}`
+            : `សូមស្វាគមន៍ការត្រឡប់មកវិញ, ${data.member.name}`
         );
-        if (res.status === 404) {
-          clearInterval(interval);
-          setIsPollingTg(false);
-          setTgLinkNonce(null);
-          setErrorMsg('តំណភ្ជាប់ Telegram ផុតកំណត់ហើយ សូមចុចបង្កើតថ្មី');
-          return;
+      } else {
+        if (data?.requiresChannelVerification) {
+          setChannelVerifyPrompt(data.memberName || (isEn ? 'Member' : 'អតិថិជន'));
         }
-        const data = await res.json();
-        consecutiveErrors = 0;
-        if (data.step === 'awaiting_contact' || data.step === 'awaiting_start') {
-          setTgPollStep(data.step);
+        if (data?.requiresPin) {
+          setPinRequiredName(data.memberName || (isEn ? 'Member' : 'អតិថិជន'));
         }
-        if (data.ok && data.linked && data.member) {
-          clearInterval(interval);
-          setIsPollingTg(false);
-          setTgLinkNonce(null);
-          onAuthenticated(data.member, data.token || null);
-          onToast(
-            tgLinkMode === 'contact'
-              ? 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទពិត Free តាម Telegram ជោគជ័យ!'
-              : 'ភ្ជាប់គណនី Telegram ផ្លូវការបានជោគជ័យ!'
-          );
-          onClose();
+        if (data?.isNewAccountAttempt && !quickName.trim()) {
+          quickNameInputRef.current?.focus();
         }
-      } catch {
-        consecutiveErrors += 1;
-        if (consecutiveErrors >= 10) {
-          clearInterval(interval);
-          setIsPollingTg(false);
-          setErrorMsg('ការតភ្ជាប់ Telegram យឺតពេក សូមសាកល្បងម្តងទៀត');
-        }
-      } finally {
-        inFlight = false;
+        setAuthError(
+          data?.error || (isEn ? 'Could not sign in right now.' : 'មិនអាចចូលគណនីបានទេ សូមព្យាយាមម្តងទៀត')
+        );
       }
-    }, 2200);
+    } catch {
+      setAuthError(isEn ? 'Network error while signing in.' : 'មានបញ្ហាអ៊ីនធឺណិត សូមព្យាយាមម្តងទៀត');
+    } finally {
+      setQuickBusy(false);
+    }
+  };
 
-    return () => {
-      ctrl.abort();
-      clearInterval(interval);
-      setIsPollingTg(false);
-    };
-  }, [isOpen, tgLinkNonce, tgLinkMode, currentMember, onAuthenticated, onToast, onClose]);
-
-  const handleInitBotDeepLink = async (mode: 'login' | 'contact' = 'login') => {
-    if (loading) return;
-    setErrorMsg('');
-    setLoading(true);
+  // Start Telegram Bot 1-Click Login or Free Contact Verify
+  const handleStartTelegramLink = async (
+    mode: 'login' | 'contact',
+    expectedPhoneOverride?: string
+  ) => {
+    setAuthError('');
+    setTgMode(mode);
+    const expectedPhone =
+      mode === 'contact' ? (expectedPhoneOverride ?? tgExpectedPhone).trim() : '';
+    setTgLinkBusy(true);
     try {
       const res = await fetchWithTimeout(
         '/api/auth/telegram/init-link',
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+          },
           body: JSON.stringify({
             mode,
-            name: name.trim(),
-            phone: mode === 'login' ? phone.trim() : '',
+            name: quickName.trim() || otpName.trim() || currentMember?.name || '',
+            ...(expectedPhone ? { expectedPhone } : {}),
           }),
         },
-        10000
+        9000
       );
       const data = await res.json();
-      if (!data.ok) {
-        setErrorMsg(data.error || 'មិនអាចបង្កើតតំណភ្ជាប់ Bot បានទេ');
+      if (!res.ok || !data?.ok || !data.deepLink) {
+        setAuthError(
+          data?.error ||
+            (isEn
+              ? 'Telegram verification is not enabled yet. Please use Quick Phone Login.'
+              : 'Telegram មិនទាន់បានបើកដំណើរការទេ! សូមប្រើលេខទូរស័ព្ទចូលរហ័សវិញ។')
+        );
         return;
       }
-      setTgLinkMode(mode);
-      setTgPollStep('awaiting_start');
-      setTgLinkNonce(data.nonce);
+      setTgNonce(data.nonce);
       setTgDeepLink(data.deepLink);
+      if (data.botUsername) setTgBotUsername(data.botUsername);
+      setTgWaiting(true);
     } catch {
-      setErrorMsg('មានបញ្ហាភ្ជាប់ទៅ Server (Timeout)');
+      setAuthError(isEn ? 'Could not reach server.' : 'មិនអាចភ្ជាប់ទៅកាន់ Server បានទេ');
     } finally {
-      setLoading(false);
+      setTgLinkBusy(false);
     }
   };
 
-  const handleSendPhoneOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (loading) return;
-    setErrorMsg('');
-    if (!phone.trim()) {
-      setErrorMsg('សូមបញ្ចូលលេខទូរស័ព្ទរបស់អ្នក');
+  // Optional SMS / Gateway OTP Send
+  const handleSendOtp = async () => {
+    setAuthError('');
+    if (!otpPhone.trim() || otpPhone.replace(/\D/g, '').length < 8) {
+      setAuthError(
+        isEn ? 'Please enter a valid phone number.' : 'សូមបញ្ចូលលេខទូរស័ព្ទឲ្យបានត្រឹមត្រូវ'
+      );
       return;
     }
-    setLoading(true);
+    setOtpBusy(true);
     try {
       const res = await fetchWithTimeout(
         '/api/auth/phone/send-otp',
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: name.trim(),
-            phone: phone.trim(),
-          }),
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+          },
+          body: JSON.stringify({ name: otpName.trim() || currentMember?.name || '', phone: otpPhone.trim() }),
         },
-        12000
+        10000
       );
       const data = await res.json();
-      if (!data.ok) {
-        setErrorMsg(data.error || 'មិនអាចផ្ញើលេខកូដ OTP បានទេ');
+      if (!res.ok || !data?.ok) {
+        setAuthError(data?.error || (isEn ? 'Unable to send OTP.' : 'មិនអាចផ្ញើលេខកូដ OTP បានទេ'));
         return;
       }
-      setNormalizedPhone(data.phone || phone.trim());
-      setDeliveredChannel(data.channel || '');
-      setOtpStep('verify');
-      setOtpCountdown(data.expiresInSeconds || 300);
-      setOtpDigits(['', '', '', '', '', '']);
-      onToast('បានផ្ញើលេខកូដ OTP ៦ ខ្ទង់រួចរាល់!');
-      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
-      focusTimerRef.current = setTimeout(() => otpInputsRef.current[0]?.focus(), 120);
+      setOtpSent(true);
+      setOtpChannelLabel(
+        data.channel === 'telegram_gateway'
+          ? isEn
+            ? 'Telegram Official OTP'
+            : 'ប្រអប់សារ Telegram ផ្លូវការ'
+          : isEn
+          ? 'SMS Verification'
+          : 'សារ SMS ទូរស័ព្ទ'
+      );
+      setOtpCooldown(45);
+      onToast(isEn ? 'Verification code sent!' : 'បានផ្ញើលេខកូដ ៦ ខ្ទង់រួចរាល់!');
     } catch {
-      setErrorMsg('មានបញ្ហាភ្ជាប់ទៅ Server សូមព្យាយាមម្តងទៀត');
+      setAuthError(isEn ? 'Network error sending OTP.' : 'មានបញ្ហាក្នុងការផ្ញើលេខកូដ');
     } finally {
-      setLoading(false);
+      setOtpBusy(false);
     }
   };
 
-  const handleOtpDigitChange = (idx: number, val: string) => {
-    const clean = val.replace(/\D/g, '').slice(-1);
-    const next = [...otpDigits];
-    next[idx] = clean;
-    setOtpDigits(next);
-    if (clean && idx < 5) {
-      otpInputsRef.current[idx + 1]?.focus();
-    }
-  };
-
-  const handleOtpKeyDown = (idx: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Backspace' && !otpDigits[idx] && idx > 0) {
-      otpInputsRef.current[idx - 1]?.focus();
-    }
-  };
-
-  const handleVerifyPhoneOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (loading) return;
-    setErrorMsg('');
-    const code = otpDigits.join('');
-    if (code.length !== 6) {
-      setErrorMsg('សូមបញ្ចូលលេខកូដ OTP ៦ ខ្ទង់ឱ្យបានគ្រប់');
+  const handleVerifyOtp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setAuthError('');
+    if (otpCode.trim().length < 4) {
+      setAuthError(isEn ? 'Enter the 6-digit code.' : 'សូមបញ្ចូលលេខកូដ OTP ៦ ខ្ទង់');
       return;
     }
-    setLoading(true);
+    setOtpBusy(true);
     try {
       const res = await fetchWithTimeout(
         '/api/auth/phone/verify-otp',
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+          },
           body: JSON.stringify({
-            phone: normalizedPhone || phone.trim(),
-            code,
-            name: name.trim(),
+            phone: otpPhone.trim(),
+            code: otpCode.trim(),
+            name: otpName.trim() || currentMember?.name || '',
           }),
         },
-        10000
+        9000
       );
       const data = await res.json();
-      if (!data.ok) {
-        setErrorMsg(data.error || 'លេខកូដ OTP មិនត្រឹមត្រូវទេ');
+      if (!res.ok || !data?.ok || !data.member) {
+        setAuthError(data?.error || (isEn ? 'Invalid OTP code.' : 'លេខកូដ OTP មិនត្រឹមត្រូវទេ'));
         return;
       }
       onAuthenticated(data.member, data.token || null);
-      setOtpStep('input');
-      onToast('ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ & ចូលគណនីផ្លូវការជោគជ័យ!');
-      onClose();
+      setOtpSent(false);
+      setOtpCode('');
+      onToast(
+        isEn
+          ? `Phone verified! Welcome ${data.member.name}`
+          : `ផ្ទៀងផ្ទាត់លេខជោគជ័យ! សូមស្វាគមន៍ ${data.member.name}`
+      );
     } catch {
-      setErrorMsg('មានបញ្ហាផ្ទៀងផ្ទាត់ OTP');
+      setAuthError(isEn ? 'Network error verifying OTP.' : 'មានបញ្ហាក្នុងការផ្ទៀងផ្ទាត់លេខកូដ');
     } finally {
-      setLoading(false);
+      setOtpBusy(false);
     }
   };
 
-  const formatCountdown = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m}:${String(s).padStart(2, '0')}`;
+  // Profile Editor Save / Clear PIN
+  const handleSaveProfile = async (clearPinFlag = false) => {
+    if (!authToken) {
+      setAuthError(
+        isEn
+          ? 'Please sign out and sign in once to edit your profile.'
+          : 'សូមចាកចេញ ហើយចូលម្តងទៀតដើម្បីធ្វើបច្ចុប្បន្នភាពគណនី'
+      );
+      return;
+    }
+    setAuthError('');
+    if (!editName.trim()) {
+      setAuthError(isEn ? 'Name cannot be empty.' : 'សូមបញ្ចូលឈ្មោះរបស់អ្នក');
+      return;
+    }
+    const cleanNewPin = editNewPin.trim();
+    if (!clearPinFlag && cleanNewPin && !/^\d{4,8}$/.test(cleanNewPin)) {
+      setAuthError(
+        isEn ? 'New PIN must be 4 to 8 digits.' : 'កូដ PIN ថ្មីត្រូវតែមានលេខ ៤ ដល់ ៨ ខ្ទង់'
+      );
+      return;
+    }
+    const isPhoneChanged =
+      normalizePhoneMatch(editPhone) !== normalizePhoneMatch(currentMember?.phone);
+    if ((clearPinFlag || cleanNewPin || isPhoneChanged) && currentMember?.hasPin && !editCurrentPin.trim()) {
+      setAuthError(
+        isEn
+          ? 'Please enter your current PIN to change your phone number or PIN.'
+          : 'សូមបញ្ចូលកូដ PIN ចាស់ជាមុនសិន ដើម្បីប្តូរលេខទូរស័ព្ទ ឬកូដ PIN'
+      );
+      return;
+    }
+
+    setEditBusy(true);
+    try {
+      const res = await fetchWithTimeout(
+        '/api/auth/me',
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            name: editName.trim(),
+            phone: editPhone.trim(),
+            telegramUsername: editTg.trim(),
+            pin: clearPinFlag ? undefined : cleanNewPin || undefined,
+            currentPin: editCurrentPin.trim() || undefined,
+            clearPin: clearPinFlag || undefined,
+          }),
+        },
+        9000
+      );
+      const data = await res.json();
+      if (data?.sessionRevoked) {
+        onToast(data.error || (isEn ? 'Session revoked for security.' : 'សម័យចូលត្រូវបានផ្តាច់ដើម្បីសុវត្ថិភាព'));
+        onLogout();
+        return;
+      }
+      if (!res.ok || !data?.ok || !data.member) {
+        setAuthError(data?.error || (isEn ? 'Failed to update profile.' : 'មិនអាចរក្សាទុកការកែប្រែបានទេ'));
+        return;
+      }
+      onAuthenticated(data.member, data.token || null);
+      setIsEditingProfile(false);
+      setEditCurrentPin('');
+      setEditNewPin('');
+      onToast(
+        data.token
+          ? isEn
+            ? 'Profile & PIN updated! Other devices signed out.'
+            : 'រក្សាទុកជោគជ័យ! ឧបករណ៍ផ្សេងៗត្រូវបានចាកចេញដើម្បីសុវត្ថិភាព'
+          : isEn
+          ? 'Profile updated!'
+          : 'បានរក្សាទុកព័ត៌មានគណនីជោគជ័យ!'
+      );
+    } catch {
+      setAuthError(isEn ? 'Network error saving profile.' : 'មានបញ្ហាអ៊ីនធឺណិតពេលរក្សាទុក');
+    } finally {
+      setEditBusy(false);
+    }
   };
 
+  const handleLogoutAllDevices = async () => {
+    if (!authToken) {
+      onLogout();
+      return;
+    }
+    setEditBusy(true);
+    try {
+      await fetchWithTimeout(
+        '/api/auth/logout-all',
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${authToken}` },
+        },
+        8000
+      );
+      onToast(isEn ? 'Signed out from all devices!' : 'បានផ្តាច់ការចូលពីគ្រប់ឧបករណ៍ទាំងអស់ដោយសុវត្ថិភាព!');
+      onLogout();
+    } catch {
+      setAuthError(isEn ? 'Failed to revoke sessions.' : 'មិនអាចផ្តាច់ឧបករណ៍ផ្សេងបានទេ');
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  const handleCopyMemberId = async () => {
+    if (!currentMember) return;
+    try {
+      await navigator.clipboard.writeText(String(currentMember.id));
+      setCopiedId(true);
+      onToast(isEn ? 'Member ID copied' : 'បានចម្លងលេខសម្គាល់សមាជិក');
+      setTimeout(() => setCopiedId(false), 1800);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
+
+  const handleManualRefreshOrders = async () => {
+    setRefreshingOrders(true);
+    try {
+      await onRefreshOrders();
+    } finally {
+      setTimeout(() => setRefreshingOrders(false), 400);
+    }
+  };
+
+  const handleSaveReview = async (orderId: string) => {
+    setSubmittingReview(true);
+    try {
+      await onSubmitFeedback(orderId, reviewRating, reviewComment.trim());
+      setReviewOrderId(null);
+      setReviewComment('');
+      setReviewRating(5);
+    } finally {
+      setSubmittingReview(false);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  const hasTelegram = Boolean(caps?.telegramBotReady || caps?.telegramWidgetReady);
+  const hasAnyExternalAuth = hasTelegram || Boolean(caps?.phoneOtpReady);
+
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.2 }}
-          className="fixed inset-0 z-[70] bg-slate-950/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) onClose();
-          }}
-        >
-          <motion.div
-            initial={{ y: 40, opacity: 0, scale: 0.97 }}
-            animate={{ y: 0, opacity: 1, scale: 1 }}
-            exit={{ y: 30, opacity: 0, scale: 0.97 }}
-            transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-            className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
-          >
-            <div className="px-5 pt-5 pb-4 border-b border-slate-100 flex items-center justify-between gap-3 bg-[#F7FAF9]">
-              <div className="flex items-center gap-3 min-w-0">
-                <SecurityShieldIllustration verified={Boolean(currentMember)} />
-                <div className="min-w-0">
-                  <h3 className="font-bold text-base text-slate-900 truncate">
-                    {currentMember
-                      ? isEn
-                        ? 'Your Account'
-                        : 'គណនីសុវត្ថិភាពរបស់អ្នក'
-                      : isEn
-                        ? 'Sign In or Create Account'
-                        : 'ចូលប្រើ ឬ បង្កើតគណនីផ្លូវការ'}
-                  </h3>
-                  <p className="text-xs text-slate-500 flex items-center gap-1 mt-0.5">
-                    <ShieldCheck className="w-3.5 h-3.5 text-[#0D4A3E] shrink-0" />
-                    <span>
-                      {isEn
-                        ? 'HMAC-SHA256 & Real Verification'
-                        : 'HMAC-SHA256 & ការផ្ទៀងផ្ទាត់ពិតប្រាកដ'}
-                    </span>
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label={isEn ? 'Close' : 'បិទ'}
-                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full bg-white border border-slate-200 text-slate-600 hover:text-slate-900 transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.18 }}
+      className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <motion.div
+        initial={{ opacity: 0, y: 18, scale: 0.97 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 12, scale: 0.97 }}
+        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+        className="bg-[#FAF9F6] w-full max-w-lg rounded-3xl overflow-hidden shadow-2xl my-auto flex flex-col max-h-[92vh] border border-stone-200/80"
+      >
+        {/* Header */}
+        <div className="bg-[#0D4A3E] px-5 py-4 flex items-center justify-between text-white shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+              <UserIcon className="w-5 h-5 text-emerald-200" />
             </div>
+            <div className="min-w-0">
+              <h3 className="font-bold text-base truncate">
+                {currentMember
+                  ? isEn
+                    ? 'My Member Account'
+                    : 'គណនីសមាជិករបស់ខ្ញុំ'
+                  : isEn
+                  ? 'Sign In / Join Member'
+                  : 'ចូលគណនី / ចុះឈ្មោះសមាជិក'}
+              </h3>
+              <p className="text-[11px] text-emerald-100/85 truncate">
+                {currentMember
+                  ? isEn
+                    ? 'Auto-fill checkout · Track orders · Earn points'
+                    : 'បំពេញឈ្មោះអូតូ · តាមដានការកម្ម៉ង់ · សន្សំពិន្ទុ'
+                  : isEn
+                  ? 'Fast sign-in in 5 seconds — earn loyalty points every order'
+                  : 'ចូលប្រើភ្លាមៗក្នុង ៥ វិនាទី — រក្សាទុកប្រវត្តិ និងសន្សំពិន្ទុ'}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={isEn ? 'Close account modal' : 'បិទផ្ទាំងគណនី'}
+            className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center hover:bg-white/25 transition shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
 
-            <div className="p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] overflow-y-auto space-y-4">
-              {currentMember ? (
-                <motion.div
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="space-y-4"
+        {/* Body */}
+        <div className="p-4 sm:p-5 space-y-4 overflow-y-auto">
+          {!currentMember ? (
+            /* ==================== SIGNED OUT VIEW ==================== */
+            <div className="space-y-4">
+              {/* Primary Method Switcher */}
+              <div className="grid grid-cols-2 gap-1.5 bg-stone-200/75 p-1 rounded-2xl">
+                <button
+                  type="button"
+                  onClick={() => setAuthTab('quick')}
+                  className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                    authTab === 'quick'
+                      ? 'bg-white text-[#0D4A3E] shadow-sm'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
                 >
-                  <div className="bg-[#0D4A3E] text-white p-5 rounded-2xl space-y-3 shadow-sm">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-3 min-w-0">
-                        {currentMember.telegramPhotoUrl && (
-                          <img
-                            src={currentMember.telegramPhotoUrl}
-                            alt={currentMember.name}
-                            referrerPolicy="no-referrer"
-                            className="w-11 h-11 rounded-full object-cover border-2 border-amber-300 shrink-0"
-                          />
-                        )}
-                        <div className="min-w-0">
-                          <p className="text-xs text-emerald-200 truncate">
-                            {isEn ? 'Verified Member' : 'សមាជិកផ្លូវការ'} · {shopSettings.brandTitle}
-                          </p>
-                          <h4 className="font-bold text-lg mt-0.5 truncate">{currentMember.name}</h4>
-                        </div>
-                      </div>
-                      <div className="text-right shrink-0 bg-white/10 px-3 py-1.5 rounded-xl border border-white/15">
-                        <p className="text-[10px] text-emerald-200 flex items-center justify-end gap-1">
-                          <Award className="w-3 h-3 text-amber-300" />
-                          <span>{isEn ? 'Total Points' : 'ពិន្ទុសន្សំសរុប'}</span>
-                        </p>
-                        <p className="font-mono-num text-xl font-bold text-amber-300">
-                          ★ {totalPointsEarned}
-                        </p>
-                      </div>
-                    </div>
+                  <Phone className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Quick Phone' : 'ចូលរហ័ស (ទូរស័ព្ទ)'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuthTab('telegram')}
+                  className={`min-h-[44px] px-3 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                    authTab === 'telegram'
+                      ? 'bg-white text-sky-700 shadow-sm'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Telegram / OTP' : 'Telegram / កូដ OTP'}</span>
+                </button>
+              </div>
 
-                    <div className="pt-2.5 border-t border-white/15 space-y-1.5 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="text-emerald-200">{isEn ? 'Phone Number' : 'លេខទូរស័ព្ទ'}</span>
-                        <span className="font-mono-num font-semibold flex items-center gap-1">
-                          {currentMember.phone || (isEn ? 'Not linked' : 'មិនទាន់ភ្ជាប់')}
-                          {currentMember.phoneVerified && (
-                            <CheckCircle2 className="w-3.5 h-3.5 text-amber-300" />
-                          )}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-emerald-200">{isEn ? 'Telegram Account' : 'គណនី Telegram'}</span>
-                        <span className="font-semibold flex items-center gap-1 text-sky-200">
-                          {currentMember.telegramUsername ||
-                            currentMember.tg ||
-                            (currentMember.telegramId
-                              ? `ID ${currentMember.telegramId}`
-                              : isEn
-                                ? 'Not linked'
-                                : 'មិនទាន់ភ្ជាប់')}
-                          {currentMember.telegramVerified && (
-                            <CheckCircle2 className="w-3.5 h-3.5 text-sky-300" />
-                          )}
-                        </span>
-                      </div>
-                    </div>
+              {authTab === 'quick' && (
+                <form
+                  onSubmit={handleQuickLogin}
+                  className="bg-white rounded-2xl p-4 sm:p-5 border border-stone-200/90 shadow-xs space-y-3.5"
+                >
+                  <div className="space-y-1">
+                    <h4 className="text-sm font-extrabold text-[#1E2420] flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-[#0D4A3E]" />
+                      {isEn ? 'Protected Phone + PIN Sign-In' : 'ចូលគណនី ឬចុះឈ្មោះ (ការពារដោយ PIN)'}
+                    </h4>
+                    <p className="text-xs text-stone-500">
+                      {isEn
+                        ? 'Your 4–8 digit Security PIN prevents anyone else from using your phone number.'
+                        : 'កូដ PIN ផ្ទាល់ខ្លួនជួយការពារកុំឲ្យអ្នកដទៃបន្លំប្រើលេខទូរស័ព្ទ ឬចូលមើលប្រវត្តិកម្ម៉ង់របស់អ្នក។'}
+                    </p>
                   </div>
 
-                  {/* Points & Spend Summary */}
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="bg-[#F6F8F7] border border-slate-200/80 rounded-2xl p-2.5 text-center">
-                      <p className="text-[10px] text-slate-500 font-semibold">
-                        {isEn ? 'Total Orders' : 'ការកម្ម៉ង់សរុប'}
+                  {channelVerifyPrompt && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 text-xs text-amber-900 space-y-2">
+                      <p className="font-bold">
+                        {isEn
+                          ? `Account "${channelVerifyPrompt}" is already protected via Telegram / OTP.`
+                          : `គណនី "${channelVerifyPrompt}" ត្រូវបានផ្ទៀងផ្ទាត់តាម Telegram / OTP រួចហើយ!`}
                       </p>
-                      <p className="font-mono-num font-bold text-base text-slate-900 mt-0.5">
-                        {memberOrders.length}
-                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setAuthTab('telegram')}
+                        className="min-h-[38px] px-3 py-1.5 bg-[#0088cc] text-white font-bold rounded-lg text-xs inline-flex items-center gap-1.5 hover:bg-[#0073ad] transition"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>{isEn ? 'Sign In with Telegram / OTP' : 'ទៅចូលតាម Telegram / OTP'}</span>
+                      </button>
                     </div>
-                    <div className="bg-amber-50 border border-amber-200/70 rounded-2xl p-2.5 text-center">
-                      <p className="text-[10px] text-amber-800 font-semibold">
-                        {isEn ? 'Total Points' : 'ពិន្ទុសរុប (Points)'}
-                      </p>
-                      <p className="font-mono-num font-bold text-base text-amber-700 mt-0.5">
-                        ★ {totalPointsEarned}
-                      </p>
-                    </div>
-                    <div className="bg-[#E8F2EF] border border-[#0D4A3E]/15 rounded-2xl p-2.5 text-center">
-                      <p className="text-[10px] text-[#0D4A3E] font-semibold">
-                        {isEn ? 'Total Spent' : 'ចំណាយសរុប'}
-                      </p>
-                      <p className="font-mono-num font-bold text-base text-[#0D4A3E] mt-0.5">
-                        ${totalSpent.toFixed(2)}
-                      </p>
-                    </div>
-                  </div>
+                  )}
 
-                  {/* Order History Section */}
-                  <div className="space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <h4 className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
-                        <History className="w-4 h-4 text-[#0D4A3E]" />
-                        <span>{isEn ? 'Order History' : 'ប្រវត្តិការកម្ម៉ង់ (Order History)'}</span>
-                      </h4>
-                      <span className="text-[11px] font-mono-num font-bold text-slate-500">
-                        {memberOrders.length} {isEn ? 'orders' : 'វិក្កយបត្រ'}
+                  {pinRequiredName && (
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs text-[#0D4A3E] space-y-1">
+                      <p className="font-bold">
+                        {isEn
+                          ? `Welcome back, ${pinRequiredName}!`
+                          : `សូមស្វាគមន៍ ${pinRequiredName}!`}
+                      </p>
+                      <p className="text-emerald-800">
+                        {isEn
+                          ? 'Please enter your Security PIN to unlock this account.'
+                          : 'សូមបញ្ចូលកូដ PIN របស់អ្នកដើម្បីបញ្ជាក់ភាពជាម្ចាស់គណនី។'}
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-xs font-bold text-stone-700 block mb-1">
+                        {isEn ? 'Phone Number *' : 'លេខទូរស័ព្ទ *'}
+                      </label>
+                      <input
+                        type="tel"
+                        inputMode="tel"
+                        autoComplete="tel"
+                        value={quickPhone}
+                        onChange={(e) => {
+                          setQuickPhone(e.target.value);
+                          if (pinRequiredName) setPinRequiredName(null);
+                          if (channelVerifyPrompt) setChannelVerifyPrompt(null);
+                        }}
+                        placeholder="012 345 678"
+                        className="w-full min-h-[46px] px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm font-mono-num focus:outline-none focus:border-[#0D4A3E] focus:bg-white transition"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-stone-700 block mb-1">
+                        {isEn ? 'Security PIN (4–8 digits) *' : 'កូដ PIN ការពារគណនី (លេខ ៤–៨ ខ្ទង់) *'}
+                      </label>
+                      <input
+                        ref={quickPinInputRef}
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={8}
+                        value={quickPin}
+                        onChange={(e) => setQuickPin(e.target.value.replace(/\D/g, ''))}
+                        placeholder={isEn ? 'e.g. 4829' : 'ឧ. 4829 (ជៀសវាង 1234 ឬលេខដូចគ្នា)'}
+                        className="w-full min-h-[46px] px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm font-mono-num tracking-widest focus:outline-none focus:border-[#0D4A3E] focus:bg-white transition"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-stone-700 block mb-1">
+                        {isEn ? 'Your Name' : 'ឈ្មោះរបស់អ្នក'}{' '}
+                        <span className="font-normal text-stone-400">
+                          {isEn ? '(required for new accounts)' : '(បំពេញសម្រាប់បង្កើតគណនីថ្មី)'}
+                        </span>
+                      </label>
+                      <input
+                        ref={quickNameInputRef}
+                        type="text"
+                        autoComplete="name"
+                        value={quickName}
+                        onChange={(e) => setQuickName(e.target.value)}
+                        placeholder={isEn ? 'e.g. Sok Dara' : 'ឧ. សុខ តារា'}
+                        className="w-full min-h-[46px] px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:border-[#0D4A3E] focus:bg-white transition"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowOptionalExtras((v) => !v)}
+                      className="text-xs font-bold text-[#0D4A3E] hover:underline flex items-center gap-1.5 py-0.5"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>
+                        {showOptionalExtras
+                          ? isEn
+                            ? 'Hide Telegram @username'
+                            : 'លាក់ Telegram @username'
+                          : isEn
+                          ? 'Add optional Telegram @username'
+                          : 'បន្ថែម Telegram @username (ជម្រើស)'}
                       </span>
-                    </div>
+                    </button>
 
-                    {!memberOrders.length ? (
-                      <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-5 text-center space-y-1.5">
-                        <ShoppingBag className="w-7 h-7 text-slate-300 mx-auto" />
-                        <p className="text-xs font-semibold text-slate-600">
-                          {isEn ? 'No orders yet' : 'មិនទាន់មានប្រវត្តិការកម្ម៉ង់ទេ'}
-                        </p>
-                        <p className="text-[11px] text-slate-400">
-                          {isEn
-                            ? 'Order drinks or food to start earning points (+1 ★ per item)!'
-                            : 'កម្ម៉ង់ភេសជ្ជៈ ឬអាហារដើម្បីប្រមូលពិន្ទុសន្សំ (+1 ★ ក្នុង ១ មុខ)!'}
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-2.5 max-h-64 overflow-y-auto pr-0.5">
-                        {memberOrders.map((order) => {
-                          const badgeCls = ORDER_STATUS_CLS[order.status] || ORDER_STATUS_CLS.Pending;
-                          const badgeLabel = getOrderStatusText(order.status, lang);
-                          const pts = order.items.reduce(
-                            (sum, it) => sum + Math.max(1, Number(it.qty) || 1),
-                            0
-                          );
-                          const dateStr = order.createdAt
-                            ? new Date(order.createdAt).toLocaleDateString(isEn ? 'en-US' : 'km-KH', {
-                                month: 'short',
-                                day: 'numeric',
-                              })
-                            : '';
-                          return (
-                            <div
-                              key={order.id}
-                              className="bg-white border border-slate-200 rounded-2xl p-3 space-y-2 shadow-sm"
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-1.5 min-w-0">
-                                  <span className="font-mono-num font-bold text-xs text-[#0D4A3E]">
-                                    {order.id}
-                                  </span>
-                                  <span className="text-[10px] text-slate-400 flex items-center gap-0.5 truncate">
-                                    <Clock className="w-3 h-3 shrink-0" />
-                                    {dateStr ? `${dateStr} · ` : ''}
-                                    {order.timestamp}
-                                  </span>
-                                </div>
-                                <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold shrink-0 ${badgeCls}`}>
-                                  {badgeLabel}
-                                </span>
-                              </div>
-
-                              <div className="space-y-1.5">
-                                {order.items.map((item, idx) => (
-                                  <div
-                                    key={`${order.id}-${idx}`}
-                                    className="flex items-center justify-between gap-2 text-xs"
-                                  >
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <img
-                                        src={resolveAssetUrl(item.img, CAFE_ASSETS.icedLatte)}
-                                        alt={item.name}
-                                        referrerPolicy="no-referrer"
-                                        onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
-                                        className="w-8 h-8 rounded-lg object-cover bg-slate-100 shrink-0"
-                                      />
-                                      <div className="min-w-0">
-                                        <p className="font-semibold text-slate-800 truncate">
-                                          {item.qty}x {item.name}
-                                        </p>
-                                        <p className="text-[10px] text-slate-500 truncate">{item.options}</p>
-                                      </div>
-                                    </div>
-                                    <span className="font-mono-num font-semibold text-slate-700 shrink-0">
-                                      ${(Number(item.unitPrice || 0) * Number(item.qty || 1)).toFixed(2)}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-
-                              <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
-                                <div className="flex items-center gap-2 text-xs">
-                                  <span className="font-mono-num font-bold text-slate-900">
-                                    ${Number(order.grandTotal || 0).toFixed(2)}
-                                  </span>
-                                  <span className="text-[10px] font-mono-num font-bold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-md">
-                                    +{pts} ★
-                                  </span>
-                                </div>
-                                <div className="flex items-center gap-1.5">
-                                  {order.status === 'Completed' && !order.feedback && (
-                                    <motion.button
-                                      type="button"
-                                      whileTap={{ scale: 0.94 }}
-                                      onClick={() => {
-                                        if (activeFeedbackOrderId === order.id) {
-                                          setActiveFeedbackOrderId(null);
-                                        } else {
-                                          setActiveFeedbackOrderId(order.id);
-                                          setFbRating(5);
-                                          setFbComment('');
-                                        }
-                                      }}
-                                      className="bg-amber-100 hover:bg-amber-200 text-amber-900 text-[11px] font-bold px-2.5 py-1.5 rounded-xl flex items-center gap-1"
-                                    >
-                                      <Star className="w-3 h-3 fill-amber-500 text-amber-600" />
-                                      <span>{isEn ? 'Rate Order' : 'វាយតម្លៃ'}</span>
-                                    </motion.button>
-                                  )}
-                                  <motion.button
-                                    type="button"
-                                    whileTap={{ scale: 0.94 }}
-                                    onClick={() => onReorder(order)}
-                                    className="bg-[#0D4A3E] hover:bg-[#09352C] text-white text-[11px] font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-sm"
-                                  >
-                                    <RotateCcw className="w-3 h-3" />
-                                    <span>{isEn ? 'Re-order' : 'កម្ម៉ង់ម្តងទៀត'}</span>
-                                  </motion.button>
-                                </div>
-                              </div>
-
-                              {order.feedback && (
-                                <div className="bg-[#F4F8F6] border border-[#0D4A3E]/15 rounded-xl p-2.5 space-y-1">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-[10px] font-bold text-[#0D4A3E] flex items-center gap-1">
-                                      <MessageSquare className="w-3 h-3" />
-                                      <span>{isEn ? 'Your Review' : 'ការវាយតម្លៃរបស់អ្នក'}</span>
-                                    </span>
-                                    <div className="flex items-center gap-0.5">
-                                      {[1, 2, 3, 4, 5].map((s) => (
-                                        <Star
-                                          key={s}
-                                          className={`w-3 h-3 ${
-                                            s <= order.feedback!.rating
-                                              ? 'fill-amber-400 text-amber-500'
-                                              : 'text-slate-300'
-                                          }`}
-                                        />
-                                      ))}
-                                    </div>
-                                  </div>
-                                  {order.feedback.comment && (
-                                    <p className="text-[11px] text-slate-700 leading-relaxed">
-                                      “{order.feedback.comment}”
-                                    </p>
-                                  )}
-                                </div>
-                              )}
-
-                              {order.status === 'Completed' &&
-                                !order.feedback &&
-                                activeFeedbackOrderId === order.id && (
-                                  <form
-                                    onSubmit={async (e) => {
-                                      e.preventDefault();
-                                      if (submittingFeedback) return;
-                                      setSubmittingFeedback(true);
-                                      try {
-                                        const ok = await onSubmitFeedback(order.id, fbRating, fbComment);
-                                        if (ok) {
-                                          setActiveFeedbackOrderId(null);
-                                          setFbComment('');
-                                          setFbRating(5);
-                                        }
-                                      } finally {
-                                        setSubmittingFeedback(false);
-                                      }
-                                    }}
-                                    className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 space-y-2.5"
-                                  >
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-[11px] font-bold text-slate-800">
-                                        {isEn ? 'Rate & Leave Feedback' : 'ផ្តល់ពិន្ទុ & មតិយោបល់'}
-                                      </span>
-                                      <div className="flex items-center gap-1">
-                                        {[1, 2, 3, 4, 5].map((starVal) => (
-                                          <button
-                                            key={starVal}
-                                            type="button"
-                                            onClick={() => setFbRating(starVal)}
-                                            aria-label={`${starVal} stars`}
-                                            className="p-0.5 transition-transform active:scale-90"
-                                          >
-                                            <Star
-                                              className={`w-5 h-5 ${
-                                                starVal <= fbRating
-                                                  ? 'fill-amber-400 text-amber-500'
-                                                  : 'text-slate-300'
-                                              }`}
-                                            />
-                                          </button>
-                                        ))}
-                                      </div>
-                                    </div>
-                                    <textarea
-                                      rows={2}
-                                      maxLength={500}
-                                      value={fbComment}
-                                      onChange={(e) => setFbComment(e.target.value)}
-                                      placeholder={
-                                        isEn
-                                          ? 'Share your thoughts on taste or service...'
-                                          : 'សរសេរមតិយោបល់របស់អ្នក (រសជាតិ ឬសេវាកម្ម)...'
-                                      }
-                                      className="w-full px-3 py-2 border border-amber-200 rounded-xl text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
-                                    />
-                                    <div className="flex items-center gap-2">
-                                      <button
-                                        type="button"
-                                        onClick={() => setActiveFeedbackOrderId(null)}
-                                        className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-slate-200 text-slate-600"
-                                      >
-                                        {isEn ? 'Cancel' : 'បោះបង់'}
-                                      </button>
-                                      <button
-                                        type="submit"
-                                        disabled={submittingFeedback}
-                                        className="flex-1 bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-60 text-white py-1.5 rounded-lg text-[11px] font-bold"
-                                      >
-                                        {submittingFeedback
-                                          ? isEn
-                                            ? 'Submitting...'
-                                            : 'កំពុងផ្ញើ...'
-                                          : isEn
-                                            ? 'Submit Review'
-                                            : 'ផ្ញើការវាយតម្លៃ'}
-                                      </button>
-                                    </div>
-                                  </form>
-                                )}
-                            </div>
-                          );
-                        })}
+                    {showOptionalExtras && (
+                      <div className="pt-1 border-t border-stone-100">
+                        <label className="text-xs font-bold text-stone-700 block mb-1">
+                          Telegram @username{' '}
+                          <span className="font-normal text-stone-400">
+                            {isEn ? '(optional for delivery contact)' : '(សម្រាប់ទាក់ទងពេលដឹក)'}
+                          </span>
+                        </label>
+                        <input
+                          type="text"
+                          value={quickTg}
+                          onChange={(e) => setQuickTg(e.target.value)}
+                          placeholder="@username"
+                          className="w-full min-h-[46px] px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:border-[#0D4A3E] focus:bg-white transition"
+                        />
                       </div>
                     )}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={onLogout}
-                    className="w-full flex items-center justify-center gap-2 border border-red-200 text-red-600 hover:bg-red-50 py-2.5 rounded-xl text-xs font-bold transition-colors"
-                  >
-                    <LogOut className="w-4 h-4" />
-                    <span>{isEn ? 'Sign Out Safely' : 'ចាកចេញពីគណនីដោយសុវត្ថិភាព'}</span>
-                  </button>
-                </motion.div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-xl">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveTab('telegram');
-                        setErrorMsg('');
-                      }}
-                      className={`py-2.5 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
-                        activeTab === 'telegram'
-                          ? 'bg-white text-slate-900 shadow-sm'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      <Send className="w-3.5 h-3.5 text-sky-600" />
-                      <span>{isEn ? 'Telegram Login' : 'Telegram ផ្លូវការ'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveTab('phone');
-                        setErrorMsg('');
-                      }}
-                      className={`py-2.5 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all whitespace-nowrap ${
-                        activeTab === 'phone'
-                          ? 'bg-white text-slate-900 shadow-sm'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      <Smartphone className="w-3.5 h-3.5 text-[#0D4A3E]" />
-                      <span>{isEn ? 'Phone (Free)' : 'លេខទូរស័ព្ទ (Free)'}</span>
-                    </button>
-                  </div>
-
-                  {errorMsg && (
-                    <motion.div
-                      initial={{ opacity: 0, y: -4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="bg-red-50 border border-red-200 text-red-700 text-xs font-medium px-3.5 py-2.5 rounded-xl leading-relaxed"
-                    >
-                      {errorMsg}
-                    </motion.div>
+                  {authError && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-medium px-3.5 py-2.5 rounded-xl">
+                      {authError}
+                    </div>
                   )}
 
-                  {activeTab === 'telegram' ? (
-                    <motion.div
-                      key="tab-tg"
-                      initial={{ opacity: 0, x: -8 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: 0.18 }}
-                      className="space-y-3.5"
-                    >
-                      {/* Member Benefits Welcome Box */}
-                      <div className="bg-[#E8F2EF]/80 border border-[#0D4A3E]/15 rounded-2xl p-3.5 space-y-1.5">
-                        <p className="text-xs font-bold text-[#0D4A3E] flex items-center gap-1.5">
-                          <Award className="w-4 h-4 text-amber-500 shrink-0" />
-                          <span>
-                            {isEn
-                              ? `Become a ${shopSettings.brandTitle} Member`
-                              : `ចុះឈ្មោះសមាជិក ${shopSettings.brandTitle} (Free ១០០%)`}
-                          </span>
-                        </p>
-                        <p className="text-[11px] text-slate-600 leading-relaxed">
-                          {isEn
-                            ? 'Collect ★ points on every order, track your courier live on the map, reorder in 1 tap, and pay securely with KHQR.'
-                            : 'ទទួលបាន ★ ពិន្ទុរាល់ការកម្ម៉ង់, តាមដានអ្នកដឹកជញ្ជូន Live, កម្ម៉ង់ម្តងទៀតលឿន និងរក្សាទុកវិក្កយបត្រ KHQR ដោយសុវត្ថិភាព។'}
-                        </p>
-                      </div>
+                  <button
+                    type="submit"
+                    disabled={quickBusy}
+                    className="w-full min-h-[48px] py-3 bg-[#0D4A3E] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 hover:bg-[#09362D] active:scale-[0.99] transition disabled:opacity-60"
+                  >
+                    {quickBusy ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="w-4 h-4" />
+                    )}
+                    <span>
+                      {isEn ? 'Sign In / Create Protected Account' : 'ចូលគណនី / បង្កើតគណនីសុវត្ថិភាព'}
+                    </span>
+                  </button>
+                </form>
+              )}
 
-                      {capabilities?.telegramBotReady || capabilities?.telegramWidgetReady ? (
-                        <>
-                          {/* Primary Official 1-Click Telegram Bot Verification (Works on ALL domains & mobile) */}
-                          <div className="bg-[#F5F9FC] border border-sky-200 rounded-2xl p-4 space-y-3">
-                            <div>
-                              <p className="text-xs font-bold text-slate-900">
-                                {isEn
-                                  ? `Register / Sign In via @${capabilities.botUsername}`
-                                  : `ចុះឈ្មោះ ឬ ចូលប្រើតាម Telegram Bot (@${capabilities.botUsername})`}
-                              </p>
-                              <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                                {isEn
-                                  ? '1) Click Open Bot → 2) Tap Start in Telegram → 3) Return here automatically signed in.'
-                                  : 'ជំហានងាយៗ៖ ១) ចុចប៊ូតុងបើក Telegram Bot → ២) ចុច Start ក្នុង Telegram → ៣) ត្រឡប់មកវិញភ្លាម!'}
-                              </p>
-                            </div>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                              <input
-                                type="text"
-                                value={name}
-                                onChange={(e) => setName(e.target.value)}
-                                placeholder={
-                                  isEn ? 'Your Name (optional)' : 'ឈ្មោះរបស់អ្នក (ស្រេចចិត្ត)'
-                                }
-                                className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
-                              />
-                              <input
-                                type="tel"
-                                value={phone}
-                                onChange={(e) => setPhone(e.target.value)}
-                                placeholder={
-                                  isEn ? 'Phone number (optional)' : 'លេខទូរស័ព្ទ (ស្រេចចិត្ត)'
-                                }
-                                className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num bg-white focus:outline-none focus:border-[#0D4A3E]"
-                              />
-                            </div>
+              {authTab === 'telegram' && (
+                <div className="space-y-3">
+                  {capsLoading ? (
+                    <div className="bg-white rounded-2xl p-6 border border-stone-200 flex items-center justify-center gap-2 text-xs text-stone-500">
+                      <Loader2 className="w-4 h-4 animate-spin text-[#0D4A3E]" />
+                      <span>{isEn ? 'Checking verification options...' : 'កំពុងពិនិត្យសេវាផ្ទៀងផ្ទាត់...'}</span>
+                    </div>
+                  ) : !hasAnyExternalAuth ? (
+                    <div className="bg-white rounded-2xl p-5 border border-stone-200 space-y-3">
+                      <div className="w-12 h-12 rounded-2xl bg-sky-50 text-[#0088cc] flex items-center justify-center mx-auto">
+                        <Send className="w-5 h-5" />
+                      </div>
+                      <h4 className="font-bold text-sm text-[#1E2420] text-center">
+                        {isEn
+                          ? 'Telegram Phone Verification Not Configured Yet'
+                          : 'សេវាផ្ទៀងផ្ទាត់លេខតាម Telegram មិនទាន់បានភ្ជាប់នៅឡើយទេ'}
+                      </h4>
+                      <p className="text-xs text-stone-500 leading-relaxed text-center">
+                        {isEn
+                          ? 'Shop owner: Open Owner Dashboard → Settings → Section 4 and add your free @BotFather Bot Token (Share Contact) or Telegram Gateway Token (6-digit OTP).'
+                          : 'ម្ចាស់ហាងត្រូវចូល «គ្រប់គ្រងហាង → ការកំណត់ → ផ្នែកទី ៤» រួចបញ្ចូល Bot Token ពី @BotFather (Free ១០០% Share លេខ) ឬ Telegram Gateway Token (ផ្ញើកូដ ៦ ខ្ទង់)។'}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setAuthTab('quick')}
+                        className="w-full min-h-[46px] py-2.5 bg-[#0D4A3E] text-white font-bold rounded-xl text-xs hover:bg-[#09362D] transition"
+                      >
+                        {isEn ? 'Sign In with Phone + PIN Instead' : 'ទៅចូលគណនីតាមលេខទូរស័ព្ទ + PIN'}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      {/* 1-Tap Telegram Bot Verification (Share Phone Free OR 1-Tap Login) */}
+                      {hasTelegram && (
+                        <div className="bg-white rounded-2xl p-4 sm:p-5 border border-stone-200 space-y-3.5">
+                          <div className="space-y-1">
+                            <h4 className="text-sm font-extrabold text-[#1E2420] flex items-center gap-1.5">
+                              <Send className="w-4 h-4 text-sky-600" />
+                              {isEn ? 'Verify Phone & Sign In via Telegram' : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទតាម Telegram (Free)'}
+                            </h4>
+                            <p className="text-xs text-stone-500">
+                              {tgMode === 'contact'
+                                ? isEn
+                                  ? 'Share your real SIM number inside Telegram Bot — 100% free and spoofing-proof.'
+                                  : 'ចុចបើក Telegram រួចចុច Share លេខទូរស័ព្ទពិតរបស់អ្នក — Free ១០០% និងការពារការបន្លំលេខ។'
+                                : isEn
+                                ? 'Tap Start in our Telegram bot — returning to this page signs you in automatically.'
+                                : 'ចុច Start ក្នុង Telegram Bot ហើយត្រឡប់មកវិញ ប្រព័ន្ធនឹងភ្ជាប់ចូលអូតូភ្លាមៗ។'}
+                            </p>
+                          </div>
+
+                          {/* Option toggles: Share Phone Contact (Default) vs 1-Tap Login */}
+                          <div className="grid grid-cols-2 gap-1.5 bg-stone-100 p-1 rounded-xl">
                             <button
                               type="button"
-                              onClick={() => handleInitBotDeepLink('login')}
-                              disabled={loading}
-                              className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs flex items-center justify-center gap-2 transition-colors active:scale-[0.98] shadow-sm"
+                              onClick={() => {
+                                setTgMode('contact');
+                                setTgWaiting(false);
+                                setTgDeepLink(null);
+                              }}
+                              className={`min-h-[40px] px-2.5 rounded-lg text-xs font-bold transition ${
+                                tgMode === 'contact'
+                                  ? 'bg-white text-[#0D4A3E] shadow-xs'
+                                  : 'text-stone-600 hover:text-stone-900'
+                              }`}
                             >
-                              <Send className="w-3.5 h-3.5" />
-                              <span>
-                                {isPollingTg && tgLinkMode === 'login'
-                                  ? isEn
-                                    ? 'Waiting for Start in Telegram...'
-                                    : 'កំពុងរង់ចាំអ្នកចុច Start លើ Telegram...'
-                                  : isEn
-                                    ? 'Open Telegram Bot to Register / Sign In'
-                                    : 'បើក Telegram Bot ដើម្បីចុះឈ្មោះ / ចូលគណនី'}
-                              </span>
+                              {isEn ? 'Verify Phone (Free)' : 'ផ្ទៀងផ្ទាត់លេខ (Free)'}
                             </button>
-
-                            {tgLinkNonce && tgLinkMode === 'login' && tgDeepLink && (
-                              <div className="bg-white border border-sky-200 rounded-xl p-3 text-[11px] text-slate-700 space-y-2">
-                                <div className="flex items-center justify-between">
-                                  <span>
-                                    {isEn ? 'Verification Code: ' : 'លេខកូដភ្ជាប់៖ '}
-                                    <strong className="font-mono-num text-sky-700">{tgLinkNonce}</strong>
-                                  </span>
-                                  <span className="text-slate-400">
-                                    {isEn ? 'Valid 10 mins' : 'សុពលភាព ១០ នាទី'}
-                                  </span>
-                                </div>
-                                <a
-                                  href={tgDeepLink}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="block w-full text-center bg-sky-50 hover:bg-sky-100 text-sky-700 font-bold py-2.5 rounded-lg border border-sky-200"
-                                >
-                                  {isEn
-                                    ? 'Tap here to open Telegram Bot ↗'
-                                    : 'ចុចទីនេះដើម្បីបើក Telegram Bot ↗'}
-                                </a>
-                                <p className="text-[10px] text-slate-500 text-center">
-                                  {isEn
-                                    ? 'After tapping Start in Telegram, come right back — this window updates automatically.'
-                                    : 'បន្ទាប់ពីចុច Start ក្នុង Telegram រួច សូមត្រឡប់មកផ្ទាំងនេះវិញ ប្រព័ន្ធនឹងបើកដោយស្វ័យប្រវត្តិ។'}
-                                </p>
-                              </div>
-                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setTgMode('login');
+                                setTgWaiting(false);
+                                setTgDeepLink(null);
+                              }}
+                              className={`min-h-[40px] px-2.5 rounded-lg text-xs font-bold transition ${
+                                tgMode === 'login'
+                                  ? 'bg-white text-sky-700 shadow-xs'
+                                  : 'text-stone-600 hover:text-stone-900'
+                              }`}
+                            >
+                              {isEn ? '1-Tap Telegram' : 'Telegram ១ ជំហាន'}
+                            </button>
                           </div>
 
-                          {/* Optional Web Widget Toggle */}
-                          {capabilities?.telegramWidgetReady && (
-                            <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3 text-center space-y-2">
-                              <button
-                                type="button"
-                                onClick={() => setShowWebWidget((v) => !v)}
-                                className="text-[11px] font-bold text-slate-600 hover:text-[#0D4A3E] underline"
-                              >
-                                {showWebWidget
-                                  ? isEn
-                                    ? 'Hide Telegram Web Widget'
-                                    : 'បិទ Telegram Web Widget'
-                                  : isEn
-                                    ? 'Or sign in with Telegram Web Widget'
-                                    : 'ឬ ចូលតាម Telegram Web Widget'}
-                              </button>
-                              {showWebWidget && (
-                                <div className="space-y-1.5 pt-1">
-                                  <div ref={widgetContainerRef} className="flex justify-center min-h-[42px]" />
-                                  <p className="text-[10px] text-slate-400">
-                                    {isEn
-                                      ? 'Requires BotFather /setdomain on custom domain. Use Open Telegram Bot above on any URL.'
-                                      : 'ប្រសិនបើបង្ហាញ Domain Invalid សូមប្រើប៊ូតុង «បើក Telegram Bot» ខាងលើ (ដំណើរការ ១០០% គ្រប់ទីកន្លែង)។'}
-                                  </p>
-                                </div>
-                              )}
+                          {tgMode === 'contact' && !tgDeepLink && (
+                            <div>
+                              <label className="text-[11px] font-bold text-stone-600 block mb-1">
+                                {isEn ? 'Phone Number to Verify' : 'លេខទូរស័ព្ទត្រូវផ្ទៀងផ្ទាត់'}{' '}
+                                <span className="font-normal text-stone-400">
+                                  {isEn ? '(optional · leave empty to pull from Telegram)' : '(ស្រេចចិត្ត · ទុកទំនេរដើម្បីទាញពី Telegram)'}
+                                </span>
+                              </label>
+                              <input
+                                type="tel"
+                                inputMode="tel"
+                                value={tgExpectedPhone}
+                                onChange={(e) => setTgExpectedPhone(e.target.value)}
+                                placeholder="012 345 678"
+                                className="w-full min-h-[44px] px-3.5 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm font-mono-num focus:outline-none focus:border-[#0D4A3E] focus:bg-white transition"
+                              />
                             </div>
                           )}
-                        </>
-                      ) : (
-                        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2 text-xs text-amber-950 leading-relaxed">
-                          <p className="font-bold">
-                            {isEn
-                              ? 'Official Telegram Bot Setup Required (100% Free)'
-                              : 'តម្រូវការភ្ជាប់ Telegram Bot ផ្លូវការ (Free ១០០%)'}
-                          </p>
-                          <p>
-                            {isEn
-                              ? 'Shop owner can enable free Telegram login in Shop Admin → Settings by adding Bot Username and Bot Token from @BotFather.'
-                              : 'ដើម្បីបើកការចុះឈ្មោះតាម Telegram ផ្លូវការដោយឥតគិតថ្លៃ សូមម្ចាស់ហាងចូលទៅ គ្រប់គ្រងហាង → ការកំណត់ហាង រួចបញ្ចូល Bot Username និង Bot Token (បង្កើត Free ពី @BotFather) ។'}
-                          </p>
-                        </div>
-                      )}
-                    </motion.div>
-                  ) : (
-                    <motion.div
-                      key="tab-phone"
-                      initial={{ opacity: 0, x: 8 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: 0.18 }}
-                      className="space-y-3"
-                    >
-                      {/* FREE Option: Telegram Share Contact Verification */}
-                      {capabilities?.telegramContactReady && (
-                        <div className="bg-[#E8F2EF] border border-[#0D4A3E]/25 rounded-2xl p-4 space-y-3">
-                          <div>
-                            <p className="text-xs font-bold text-[#0D4A3E]">
-                              {isEn
-                                ? 'Verify Real Phone Number Free via Telegram'
-                                : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទពិត Free ១០០% តាម Telegram'}
-                            </p>
-                            <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                              {isEn
-                                ? 'Zero SMS fees! Open the bot and tap Share Phone Number to verify your real SIM number.'
-                                : 'មិនអស់ថ្លៃសេវា SMS ទេ! បើក Bot រួចចុចប៊ូតុង «ចែករំលែកលេខទូរស័ព្ទ» ដើម្បីផ្ទៀងផ្ទាត់លេខ SIM របស់អ្នកដោយផ្ទាល់។'}
-                            </p>
-                          </div>
 
-                          <input
-                            type="text"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            placeholder={isEn ? 'Your name (optional)' : 'ឈ្មោះរបស់អ្នក (ស្រេចចិត្ត)'}
-                            className="w-full px-3.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs bg-white focus:outline-none focus:border-[#0D4A3E]"
-                          />
-
-                          <button
-                            type="button"
-                            onClick={() => handleInitBotDeepLink('contact')}
-                            disabled={loading}
-                            className="w-full bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold py-2.5 px-4 rounded-xl text-xs flex items-center justify-center gap-2 transition-colors active:scale-[0.98]"
-                          >
-                            <Smartphone className="w-4 h-4" />
-                            <span>
-                              {isPollingTg && tgLinkMode === 'contact'
-                                ? tgPollStep === 'awaiting_contact'
+                          {!tgDeepLink ? (
+                            <button
+                              type="button"
+                              disabled={tgLinkBusy}
+                              onClick={() => handleStartTelegramLink(tgMode)}
+                              className="w-full min-h-[48px] py-3 bg-[#0088cc] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 hover:bg-[#0073ad] transition disabled:opacity-60"
+                            >
+                              {tgLinkBusy ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Send className="w-4 h-4" />
+                              )}
+                              <span>
+                                {tgMode === 'contact'
                                   ? isEn
-                                    ? 'Tap Share Phone Number in Telegram...'
-                                    : 'សូមចុចប៊ូតុងផ្ញើលេខទូរស័ព្ទក្នុង Telegram...'
+                                    ? 'Verify Number via Telegram Bot'
+                                    : 'បើក Telegram ដើម្បី Share លេខ'
                                   : isEn
-                                    ? 'Waiting for Start in Telegram...'
-                                    : 'កំពុងរង់ចាំអ្នកចុច Start ក្នុង Telegram...'
-                                : isEn
-                                  ? 'Verify Phone Free via Telegram'
-                                  : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ Free តាម Telegram'}
-                            </span>
-                          </button>
-
-                          {tgLinkNonce && tgLinkMode === 'contact' && tgDeepLink && (
-                            <div className="bg-white border border-emerald-200 rounded-xl p-3 space-y-2 text-[11px] text-slate-700">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-bold text-[#0D4A3E]">
-                                  {tgPollStep === 'awaiting_contact'
-                                    ? isEn
-                                      ? 'Step 2/2: Tap "Share Phone Number" in Bot'
-                                      : 'ជំហាន ២/២៖ ចុច «📱 ចុចផ្ញើលេខទូរស័ព្ទផ្ទៀងផ្ទាត់» ក្នុង Bot'
-                                    : isEn
-                                      ? 'Step 1/2: Tap Start in Telegram Bot'
-                                      : 'ជំហាន ១/២៖ ចុច Start ក្នុង Telegram Bot'}
-                                </span>
-                              </div>
+                                  ? 'Generate Telegram Login Link'
+                                  : 'បើក Telegram Bot ដើម្បីចូល'}
+                              </span>
+                            </button>
+                          ) : (
+                            <div className="bg-sky-50 border border-sky-200 rounded-xl p-3.5 space-y-3">
                               <a
                                 href={tgDeepLink}
                                 target="_blank"
-                                rel="noreferrer"
-                                className="block w-full text-center bg-emerald-50 hover:bg-emerald-100 text-[#0D4A3E] font-bold py-2 rounded-lg border border-emerald-200"
+                                rel="noopener noreferrer"
+                                className="w-full min-h-[48px] py-3 px-4 bg-[#0088cc] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 hover:bg-[#0073ad] transition"
                               >
-                                {isEn ? 'Tap here to open Telegram Bot ↗' : 'ចុចទីនេះដើម្បីបើក Telegram Bot ↗'}
+                                <ExternalLink className="w-4 h-4" />
+                                <span>
+                                  {isEn
+                                    ? `Open Telegram (${tgBotUsername ? '@' + tgBotUsername.replace(/^@/, '') : 'Bot'})`
+                                    : `ចុចបើក Telegram (${tgBotUsername ? '@' + tgBotUsername.replace(/^@/, '') : 'Bot'})`}
+                                </span>
                               </a>
-                              <p className="text-slate-500">
-                                Bot: <span className="font-semibold">@{capabilities.botUsername}</span> ·{' '}
-                                {isEn ? 'Code' : 'កូដ'} <span className="font-mono-num">{tgLinkNonce}</span>
-                              </p>
+                              {tgMode === 'contact' && (
+                                <p className="text-[11px] text-sky-900 leading-relaxed bg-white/80 rounded-lg px-2.5 py-2 border border-sky-100">
+                                  {isEn
+                                    ? '1. Tap Start in Telegram → 2. Tap "Share Phone Number" → 3. Return here to complete automatically.'
+                                    : '១. ចុច Start ក្នុង Telegram → ២. ចុចប៊ូតុង «ចែករំលែកលេខទូរស័ព្ទ (Free)» → ៣. ត្រឡប់មកទីនេះវិញ គណនីនឹងផ្ទៀងផ្ទាត់អូតូ!'}
+                                </p>
+                              )}
+                              <div className="flex items-center justify-between text-xs text-sky-800 px-1">
+                                <span className="flex items-center gap-1.5 font-medium">
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  {tgMode === 'contact'
+                                    ? isEn
+                                      ? 'Waiting for Share Contact...'
+                                      : 'កំពុងរង់ចាំការ Share លេខ...'
+                                    : isEn
+                                    ? 'Waiting for Start tap...'
+                                    : 'កំពុងរង់ចាំការចុច Start...'}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => tgNonce && pollTelegramNonce(tgNonce)}
+                                  className="font-bold underline hover:text-sky-950"
+                                >
+                                  {isEn ? 'Check now' : 'ពិនិត្យម្តងទៀត'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {caps?.telegramWidgetReady && (
+                            <div className="pt-2 border-t border-stone-100">
+                              <button
+                                type="button"
+                                onClick={() => setShowFallbackWidget((v) => !v)}
+                                className="text-xs font-bold text-stone-500 hover:text-stone-800"
+                              >
+                                {showFallbackWidget
+                                  ? isEn
+                                    ? 'Hide Telegram Web Widget'
+                                    : 'លាក់ប៊ូតុង Telegram ផ្ទាល់លើវេបសាយ'
+                                  : isEn
+                                  ? 'Use Telegram Web Widget instead'
+                                  : 'ប្រើប៊ូតុង Telegram ផ្ទាល់លើវេបសាយ'}
+                              </button>
+                              {showFallbackWidget && (
+                                <div ref={tgWidgetContainerRef} className="min-h-[48px] flex items-center justify-center pt-3" />
+                              )}
                             </div>
                           )}
                         </div>
                       )}
 
-                      {/* Optional SMS OTP Section (if paid SMS provider is configured) */}
-                      {capabilities?.phoneOtpReady ? (
-                        otpStep === 'input' ? (
-                          <form onSubmit={handleSendPhoneOtp} className="space-y-3 pt-1">
-                            {capabilities.telegramContactReady && (
-                              <p className="text-[11px] font-bold text-slate-500 text-center">
-                                {isEn ? '— Or verify by SMS OTP —' : '— ឬ ផ្ទៀងផ្ទាត់ដោយកូដ SMS OTP —'}
-                              </p>
-                            )}
-                            <div>
-                              <label className="text-[11px] font-semibold text-slate-600 block mb-1">
-                                {isEn ? 'Full Name *' : 'ឈ្មោះពេញ *'}
-                              </label>
-                              <input
-                                type="text"
-                                required
-                                value={name}
-                                onChange={(e) => setName(e.target.value)}
-                                placeholder={isEn ? 'e.g. Dara Chan' : 'ឧ. ចាន់ ដារ៉ា'}
-                                className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-base sm:text-sm focus:outline-none focus:border-[#0D4A3E]"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-[11px] font-semibold text-slate-600 block mb-1">
-                                {isEn ? 'Phone Number for OTP *' : 'លេខទូរស័ព្ទសម្រាប់ទទួល OTP *'}
-                              </label>
-                              <div className="relative">
-                                <Phone className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                                <input
-                                  type="tel"
-                                  required
-                                  value={phone}
-                                  onChange={(e) => setPhone(e.target.value)}
-                                  placeholder="012 345 678"
-                                  className="w-full pl-10 pr-3.5 py-2.5 border border-slate-200 rounded-xl text-base sm:text-sm font-mono-num focus:outline-none focus:border-[#0D4A3E]"
-                                />
-                              </div>
-                            </div>
-                            <button
-                              type="submit"
-                              disabled={loading}
-                              className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 rounded-xl text-sm flex items-center justify-center gap-2 transition-colors active:scale-[0.98]"
-                            >
-                              <KeyRound className="w-4 h-4" />
-                              <span>
-                                {loading
-                                  ? isEn
-                                    ? 'Sending OTP...'
-                                    : 'កំពុងផ្ញើលេខកូដ...'
-                                  : isEn
-                                    ? 'Send SMS OTP Code'
-                                    : 'ផ្ញើលេខកូដ OTP តាម SMS'}
-                              </span>
-                            </button>
-                          </form>
-                        ) : (
-                          <form onSubmit={handleVerifyPhoneOtp} className="space-y-4">
-                            <div className="text-center space-y-1">
-                              <p className="text-xs text-slate-600">
-                                {isEn ? 'Enter the 6-digit code sent to ' : 'សូមបញ្ចូលលេខកូដ ៦ ខ្ទង់ដែលបានផ្ញើទៅ '}
-                                <span className="font-mono-num font-bold text-slate-900">
-                                  {normalizedPhone}
-                                </span>
-                              </p>
-                              <p className="text-[11px] text-slate-500">
-                                {isEn ? 'Channel: ' : 'តាមរយៈ៖ '}
-                                {deliveredChannel === 'telegram_gateway'
-                                  ? 'Telegram Verification'
-                                  : 'SMS Gateway'}
-                              </p>
-                              {otpCountdown > 0 && (
-                                <p className="text-[11px] text-[#0D4A3E] font-mono-num font-semibold">
-                                  {isEn ? 'Expires in: ' : 'ផុតកំណត់ក្នុង៖ '}
-                                  {formatCountdown(otpCountdown)}
-                                </p>
+                      {/* Official Telegram Gateway / SMS 6-Digit OTP Section */}
+                      {caps?.phoneOtpReady && (
+                        <div className="bg-white rounded-2xl p-4 sm:p-5 border border-stone-200 space-y-3">
+                          <button
+                            type="button"
+                            onClick={() => setShowSmsOtp((v) => !v)}
+                            className="w-full flex items-center justify-between text-left"
+                          >
+                            <span className="text-sm font-bold text-[#1E2420] flex items-center gap-1.5">
+                              <ShieldCheck className="w-4 h-4 text-[#0D4A3E]" />
+                              {caps.phoneOtpChannel === 'telegram_gateway'
+                                ? isEn
+                                  ? 'Send 6-Digit Code to Telegram (Gateway)'
+                                  : 'ផ្ញើលេខកូដ ៦ ខ្ទង់ចូល Telegram (OTP)'
+                                : isEn
+                                ? 'Verify Phone with 6-Digit OTP'
+                                : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទដោយកូដ OTP'}
+                            </span>
+                            <span className="text-xs font-bold text-[#0D4A3E]">
+                              {showSmsOtp ? (isEn ? 'Hide' : 'បិទ') : isEn ? 'Open' : 'បើក'}
+                            </span>
+                          </button>
+
+                          {showSmsOtp && (
+                            <div className="space-y-3 pt-2 border-t border-stone-100">
+                              {!otpSent ? (
+                                <>
+                                  <input
+                                    type="text"
+                                    value={otpName}
+                                    onChange={(e) => setOtpName(e.target.value)}
+                                    placeholder={isEn ? 'Your Name (optional)' : 'ឈ្មោះរបស់អ្នក (ដាក់ក៏បាន)'}
+                                    className="w-full min-h-[44px] px-3.5 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm"
+                                  />
+                                  <input
+                                    type="tel"
+                                    value={otpPhone}
+                                    onChange={(e) => setOtpPhone(e.target.value)}
+                                    placeholder="012 345 678"
+                                    className="w-full min-h-[44px] px-3.5 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm font-mono-num"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={otpBusy}
+                                    onClick={handleSendOtp}
+                                    className="w-full min-h-[46px] py-2.5 bg-[#0D4A3E] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 hover:bg-[#09362D] transition disabled:opacity-60"
+                                  >
+                                    {otpBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                                    <span>
+                                      {caps.phoneOtpChannel === 'telegram_gateway'
+                                        ? isEn
+                                          ? 'Send 6-Digit Code to Telegram'
+                                          : 'ផ្ញើលេខកូដ ៦ ខ្ទង់ទៅ Telegram'
+                                        : isEn
+                                        ? 'Send 6-Digit Code'
+                                        : 'ផ្ញើលេខកូដ OTP'}
+                                    </span>
+                                  </button>
+                                </>
+                              ) : (
+                                <form onSubmit={handleVerifyOtp} className="space-y-3">
+                                  <p className="text-xs text-emerald-700 font-medium">
+                                    {isEn
+                                      ? `Code sent via ${otpChannelLabel} to ${otpPhone}`
+                                      : `បានផ្ញើលេខកូដតាម ${otpChannelLabel} ទៅ ${otpPhone}`}
+                                  </p>
+                                  <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    maxLength={6}
+                                    value={otpCode}
+                                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                                    placeholder="••••••"
+                                    className="w-full min-h-[48px] px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl text-center font-mono-num text-xl font-extrabold tracking-[0.4em]"
+                                  />
+                                  <div className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={otpBusy || otpCooldown > 0}
+                                      onClick={handleSendOtp}
+                                      className="flex-1 min-h-[44px] border border-stone-200 rounded-xl text-xs font-bold text-stone-600 disabled:opacity-50"
+                                    >
+                                      {otpCooldown > 0 ? `${otpCooldown}s` : isEn ? 'Resend' : 'ផ្ញើម្តងទៀត'}
+                                    </button>
+                                    <button
+                                      type="submit"
+                                      disabled={otpBusy}
+                                      className="flex-[2] min-h-[44px] bg-[#0D4A3E] text-white font-bold rounded-xl text-sm flex items-center justify-center gap-1.5"
+                                    >
+                                      {otpBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                                      <span>{isEn ? 'Confirm Code' : 'បញ្ជាក់លេខកូដ'}</span>
+                                    </button>
+                                  </div>
+                                </form>
                               )}
                             </div>
+                          )}
+                        </div>
+                      )}
 
-                            <div className="grid grid-cols-6 gap-2">
-                              {otpDigits.map((digit, idx) => (
-                                <input
-                                  key={idx}
-                                  ref={(el) => {
-                                    otpInputsRef.current[idx] = el;
-                                  }}
-                                  type="text"
-                                  inputMode="numeric"
-                                  maxLength={1}
-                                  value={digit}
-                                  onChange={(e) => handleOtpDigitChange(idx, e.target.value)}
-                                  onKeyDown={(e) => handleOtpKeyDown(idx, e)}
-                                  className="h-12 text-center font-mono-num text-lg font-bold border-2 border-slate-200 rounded-xl focus:border-[#0D4A3E] focus:outline-none transition-colors"
-                                />
-                              ))}
+                      {authError && (
+                        <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-medium px-3.5 py-2.5 rounded-xl">
+                          {authError}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            /* ==================== SIGNED IN VIEW ==================== */
+            <div className="space-y-4">
+              {/* Member Identity Card */}
+              <div className="bg-white rounded-2xl p-4 sm:p-5 border border-stone-200/90 shadow-xs space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    {currentMember.telegramPhotoUrl ? (
+                      <img
+                        src={currentMember.telegramPhotoUrl}
+                        alt={currentMember.name}
+                        className="w-12 h-12 rounded-2xl object-cover border border-stone-200 shrink-0"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-2xl bg-[#0D4A3E] text-white flex items-center justify-center font-extrabold text-lg shrink-0">
+                        {(currentMember.name || 'M').trim().charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <h4 className="font-extrabold text-base text-[#1E2420] truncate">
+                          {currentMember.name}
+                        </h4>
+                        {(currentMember.telegramVerified || currentMember.phoneVerified) && (
+                          <CheckCircle2
+                            className="w-4 h-4 text-[#0D4A3E] shrink-0"
+                            aria-label={isEn ? 'Verified Member' : 'គណនីបានផ្ទៀងផ្ទាត់'}
+                          />
+                        )}
+                        {currentMember.hasPin && (
+                          <ShieldCheck
+                            className="w-4 h-4 text-emerald-700 shrink-0"
+                            aria-label={isEn ? 'PIN Protected' : 'ការពារដោយកូដ PIN'}
+                          />
+                        )}
+                      </div>
+
+                      {/* Zero-pill clean inline metadata */}
+                      <p className="text-xs text-stone-500 mt-0.5 truncate">
+                        {[
+                          currentMember.phone || (isEn ? 'No phone set' : 'មិនទាន់មានលេខទូរស័ព្ទ'),
+                          currentMember.telegramUsername || currentMember.tg || null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </p>
+
+                      <button
+                        type="button"
+                        onClick={handleCopyMemberId}
+                        className="mt-1 inline-flex items-center gap-1 text-[11px] font-mono-num text-stone-400 hover:text-[#0D4A3E] transition"
+                      >
+                        <span>ID: {currentMember.id}</span>
+                        {copiedId ? (
+                          <Check className="w-3 h-3 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-3 h-3" />
+                        )}
+                      </button>
+
+                      {/* Clean security status text */}
+                      <p className="text-[11px] mt-1 font-medium text-emerald-700">
+                        {[
+                          currentMember.phoneVerified
+                            ? isEn
+                              ? 'Phone Verified ✓'
+                              : 'លេខទូរស័ព្ទបានផ្ទៀងផ្ទាត់ ✓'
+                            : isEn
+                            ? 'Phone unverified'
+                            : 'លេខទូរស័ព្ទមិនទាន់ផ្ទៀងផ្ទាត់',
+                          currentMember.hasPin
+                            ? isEn
+                              ? 'PIN Protected ✓'
+                              : 'ការពារដោយកូដ PIN ✓'
+                            : isEn
+                            ? 'Set a PIN in Edit'
+                            : 'គួរកំណត់កូដ PIN',
+                          currentMember.telegramVerified
+                            ? isEn
+                              ? 'Telegram Verified ✓'
+                              : 'Telegram ✓'
+                            : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Quick Edit & Logout actions */}
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthError('');
+                        setIsEditingProfile((v) => !v);
+                      }}
+                      title={isEn ? 'Edit Profile' : 'កែប្រែព័ត៌មាន'}
+                      className={`min-h-[40px] px-3 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition ${
+                        isEditingProfile
+                          ? 'bg-[#0D4A3E] text-white border-[#0D4A3E]'
+                          : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                      }`}
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">
+                        {isEditingProfile ? (isEn ? 'Cancel' : 'បិទ') : isEn ? 'Edit' : 'កែប្រែ'}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onLogout}
+                      title={isEn ? 'Sign Out' : 'ចាកចេញ'}
+                      className="min-h-[40px] px-3 rounded-xl bg-red-50 text-red-700 border border-red-200/80 text-xs font-bold flex items-center gap-1 hover:bg-red-100 transition"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">{isEn ? 'Sign Out' : 'ចាកចេញ'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 1-Tap Phone Ownership Verification Banner for Signed-In Unverified Phones */}
+                {!currentMember.phoneVerified && hasAnyExternalAuth && (
+                  <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-3 space-y-2.5">
+                    <div className="flex items-start justify-between gap-2.5">
+                      <div className="space-y-0.5">
+                        <p className="text-xs font-extrabold text-amber-950 flex items-center gap-1.5">
+                          <ShieldCheck className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                          <span>
+                            {isEn
+                              ? 'Verify Phone Number via Telegram'
+                              : 'ផ្ទៀងផ្ទាត់លេខទូរស័ព្ទតាម Telegram (ការពារការបន្លំ)'}
+                          </span>
+                        </p>
+                        <p className="text-[11px] text-amber-800 leading-relaxed">
+                          {hasTelegram
+                            ? isEn
+                              ? 'Confirm your real SIM number via Telegram Share Contact (Free) to lock out spoofing.'
+                              : 'បញ្ជាក់លេខទូរស័ព្ទពិតតាម Telegram Share Contact (Free) ដើម្បីកុំឲ្យអ្នកដទៃយកលេខអ្នកទៅប្រើបាន។'
+                            : isEn
+                            ? 'Send a 6-digit verification code to your Telegram or phone.'
+                            : 'ផ្ញើលេខកូដ ៦ ខ្ទង់ទៅកាន់ Telegram របស់អ្នកដើម្បីបញ្ជាក់ភាពជាម្ចាស់លេខ។'}
+                        </p>
+                      </div>
+                      {hasTelegram && !tgDeepLink && (
+                        <button
+                          type="button"
+                          disabled={tgLinkBusy}
+                          onClick={() => handleStartTelegramLink('contact', currentMember.phone || '')}
+                          className="shrink-0 min-h-[36px] px-3 py-1.5 bg-[#0088cc] text-white font-bold rounded-lg text-[11px] hover:bg-[#0073ad] transition disabled:opacity-60"
+                        >
+                          {tgLinkBusy ? '...' : isEn ? 'Share Free' : 'Share តាម TG'}
+                        </button>
+                      )}
+                    </div>
+
+                    {tgDeepLink && tgMode === 'contact' && (
+                      <div className="bg-white border border-sky-200 rounded-lg p-2.5 space-y-2">
+                        <a
+                          href={tgDeepLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="w-full min-h-[40px] py-2 px-3 bg-[#0088cc] text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 hover:bg-[#0073ad] transition"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>
+                            {isEn
+                              ? 'Open Telegram & Share Phone Number'
+                              : 'បើក Telegram ហើយចុច Share លេខទូរស័ព្ទ'}
+                          </span>
+                        </a>
+                        <div className="flex items-center justify-between text-[11px] text-sky-800">
+                          <span className="flex items-center gap-1 font-medium">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            {isEn ? 'Waiting for Share Contact...' : 'កំពុងរង់ចាំការ Share Contact...'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => tgNonce && pollTelegramNonce(tgNonce)}
+                            className="font-bold underline"
+                          >
+                            {isEn ? 'Check now' : 'ពិនិត្យម្តងទៀត'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {caps?.phoneOtpReady && (
+                      <div className="bg-white border border-amber-200/80 rounded-lg p-2.5 space-y-2">
+                        {!otpSent ? (
+                          <div className="flex gap-2">
+                            <input
+                              type="tel"
+                              value={otpPhone}
+                              onChange={(e) => setOtpPhone(e.target.value)}
+                              placeholder="012 345 678"
+                              className="flex-1 min-h-[38px] px-2.5 py-1.5 bg-stone-50 border border-stone-200 rounded-lg text-xs font-mono-num"
+                            />
+                            <button
+                              type="button"
+                              disabled={otpBusy}
+                              onClick={handleSendOtp}
+                              className="shrink-0 min-h-[38px] px-3 py-1.5 bg-[#0D4A3E] text-white font-bold rounded-lg text-[11px] hover:bg-[#09362D] transition disabled:opacity-60"
+                            >
+                              {otpBusy ? '...' : isEn ? 'Send OTP' : 'ផ្ញើកូដ ៦ ខ្ទង់'}
+                            </button>
+                          </div>
+                        ) : (
+                          <form onSubmit={handleVerifyOtp} className="flex gap-2">
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={6}
+                              value={otpCode}
+                              onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                              placeholder="••••••"
+                              className="flex-1 min-h-[38px] px-2.5 py-1.5 bg-stone-50 border border-stone-200 rounded-lg text-center font-mono-num font-bold tracking-[0.3em] text-sm"
+                            />
+                            <button
+                              type="submit"
+                              disabled={otpBusy}
+                              className="shrink-0 min-h-[38px] px-3 py-1.5 bg-[#0D4A3E] text-white font-bold rounded-lg text-[11px]"
+                            >
+                              {otpBusy ? '...' : isEn ? 'Confirm' : 'បញ្ជាក់'}
+                            </button>
+                          </form>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Inline Profile & PIN Editor Drawer */}
+                {isEditingProfile && (
+                  <div className="pt-3.5 border-t border-stone-100 space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[11px] font-bold text-stone-600 block mb-1">
+                          {isEn ? 'Display Name' : 'ឈ្មោះ'}
+                        </label>
+                        <input
+                          type="text"
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          className="w-full min-h-[44px] px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:border-[#0D4A3E] focus:bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-bold text-stone-600 block mb-1">
+                          {isEn ? 'Phone Number' : 'លេខទូរស័ព្ទ'}
+                        </label>
+                        <input
+                          type="tel"
+                          value={editPhone}
+                          onChange={(e) => setEditPhone(e.target.value)}
+                          placeholder="012 345 678"
+                          className="w-full min-h-[44px] px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm font-mono-num focus:outline-none focus:border-[#0D4A3E] focus:bg-white"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] font-bold text-stone-600 block mb-1">
+                        Telegram @username
+                      </label>
+                      <input
+                        type="text"
+                        value={editTg}
+                        onChange={(e) => setEditTg(e.target.value)}
+                        placeholder="@username"
+                        className="w-full min-h-[44px] px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:border-[#0D4A3E] focus:bg-white"
+                      />
+                    </div>
+
+                    {/* PIN Security Configuration */}
+                    <div className="bg-stone-50 rounded-xl p-3 border border-stone-200/80 space-y-2.5">
+                      <p className="text-xs font-bold text-stone-700 flex items-center gap-1.5">
+                        <KeyRound className="w-3.5 h-3.5 text-[#0D4A3E]" />
+                        {currentMember.hasPin
+                          ? isEn
+                            ? 'Account Security PIN (Active)'
+                            : 'កូដ PIN ការពារគណនី (កំពុងបើក)'
+                          : isEn
+                          ? 'Set a Security PIN'
+                          : 'កំណត់កូដ PIN ការពារគណនី'}
+                      </p>
+
+                      {currentMember.hasPin && (
+                        <input
+                          type="password"
+                          inputMode="numeric"
+                          maxLength={8}
+                          value={editCurrentPin}
+                          onChange={(e) => setEditCurrentPin(e.target.value.replace(/\D/g, ''))}
+                          placeholder={
+                            isEn
+                              ? 'Current PIN (needed to change Phone or PIN)'
+                              : 'កូដ PIN ចាស់ (ចាំបាច់ពេលប្តូរលេខទូរស័ព្ទ ឬ PIN)'
+                          }
+                          className="w-full min-h-[42px] px-3 py-2 bg-white border border-stone-200 rounded-xl text-xs font-mono-num tracking-widest focus:outline-none focus:border-[#0D4A3E]"
+                        />
+                      )}
+
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={8}
+                        value={editNewPin}
+                        onChange={(e) => setEditNewPin(e.target.value.replace(/\D/g, ''))}
+                        placeholder={
+                          currentMember.hasPin
+                            ? isEn
+                              ? 'New 4–8 digit PIN (leave blank to keep)'
+                              : 'កូដ PIN ថ្មី ៤–៨ ខ្ទង់ (ទុកទំនេរបើមិនប្តូរ)'
+                            : isEn
+                            ? 'Set 4–8 digit PIN (e.g. 4829)'
+                            : 'ដាក់កូដ PIN ៤–៨ ខ្ទង់ (ឧ. 4829)'
+                        }
+                        className="w-full min-h-[42px] px-3 py-2 bg-white border border-stone-200 rounded-xl text-xs font-mono-num tracking-widest focus:outline-none focus:border-[#0D4A3E]"
+                      />
+                    </div>
+
+                    {authError && (
+                      <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-medium px-3 py-2 rounded-xl">
+                        {authError}
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={editBusy}
+                        onClick={() => handleSaveProfile(false)}
+                        className="flex-1 min-h-[44px] px-4 py-2 bg-[#0D4A3E] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 hover:bg-[#09362D] transition disabled:opacity-60"
+                      >
+                        {editBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                        <span>{isEn ? 'Save Changes' : 'រក្សាទុកការកែប្រែ'}</span>
+                      </button>
+
+                      {currentMember.hasPin && (currentMember.telegramVerified || currentMember.phoneVerified) && (
+                        <button
+                          type="button"
+                          disabled={editBusy}
+                          onClick={() => handleSaveProfile(true)}
+                          className="min-h-[44px] px-3 py-2 bg-white border border-red-200 text-red-700 font-bold rounded-xl text-xs hover:bg-red-50 transition disabled:opacity-60"
+                        >
+                          {isEn ? 'Remove PIN' : 'លុប PIN'}
+                        </button>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={editBusy}
+                      onClick={handleLogoutAllDevices}
+                      className="w-full min-h-[40px] px-3 py-2 bg-stone-100 hover:bg-red-50 text-stone-700 hover:text-red-700 border border-stone-200 hover:border-red-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>
+                        {isEn
+                          ? 'Sign Out From All Devices (Security Reset)'
+                          : 'ផ្តាច់ការចូលពីគ្រប់ឧបករណ៍ទាំងអស់ (ការពារការលួចប្រើ)'}
+                      </span>
+                    </button>
+                  </div>
+                )}
+
+                {/* 3-Metric Summary Row (1 datum per cell) */}
+                <div className="grid grid-cols-3 gap-2.5 pt-2 border-t border-stone-100 text-center">
+                  <div className="bg-stone-50 rounded-xl p-2.5">
+                    <p className="text-[11px] text-stone-500 font-medium">
+                      {isEn ? 'Orders' : 'ការកម្ម៉ង់'}
+                    </p>
+                    <p className="font-extrabold font-mono-num text-base text-[#1E2420] mt-0.5">
+                      {myOrders.length}
+                    </p>
+                  </div>
+                  <div className="bg-emerald-50/70 rounded-xl p-2.5">
+                    <p className="text-[11px] text-[#0D4A3E] font-medium">
+                      {isEn ? 'Points' : 'ពិន្ទុសន្សំ'}
+                    </p>
+                    <p className="font-extrabold font-mono-num text-base text-[#0D4A3E] mt-0.5">
+                      {currentMember.points || 0} ★
+                    </p>
+                  </div>
+                  <div className="bg-stone-50 rounded-xl p-2.5">
+                    <p className="text-[11px] text-stone-500 font-medium">
+                      {isEn ? 'Total Spent' : 'ចំណាយសរុប'}
+                    </p>
+                    <p className="font-extrabold font-mono-num text-base text-[#1E2420] mt-0.5">
+                      ${totalSpent.toFixed(2)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Orders Header + Refresh + Status Filter Tabs */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between px-1">
+                  <h5 className="font-extrabold text-sm text-[#1E2420]">
+                    {isEn ? 'Order History' : 'ប្រវត្តិការកម្ម៉ង់របស់ខ្ញុំ'}
+                  </h5>
+                  <button
+                    type="button"
+                    onClick={handleManualRefreshOrders}
+                    className="min-h-[36px] px-2.5 rounded-lg text-xs font-bold text-[#0D4A3E] hover:bg-emerald-50 flex items-center gap-1 transition"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${refreshingOrders ? 'animate-spin' : ''}`} />
+                    <span>{isEn ? 'Refresh' : 'ធ្វើបច្ចុប្បន្នភាព'}</span>
+                  </button>
+                </div>
+
+                {/* Filter Tabs */}
+                <div className="grid grid-cols-3 gap-1.5 bg-stone-200/70 p-1 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setOrderFilter('all')}
+                    className={`min-h-[38px] rounded-lg text-xs font-bold transition ${
+                      orderFilter === 'all'
+                        ? 'bg-white text-[#1E2420] shadow-xs'
+                        : 'text-stone-600 hover:text-stone-900'
+                    }`}
+                  >
+                    {isEn ? `All (${myOrders.length})` : `ទាំងអស់ (${myOrders.length})`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrderFilter('active')}
+                    className={`min-h-[38px] rounded-lg text-xs font-bold transition ${
+                      orderFilter === 'active'
+                        ? 'bg-white text-[#0D4A3E] shadow-xs'
+                        : 'text-stone-600 hover:text-stone-900'
+                    }`}
+                  >
+                    {isEn ? `Active (${activeOrdersCount})` : `កំពុងដំណើរការ (${activeOrdersCount})`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrderFilter('completed')}
+                    className={`min-h-[38px] rounded-lg text-xs font-bold transition ${
+                      orderFilter === 'completed'
+                        ? 'bg-white text-emerald-700 shadow-xs'
+                        : 'text-stone-600 hover:text-stone-900'
+                    }`}
+                  >
+                    {isEn ? `Done (${completedOrdersCount})` : `បានបញ្ចប់ (${completedOrdersCount})`}
+                  </button>
+                </div>
+
+                {filteredOrders.length === 0 ? (
+                  <div className="bg-white rounded-2xl p-6 text-center border border-stone-200 text-xs text-stone-500">
+                    {myOrders.length === 0
+                      ? isEn
+                        ? 'No orders yet — place your first order from the menu!'
+                        : 'មិនទាន់មានការកម្ម៉ង់នៅឡើយទេ — ចាប់ផ្តើមកម្ម៉ង់ភេសជ្ជៈឆ្ងាញ់ៗឥឡូវនេះ!'
+                      : isEn
+                      ? 'No orders in this filter.'
+                      : 'មិនមានការកម្ម៉ង់ក្នុងប្រភេទនេះទេ។'}
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {filteredOrders.map((o) => {
+                      const st = getOrderStatusText(o.status, isEn);
+                      const isLiveDelivery = o.type === 'delivery' && o.status !== 'Completed';
+                      return (
+                        <div
+                          key={o.id}
+                          className="bg-white rounded-2xl p-3.5 sm:p-4 border border-stone-200/90 space-y-2.5"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="font-mono-num font-bold text-xs text-[#1E2420]">
+                                #{o.id}
+                              </p>
+                              <p className="text-[11px] text-stone-500 mt-0.5">
+                                {[o.timestamp, getOrderTypeLabel(o.type, isEn)].filter(Boolean).join(' · ')}
+                              </p>
                             </div>
+                            <div className="text-right shrink-0">
+                              <p className="font-mono-num font-extrabold text-sm text-[#0D4A3E]">
+                                ${Number(o.grandTotal || 0).toFixed(2)}
+                              </p>
+                              <p className={`text-[11px] font-bold mt-0.5 ${st.tone}`}>{st.label}</p>
+                            </div>
+                          </div>
 
-                            <div className="flex gap-2">
+                          <p className="text-xs text-stone-600 line-clamp-2">
+                            {(o.items || []).map((i) => `${i.qty}× ${i.name}`).join(', ')}
+                          </p>
+
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            {isLiveDelivery && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenLiveTrack(o.id)}
+                                className="flex-1 min-h-[40px] px-3 bg-[#0D4A3E] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-[#09362D] transition"
+                              >
+                                <MapPin className="w-3.5 h-3.5" />
+                                <span>{isEn ? 'Live Map' : 'តាមដាន Live'}</span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => onReorder(o)}
+                              className="flex-1 min-h-[40px] px-3 bg-stone-100 hover:bg-stone-200 text-[#1E2420] rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>{isEn ? 'Order Again' : 'កម្ម៉ង់ម្តងទៀត'}</span>
+                            </button>
+
+                            {o.status === 'Completed' && !o.feedback && (
                               <button
                                 type="button"
                                 onClick={() => {
-                                  setOtpStep('input');
-                                  setErrorMsg('');
+                                  setReviewOrderId(reviewOrderId === o.id ? null : o.id);
+                                  setReviewRating(5);
+                                  setReviewComment('');
                                 }}
-                                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-colors"
+                                className="flex-1 min-h-[40px] px-3 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition"
                               >
-                                {isEn ? 'Change Number' : 'ប្តូរលេខ'}
+                                <MessageSquare className="w-3.5 h-3.5" />
+                                <span>{isEn ? 'Rate Order' : 'វាយតម្លៃ'}</span>
                               </button>
+                            )}
+                          </div>
+
+                          {o.feedback && (
+                            <div className="bg-stone-50 rounded-xl px-3 py-2 text-xs text-stone-600 flex items-center gap-1.5">
+                              <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0" />
+                              <span className="font-bold text-stone-800">{o.feedback.rating}/5</span>
+                              {o.feedback.comment && (
+                                <span className="truncate">— &ldquo;{o.feedback.comment}&rdquo;</span>
+                              )}
+                            </div>
+                          )}
+
+                          {reviewOrderId === o.id && (
+                            <div className="pt-2 border-t border-stone-100 space-y-2.5">
+                              <div className="flex items-center gap-1">
+                                {[1, 2, 3, 4, 5].map((starVal) => (
+                                  <button
+                                    key={starVal}
+                                    type="button"
+                                    onClick={() => setReviewRating(starVal)}
+                                    className="p-1"
+                                    aria-label={`Rate ${starVal} stars`}
+                                  >
+                                    <Star
+                                      className={`w-6 h-6 transition ${
+                                        starVal <= reviewRating
+                                          ? 'text-amber-500 fill-amber-500'
+                                          : 'text-stone-300'
+                                      }`}
+                                    />
+                                  </button>
+                                ))}
+                              </div>
+                              <input
+                                type="text"
+                                value={reviewComment}
+                                onChange={(e) => setReviewComment(e.target.value)}
+                                placeholder={
+                                  isEn ? 'Share your feedback...' : 'សរសេរមតិរបស់អ្នក (ឧ. កាហ្វេឆ្ងាញ់)...'
+                                }
+                                className="w-full min-h-[42px] px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:outline-none focus:border-[#0D4A3E]"
+                              />
                               <button
-                                type="submit"
-                                disabled={loading}
-                                className="flex-1 bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold py-2.5 rounded-xl text-sm transition-colors active:scale-[0.98]"
+                                type="button"
+                                disabled={submittingReview}
+                                onClick={() => handleSaveReview(o.id)}
+                                className="w-full min-h-[42px] bg-[#0D4A3E] text-white font-bold rounded-xl text-xs hover:bg-[#09362D] transition disabled:opacity-60"
                               >
-                                {loading
-                                  ? isEn
-                                    ? 'Verifying...'
-                                    : 'កំពុងផ្ទៀងផ្ទាត់...'
-                                  : isEn
-                                    ? 'Verify OTP'
-                                    : 'បញ្ជាក់លេខកូដ OTP'}
+                                {isEn ? 'Submit Review' : 'ផ្ញើការវាយតម្លៃ'}
                               </button>
                             </div>
-                          </form>
-                        )
-                      ) : !capabilities?.telegramContactReady ? (
-                        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2 text-xs text-amber-950 leading-relaxed">
-                          <p className="font-bold">
-                            {isEn
-                              ? 'How to enable 100% Free Phone Verification'
-                              : 'របៀបបើកផ្ទៀងផ្ទាត់លេខទូរស័ព្ទ Free ១០០%'}
-                          </p>
-                          <p>
-                            {isEn
-                              ? 'Shop owner simply creates a free Bot from @BotFather on Telegram and enters Bot Username + Bot Token in Shop Admin → Settings.'
-                              : 'ម្ចាស់ហាងគ្រាន់តែបង្កើត Bot Free ពី @BotFather ក្នុង Telegram រួចបញ្ចូល Bot Username និង Bot Token នៅក្នុង គ្រប់គ្រងហាង → ការកំណត់ហាង ដើម្បីផ្ទៀងផ្ទាត់លេខទូរស័ព្ទដោយអត់អស់លុយ SMS!'}
-                          </p>
+                          )}
                         </div>
-                      ) : null}
-                    </motion.div>
-                  )}
-                </>
-              )}
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+          )}
+
+          {/* Shop Contact Footer Info if needed */}
+          {(shopSettings.tgUsername || shopSettings.phoneHotline) && !currentMember && (
+            <p className="text-[11px] text-center text-stone-400">
+              {isEn ? 'Need help?' : 'ត្រូវការជំនួយ?'}{' '}
+              {[
+                shopSettings.tgUsername ? `Telegram: ${shopSettings.tgUsername}` : null,
+                shopSettings.phoneHotline ? `Tel: ${shopSettings.phoneHotline}` : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          )}
+        </div>
+      </motion.div>
+    </motion.div>
   );
-}
+};

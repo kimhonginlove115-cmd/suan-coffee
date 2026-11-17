@@ -58,6 +58,7 @@ import {
   normalizeShopSettings,
   normalizeToppings,
   resolveAssetUrl,
+  safeDel,
   safeGet,
   safeSessionDel,
   safeSessionGet,
@@ -139,7 +140,10 @@ export default function App() {
   const [currentMember, setCurrentMember] = useState<Member | null>(() =>
     safeGet<Member | null>('cafe_current_member_v15', null)
   );
-  const [authToken, setAuthToken] = useState<string | null>(() => safeSessionGet('cafe_auth_token'));
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    const persisted = safeGet<string | null>('cafe_auth_token_v15', null);
+    return persisted || safeSessionGet('cafe_auth_token');
+  });
   const [adminToken, setAdminToken] = useState<string | null>(() => safeSessionGet('cafe_admin_token'));
   const isAdminUnlocked = Boolean(adminToken);
 
@@ -164,6 +168,7 @@ export default function App() {
   );
 
   const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [authPrefillPhone, setAuthPrefillPhone] = useState('');
   const [isPinOpen, setIsPinOpen] = useState(false);
   const [locationPickerState, setLocationPickerState] = useState<{
     open: boolean;
@@ -362,7 +367,15 @@ export default function App() {
   );
 
   const syncOrderEverywhere = useCallback(
-    async (order: Order): Promise<{ ok: boolean; error?: string; order?: Order }> => {
+    async (
+      order: Order
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      order?: Order;
+      requiresPhoneAuth?: boolean;
+      phone?: string;
+    }> => {
       let serverError: string | undefined;
       let savedOrder: Order | undefined;
       try {
@@ -370,7 +383,10 @@ export default function App() {
           '/api/orders',
           {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+            },
             body: JSON.stringify(order),
           },
           10000
@@ -379,10 +395,17 @@ export default function App() {
           ok?: boolean;
           error?: string;
           order?: Order;
+          requiresPhoneAuth?: boolean;
+          phone?: string;
         };
         if (!res.ok || data.ok === false) {
           serverError = data.error || 'ការបញ្ជាក់ការកម្ម៉ង់ត្រូវបានបដិសេធដោយ Server';
-          return { ok: false, error: serverError };
+          return {
+            ok: false,
+            error: serverError,
+            requiresPhoneAuth: Boolean(data.requiresPhoneAuth),
+            phone: data.phone,
+          };
         }
         savedOrder = data.order;
       } catch {
@@ -413,7 +436,7 @@ export default function App() {
       }
       return { ok: true, order: savedOrder };
     },
-    [shopSettings.firebaseUrl]
+    [shopSettings.firebaseUrl, authToken]
   );
 
   const applyFetchedOrders = useCallback(
@@ -440,7 +463,11 @@ export default function App() {
               myIds.includes(o.id) ||
               (member &&
                 ((o.customer?.memberId && String(o.customer.memberId) === String(member.id)) ||
-                  (memberPhoneDigits && custPhoneDigits && memberPhoneDigits === custPhoneDigits)));
+                  (!o.customer?.memberId &&
+                    member.phoneVerified &&
+                    memberPhoneDigits &&
+                    custPhoneDigits &&
+                    memberPhoneDigits === custPhoneDigits)));
 
             if (isMine && (o.status === 'Brewing' || o.status === 'Ready' || o.status === 'Completed')) {
               playOrderConfirmedSound();
@@ -557,6 +584,7 @@ export default function App() {
     setCurrentMember(member);
     if (token) {
       setAuthToken(token);
+      safeSet('cafe_auth_token_v15', token);
       safeSessionSet('cafe_auth_token', token);
     }
     setMembers((prev) => {
@@ -678,11 +706,19 @@ export default function App() {
 
     if (authToken) {
       fetchWithTimeout('/api/auth/me', { headers: { Authorization: `Bearer ${authToken}` } }, 8000)
-        .then((r) => (r.ok ? r.json() : null))
+        .then(async (r) => {
+          if (r.status === 401 || r.status === 404) return { invalid: true };
+          if (!r.ok) return null;
+          return r.json();
+        })
         .then((data) => {
-          if (data?.ok && data.member) setCurrentMember(data.member);
-          else {
+          if (data?.ok && data.member) {
+            setCurrentMember(data.member);
+          } else if (data?.invalid) {
             setAuthToken(null);
+            setCurrentMember(null);
+            safeDel('cafe_auth_token_v15');
+            safeDel('cafe_current_member_v15');
             safeSessionDel('cafe_auth_token');
           }
         })
@@ -720,9 +756,11 @@ export default function App() {
         if (!currentMember) return false;
         const mPhone = currentMember.phone ? currentMember.phone.replace(/\D/g, '') : '';
         const cPhone = o.customer?.phone ? o.customer.phone.replace(/\D/g, '') : '';
+        if (o.customer?.memberId) {
+          return String(o.customer.memberId) === String(currentMember.id);
+        }
         return Boolean(
-          (o.customer?.memberId && String(o.customer.memberId) === String(currentMember.id)) ||
-            (mPhone && cPhone && mPhone === cPhone)
+          currentMember.phoneVerified && mPhone && cPhone && mPhone === cPhone
         );
       }),
     [orders, myOrderIds, currentMember]
@@ -778,9 +816,11 @@ export default function App() {
     }
     setCurrentMember(null);
     setAuthToken(null);
+    safeDel('cafe_auth_token_v15');
+    safeDel('cafe_current_member_v15');
     safeSessionDel('cafe_auth_token');
     setIsAuthOpen(false);
-    showToast('បានចាកចេញពីគណនីដោយសុវត្ថិភាព');
+    showToast(lang === 'en' ? 'Signed out safely' : 'បានចាកចេញពីគណនីដោយសុវត្ថិភាព');
   };
 
   const categories = useMemo(
@@ -912,6 +952,8 @@ export default function App() {
             paymentPaidAmount: pv.paidAmount,
             paymentCurrency: pv.currency,
             paymentRef: pv.transactionRef,
+            paymentBankName: pv.bankName,
+            paymentSlipHash: pv.slipHash,
             paymentMd5: pv.md5,
             paymentSlipImg: pv.slipImg,
             paymentProofToken: pv.proofToken,
@@ -922,6 +964,10 @@ export default function App() {
     const syncRes = await syncOrderEverywhere(orderForServer);
     if (!syncRes.ok) {
       showToast(syncRes.error || 'ការបញ្ជាក់ការកម្ម៉ង់មិនជោគជ័យទេ');
+      if (syncRes.requiresPhoneAuth) {
+        if (syncRes.phone) setAuthPrefillPhone(syncRes.phone);
+        setIsAuthOpen(true);
+      }
       return false;
     }
 
@@ -2096,16 +2142,25 @@ export default function App() {
       <AuthModal
         lang={lang}
         isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
+        onClose={() => {
+          setIsAuthOpen(false);
+          setAuthPrefillPhone('');
+        }}
         currentMember={currentMember}
         authToken={authToken}
         shopSettings={shopSettings}
         orders={orders}
+        myOrderIds={myOrderIds}
+        prefillPhone={authPrefillPhone}
         onAuthenticated={handleAuthenticated}
         onLogout={handleLogout}
         onReorder={handleReorder}
         onSubmitFeedback={handleSubmitOrderFeedback}
         onRefreshOrders={fetchOrdersFromSources}
+        onOpenLiveTrack={(orderId) => {
+          setIsAuthOpen(false);
+          setLiveTrackOrderId(orderId);
+        }}
         onToast={showToast}
       />
 

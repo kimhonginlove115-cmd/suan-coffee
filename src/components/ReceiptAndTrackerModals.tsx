@@ -162,7 +162,15 @@ export function ReceiptModal({
                 <div className="flex items-center justify-between gap-2 pt-1 text-[11px] font-bold text-emerald-700">
                   <span className="inline-flex items-center gap-1">
                     <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                    <span>{isEn ? 'Payment Verified' : 'បានផ្ទៀងផ្ទាត់ប្រាក់រួចរាល់'}</span>
+                    <span>
+                      {order.paymentVerifiedBy === 'auto_slip_ocr'
+                        ? isEn
+                          ? `Auto Slip Verified${order.paymentBankName ? ` (${order.paymentBankName})` : ''}`
+                          : `ផ្ទៀងផ្ទាត់វិក្កយបត្រ Auto${order.paymentBankName ? ` (${order.paymentBankName})` : ''}`
+                        : isEn
+                          ? 'Payment Verified'
+                          : 'បានផ្ទៀងផ្ទាត់ប្រាក់រួចរាល់'}
+                    </span>
                   </span>
                   {order.paymentRef && (
                     <span className="font-mono-num text-[10px] text-slate-500">

@@ -15,8 +15,10 @@ import {
   Plus,
   QrCode,
   RefreshCw,
+  ScanLine,
   Send,
   ShieldCheck,
+  Sparkles,
   Upload,
   X,
 } from 'lucide-react';
@@ -36,10 +38,12 @@ import { playPaymentVerifiedSound, unlockAudio } from '../utils/sound';
 export interface VerifiedPaymentState {
   sessionId: string;
   proofToken: string;
-  verifiedBy: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'slip_ref';
+  verifiedBy: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'auto_slip_ocr' | 'slip_ref';
   paidAmount: number;
   currency: 'USD' | 'KHR';
   transactionRef: string;
+  bankName?: string;
+  slipHash?: string;
   md5: string;
   slipImg?: string;
 }
@@ -129,16 +133,17 @@ export function CartModal({
     'idle' | 'creating' | 'pending' | 'awaiting_owner' | 'verified' | 'amount_mismatch' | 'rejected' | 'expired'
   >('idle');
   const [payError, setPayError] = useState('');
-  const [verifyCaps, setVerifyCaps] = useState<{ bakong: boolean; telegram: boolean }>({
+  const [verifyCaps, setVerifyCaps] = useState<{ bakong: boolean; telegram: boolean; slipAuto: boolean }>({
     bakong: false,
     telegram: false,
+    slipAuto: false,
   });
   const [verifiedPayment, setVerifiedPayment] = useState<VerifiedPaymentState | null>(null);
   const [checkingNow, setCheckingNow] = useState(false);
   const [sendingTgVerify, setSendingTgVerify] = useState(false);
   const [verifyingSlip, setVerifyingSlip] = useState(false);
+  const [needsOwnerFallback, setNeedsOwnerFallback] = useState(false);
   const [paymentRefInput, setPaymentRefInput] = useState('');
-  const [paidAmountInput, setPaidAmountInput] = useState('');
   const [slipImgData, setSlipImgData] = useState('');
   const activeSessionKeyRef = useRef<string>('');
 
@@ -194,8 +199,8 @@ export function CartModal({
     setPayExpiresAt(0);
     setPayStatus('idle');
     setPayError('');
+    setNeedsOwnerFallback(false);
     setPaymentRefInput('');
-    setPaidAmountInput('');
     setSlipImgData('');
   }, []);
 
@@ -232,7 +237,6 @@ export function CartModal({
 
     const expectedCurrAmount =
       khqrCurr === 'KHR' ? Math.max(100, Math.round(dynamicKhqr.amount)) : Number(grandTotal.toFixed(2));
-    setPaidAmountInput(String(expectedCurrAmount));
 
     const controller = new AbortController();
     fetchWithTimeout(
@@ -262,6 +266,7 @@ export function CartModal({
           setVerifyCaps({
             bakong: Boolean(data.bakongVerifyReady),
             telegram: Boolean(data.telegramOrderVerifyReady),
+            slipAuto: Boolean(data.slipAutoVerifyReady),
           });
           setPayExpiresAt(Date.now() + (Number(data.expiresInSeconds) || 600) * 1000);
           setPayStatus('pending');
@@ -437,7 +442,6 @@ export function CartModal({
           body: JSON.stringify({
             sessionId: paySessionId,
             paymentRef: paymentRefInput.trim(),
-            paidAmount: paidAmountInput.trim(),
             slipImg: slipImgData,
             customerName: custName.trim() || currentMember?.name || (orderType === 'dinein' ? `ភ្ញៀវតុលេខ ${tableNum}` : 'ភ្ញៀវ'),
             customerPhone: (orderType === 'delivery' ? custPhone : dineInPhone).trim() || currentMember?.phone || '',
@@ -464,58 +468,77 @@ export function CartModal({
     }
   };
 
-  const handleVerifySlipInstant = async () => {
-    unlockAudio();
-    if (!paySessionId || verifyingSlip) return;
-    setPayError('');
-    setVerifyingSlip(true);
-    try {
-      const res = await fetchWithTimeout(
-        '/api/payments/khqr/verify-slip',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId: paySessionId,
-            paidAmount: Number(paidAmountInput),
-            paymentRef: paymentRefInput.trim(),
-            slipImg: slipImgData,
-          }),
-        },
-        10000
-      );
-      const data = await res.json();
-      if (!data.ok || !data.proofToken) {
-        if (data?.status === 'amount_mismatch') setPayStatus('amount_mismatch');
+  const handleVerifySlipAuto = useCallback(
+    async (overrideSlip?: string) => {
+      unlockAudio();
+      const targetSlip = overrideSlip || slipImgData;
+      if (!paySessionId || verifyingSlip) return;
+      if (!targetSlip) {
         setPayError(
-          data.error ||
-            (isEn ? 'Verification failed. Check paid amount & reference.' : 'ការផ្ទៀងផ្ទាត់មិនជោគជ័យ! សូមពិនិត្យចំនួនលុយ និងលេខប្រតិបត្តិការណ៍។')
+          isEn
+            ? 'Please upload your bank transfer receipt screenshot first.'
+            : 'សូម Upload រូបវិក្កយបត្រវេរលុយពីធនាគារជាមុនសិន!'
         );
         return;
       }
-      setPayStatus('verified');
-      setVerifiedPayment({
-        sessionId: paySessionId,
-        proofToken: data.proofToken,
-        verifiedBy: data.verifiedBy || 'slip_ref',
-        paidAmount: Number(data.paidAmount || dynamicKhqr.amount),
-        currency: data.currency === 'KHR' ? 'KHR' : 'USD',
-        transactionRef: data.transactionRef || paymentRefInput.trim(),
-        md5: payMd5,
-        slipImg: slipImgData || undefined,
-      });
-      playPaymentVerifiedSound();
-      onToast(
-        isEn
-          ? '✅ Payment amount & slip verified!'
-          : '✅ បានផ្ទៀងផ្ទាត់ចំនួនលុយ និងវិក្កយបត្រជោគជ័យ!'
-      );
-    } catch {
-      setPayError(isEn ? 'Could not verify payment' : 'មានបញ្ហាផ្ទៀងផ្ទាត់ការបង់ប្រាក់');
-    } finally {
-      setVerifyingSlip(false);
-    }
-  };
+      setPayError('');
+      setNeedsOwnerFallback(false);
+      setVerifyingSlip(true);
+      try {
+        const res = await fetchWithTimeout(
+          '/api/payments/khqr/verify-slip',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId: paySessionId,
+              paymentRef: paymentRefInput.trim(),
+              slipImg: targetSlip,
+            }),
+          },
+          22000
+        );
+        const data = await res.json();
+        if (!data.ok || !data.proofToken) {
+          if (data?.status === 'amount_mismatch') setPayStatus('amount_mismatch');
+          else if (data?.status === 'rejected') setPayStatus('rejected');
+          if (data?.needsOwnerReview) setNeedsOwnerFallback(true);
+          setPayError(
+            data.error ||
+              (isEn
+                ? 'Receipt verification failed. Please check receipt screenshot or request owner check.'
+                : 'ការផ្ទៀងផ្ទាត់វិក្កយបត្រមិនជោគជ័យ! សូមពិនិត្យរូបវិក្កយបត្រ ឬផ្ញើជូនម្ចាស់ហាងពិនិត្យ។')
+          );
+          return;
+        }
+        setPayStatus('verified');
+        setVerifiedPayment({
+          sessionId: paySessionId,
+          proofToken: data.proofToken,
+          verifiedBy: data.verifiedBy || 'auto_slip_ocr',
+          paidAmount: Number(data.paidAmount || dynamicKhqr.amount),
+          currency: data.currency === 'KHR' ? 'KHR' : 'USD',
+          transactionRef: data.transactionRef || paymentRefInput.trim() || billMeta.billNumber,
+          bankName: data.bankName,
+          slipHash: data.slipHash,
+          md5: payMd5,
+          slipImg: targetSlip,
+        });
+        playPaymentVerifiedSound();
+        onToast(
+          isEn
+            ? `✅ Verified ${data.bankName ? `${data.bankName} ` : ''}receipt automatically!`
+            : `✅ បានស្កេនផ្ទៀងផ្ទាត់វិក្កយបត្រ${data.bankName ? ` (${data.bankName})` : ''} ស្វ័យប្រវត្តិជោគជ័យ!`
+        );
+      } catch {
+        setNeedsOwnerFallback(true);
+        setPayError(isEn ? 'Could not verify receipt right now' : 'មានបញ្ហាស្កេនផ្ទៀងផ្ទាត់វិក្កយបត្រ');
+      } finally {
+        setVerifyingSlip(false);
+      }
+    },
+    [paySessionId, verifyingSlip, slipImgData, paymentRefInput, dynamicKhqr.amount, billMeta.billNumber, payMd5, onToast, isEn]
+  );
 
   const handleApplyPromo = () => {
     const code = promoInput.trim().toUpperCase();
@@ -747,13 +770,27 @@ export function CartModal({
                   placeholder={isEn ? 'Your Name *' : 'ឈ្មោះ *'}
                   className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs focus:outline-none focus:border-[#0D4A3E]"
                 />
-                <input
-                  type="tel"
-                  value={custPhone}
-                  onChange={(e) => setCustPhone(e.target.value)}
-                  placeholder={isEn ? 'Phone Number *' : 'លេខទូរស័ព្ទ *'}
-                  className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs font-mono-num focus:outline-none focus:border-[#0D4A3E]"
-                />
+                <div className="space-y-1">
+                  <input
+                    type="tel"
+                    value={custPhone}
+                    onChange={(e) => setCustPhone(e.target.value)}
+                    placeholder={isEn ? 'Phone Number *' : 'លេខទូរស័ព្ទ *'}
+                    className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs font-mono-num focus:outline-none focus:border-[#0D4A3E]"
+                  />
+                  {currentMember?.phoneVerified &&
+                    custPhone.replace(/\D/g, '').replace(/^855/, '0') ===
+                      (currentMember.phone || '').replace(/\D/g, '').replace(/^855/, '0') && (
+                      <p className="text-[11px] font-medium text-emerald-700 flex items-center gap-1 px-1">
+                        <CheckCircle2 className="w-3 h-3 shrink-0" />
+                        <span>
+                          {isEn
+                            ? 'Verified member phone protected against spoofing'
+                            : 'លេខទូរស័ព្ទបានផ្ទៀងផ្ទាត់ & ការពារការបន្លំ ✓'}
+                        </span>
+                      </p>
+                    )}
+                </div>
                 <input
                   type="text"
                   value={custTg}
@@ -954,17 +991,21 @@ export function CartModal({
                         ? isEn
                           ? '✓ Auto-verified by Bakong NBC API'
                           : '✓ ផ្ទៀងផ្ទាត់ស្វ័យប្រវត្តិតាម Bakong NBC API'
-                        : verifiedPayment.verifiedBy === 'telegram_owner'
+                        : verifiedPayment.verifiedBy === 'auto_slip_ocr'
                           ? isEn
-                            ? '✓ Confirmed by Shop Owner on Telegram'
-                            : '✓ បញ្ជាក់ទទួលប្រាក់ដោយម្ចាស់ហាងតាម Telegram'
-                          : verifiedPayment.verifiedBy === 'web_admin'
+                            ? `✓ Auto Slip AI Verified${verifiedPayment.bankName ? ` · ${verifiedPayment.bankName}` : ''} (Anti-Fraud & Hash Guard)`
+                            : `✓ ស្កេនវិក្កយបត្រ Auto${verifiedPayment.bankName ? ` (${verifiedPayment.bankName})` : ''} · ការពារក្លែងបន្លំ 100%`
+                          : verifiedPayment.verifiedBy === 'telegram_owner'
                             ? isEn
-                              ? '✓ Confirmed by Shop Owner on Website'
-                              : '✓ បញ្ជាក់ទទួលប្រាក់ដោយម្ចាស់ហាងលើគេហទំព័រ'
-                            : isEn
-                              ? '✓ Exact amount & receipt reference matched'
-                              : '✓ ផ្ទៀងផ្ទាត់ចំនួនទឹកប្រាក់ & លេខយោងត្រឹមត្រូវ'}
+                              ? '✓ Confirmed by Shop Owner on Telegram'
+                              : '✓ បញ្ជាក់ទទួលប្រាក់ដោយម្ចាស់ហាងតាម Telegram'
+                            : verifiedPayment.verifiedBy === 'web_admin'
+                              ? isEn
+                                ? '✓ Confirmed by Shop Owner on Website'
+                                : '✓ បញ្ជាក់ទទួលប្រាក់ដោយម្ចាស់ហាងលើគេហទំព័រ'
+                              : isEn
+                                ? '✓ Exact amount & receipt reference matched'
+                                : '✓ ផ្ទៀងផ្ទាត់ចំនួនទឹកប្រាក់ & លេខយោងត្រឹមត្រូវ'}
                     </p>
                   </motion.div>
                 ) : (
@@ -1047,128 +1088,170 @@ export function CartModal({
                       </div>
                     )}
 
-                    {/* Paid Amount + Bank Ref + Slip Upload Verification Controls */}
-                    <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2 text-left">
-                      <p className="text-[11px] font-bold text-slate-800">
-                        {verifyCaps.telegram
-                          ? isEn
-                            ? 'Verify Transfer via Shop Telegram Bot (or Bank Slip)'
-                            : 'ផ្ទៀងផ្ទាត់ការវេរលុយ (វិក្កយបត្រ / លេខយោងធនាគារ)'
-                          : isEn
-                            ? 'Verify Exact Paid Amount & Transfer Reference'
-                            : 'ផ្ទៀងផ្ទាត់ចំនួនលុយពិត & លេខប្រតិបត្តិការណ៍ធនាគារ'}
-                      </p>
-
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="text-[10px] font-semibold text-slate-500 block mb-0.5">
-                            {isEn
-                              ? `Paid Amount (${isKhr ? 'KHR' : 'USD'}) *`
-                              : `ចំនួនលុយបានវេរ (${isKhr ? '៛' : '$'}) *`}
-                          </label>
-                          <input
-                            type="number"
-                            step={isKhr ? '100' : '0.01'}
-                            min="0"
-                            value={paidAmountInput}
-                            onChange={(e) => setPaidAmountInput(e.target.value)}
-                            className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-base sm:text-xs font-mono-num font-bold text-[#0D4A3E]"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] font-semibold text-slate-500 block mb-0.5">
-                            {isEn ? 'Bank TX ID / Ref' : 'លេខប្រតិបត្តិការណ៍ (TX ID)'}
-                          </label>
-                          <input
-                            type="text"
-                            value={paymentRefInput}
-                            onChange={(e) => setPaymentRefInput(e.target.value)}
-                            placeholder="ឧ. FT25019283"
-                            className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-base sm:text-xs font-mono-num"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2">
-                        <label className="inline-flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 px-3 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer">
-                          <Upload className="w-3.5 h-3.5 text-[#0D4A3E]" />
-                          <span>
-                            {slipImgData
-                              ? isEn
-                                ? '✓ Slip Uploaded'
-                                : '✓ បានភ្ជាប់រូបវិក្កយបត្រ'
-                              : isEn
-                                ? 'Upload Transfer Slip'
-                                : 'បញ្ចូលរូបវិក្កយបត្រវេរលុយ (Slip)'}
+                    {/* Smart Auto Bank Slip Scanner + Telegram Owner Fallback */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-3 space-y-2.5 text-left shadow-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="w-6 h-6 rounded-lg bg-[#E8F2EF] text-[#0D4A3E] flex items-center justify-center shrink-0">
+                            <Sparkles className="w-3.5 h-3.5" />
                           </span>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            className="hidden"
-                            onChange={(e) => {
-                              const f = e.target.files?.[0];
-                              e.currentTarget.value = '';
-                              if (f) {
-                                compressImageFile(
-                                  f,
-                                  520,
-                                  (b) => setSlipImgData(b),
-                                  onToast
-                                );
-                              }
-                            }}
-                          />
-                        </label>
-                        {slipImgData && (
-                          <img
-                            src={slipImgData}
-                            alt="Payment Slip"
-                            className="w-8 h-8 rounded-lg object-cover border border-slate-200"
-                          />
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold text-slate-900 truncate">
+                              {isEn
+                                ? 'Auto Bank Slip Verification (Anti-Fraud)'
+                                : 'ស្កេនផ្ទៀងផ្ទាត់វិក្កយបត្រ Auto (សុវត្ថិភាពខ្ពស់)'}
+                            </p>
+                            <p className="text-[10px] text-slate-500">
+                              {isEn
+                                ? 'Upload ABA / ACLEDA / Bakong receipt to verify automatically'
+                                : 'Upload រូបវិក្កយបត្រ ABA / ACLEDA / Bakong — អាន & ផ្ទៀងផ្ទាត់ភ្លាមៗ'}
+                            </p>
+                          </div>
+                        </div>
+                        {verifyCaps.slipAuto && (
+                          <span className="text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded-md shrink-0">
+                            AUTO AI
+                          </span>
                         )}
                       </div>
 
-                      {verifyCaps.telegram ? (
-                        <button
-                          type="button"
-                          disabled={sendingTgVerify || payStatus === 'expired'}
-                          onClick={handleRequestTelegramVerify}
-                          className="w-full bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-bold py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors"
-                        >
-                          <Send className="w-3.5 h-3.5" />
-                          <span>
-                            {sendingTgVerify
-                              ? isEn
-                                ? 'Sending to Shop Telegram...'
-                                : 'កំពុងផ្ញើទៅ Telegram Bot ហាង...'
-                              : payStatus === 'awaiting_owner'
+                      {/* Upload Dropzone */}
+                      <label
+                        className={`relative flex items-center justify-between gap-3 rounded-xl border-2 border-dashed p-2.5 cursor-pointer transition-all ${
+                          verifyingSlip
+                            ? 'border-emerald-500 bg-emerald-50/70'
+                            : slipImgData
+                              ? 'border-[#0D4A3E]/40 bg-[#E8F2EF]/40 hover:bg-[#E8F2EF]/60'
+                              : 'border-slate-300 bg-slate-50 hover:border-[#0D4A3E] hover:bg-[#E8F2EF]/30'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {slipImgData ? (
+                            <img
+                              src={slipImgData}
+                              alt="Payment Slip"
+                              className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0 shadow-xs"
+                            />
+                          ) : (
+                            <div className="w-10 h-10 rounded-xl bg-white border border-slate-200 flex items-center justify-center shrink-0 text-[#0D4A3E]">
+                              <Upload className="w-4 h-4" />
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold text-slate-800 truncate">
+                              {verifyingSlip
                                 ? isEn
-                                  ? 'Resend to Shop Telegram Bot'
-                                  : 'ផ្ញើសំណើផ្ទៀងផ្ទាត់ម្តងទៀតទៅ Telegram'
-                                : isEn
-                                  ? 'Send to Telegram Bot for Approval'
-                                  : 'ផ្ញើស្នើផ្ទៀងផ្ទាត់លុយតាម Telegram Bot'}
-                          </span>
-                        </button>
-                      ) : (
+                                  ? 'Scanning receipt · Checking amount & anti-replay...'
+                                  : 'កំពុងស្កេនអានវិក្កយបត្រ & ពិនិត្យសុវត្ថិភាព...'
+                                : slipImgData
+                                  ? isEn
+                                    ? '✓ Slip Ready — Tap to replace image'
+                                    : '✓ បានភ្ជាប់រូបវិក្កយបត្រ — ចុចប្តូររូបថ្មី'
+                                  : isEn
+                                    ? 'Tap to Upload Payment Slip Screenshot'
+                                    : 'ចុច Upload រូបវិក្កយបត្រវេរលុយ (Auto Scan)'}
+                            </p>
+                            <p className="text-[10px] text-slate-500 truncate">
+                              {isEn
+                                ? 'Checks exact amount, recipient, date/time & duplicate hash'
+                                : 'ផ្ទៀងផ្ទាត់៖ ទឹកប្រាក់ · ឈ្មោះគណនី · កាលបរិច្ឆេទ · កូដស្ទួន SHA-256'}
+                            </p>
+                          </div>
+                        </div>
+                        {verifyingSlip && (
+                          <ScanLine className="w-5 h-5 text-emerald-600 animate-pulse shrink-0" />
+                        )}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          disabled={verifyingSlip || payStatus === 'expired'}
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            e.currentTarget.value = '';
+                            if (f) {
+                              compressImageFile(
+                                f,
+                                900,
+                                (compressedDataUri) => {
+                                  setSlipImgData(compressedDataUri);
+                                  setPayError('');
+                                  if (verifyCaps.slipAuto && paySessionId && payStatus !== 'expired') {
+                                    void handleVerifySlipAuto(compressedDataUri);
+                                  }
+                                },
+                                onToast
+                              );
+                            }
+                          }}
+                        />
+                      </label>
+
+                      {/* Optional Manual Ref for extra trace */}
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={paymentRefInput}
+                          onChange={(e) => setPaymentRefInput(e.target.value)}
+                          placeholder={
+                            isEn
+                              ? 'Optional TX ID / Ref (auto-read from slip)'
+                              : 'លេខប្រតិបត្តិការណ៍បន្ថែម (ស្រេចចិត្ត — ប្រព័ន្ធអានពី Slip Auto)'
+                          }
+                          className="flex-1 px-2.5 py-1.5 border border-slate-200 rounded-lg text-base sm:text-[11px] font-mono-num"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-1.5">
                         <button
                           type="button"
-                          disabled={verifyingSlip || payStatus === 'expired'}
-                          onClick={handleVerifySlipInstant}
-                          className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-60 text-white font-bold py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors"
+                          disabled={verifyingSlip || payStatus === 'expired' || !slipImgData}
+                          onClick={() => handleVerifySlipAuto()}
+                          className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-50 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors"
                         >
-                          <ShieldCheck className="w-3.5 h-3.5" />
-                          <span>
-                            {verifyingSlip
-                              ? isEn
-                                ? 'Checking Exact Amount...'
-                                : 'កំពុងផ្ទៀងផ្ទាត់ចំនួនលុយ...'
-                              : isEn
-                                ? 'Verify Paid Amount & Reference'
-                                : 'ផ្ទៀងផ្ទាត់ចំនួនលុយ & វិក្កយបត្រឥឡូវ'}
-                          </span>
+                          {verifyingSlip ? (
+                            <>
+                              <ScanLine className="w-4 h-4 animate-pulse" />
+                              <span>
+                                {isEn ? 'Auto-Verifying Receipt...' : 'កំពុងស្កេន & ផ្ទៀងផ្ទាត់វិក្កយបត្រ...'}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <ShieldCheck className="w-4 h-4" />
+                              <span>
+                                {isEn
+                                  ? 'Scan & Verify Slip Automatically'
+                                  : 'ស្កេន & ផ្ទៀងផ្ទាត់វិក្កយបត្រ Auto'}
+                              </span>
+                            </>
+                          )}
                         </button>
-                      )}
+
+                        {(verifyCaps.telegram || needsOwnerFallback) && verifyCaps.telegram && (
+                          <button
+                            type="button"
+                            disabled={sendingTgVerify || payStatus === 'expired'}
+                            onClick={handleRequestTelegramVerify}
+                            className="w-full bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-bold py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                            <span>
+                              {sendingTgVerify
+                                ? isEn
+                                  ? 'Sending to Shop Telegram...'
+                                  : 'កំពុងផ្ញើទៅ Telegram Bot ហាង...'
+                                : payStatus === 'awaiting_owner'
+                                  ? isEn
+                                    ? 'Resend to Shop Telegram Bot'
+                                    : 'ផ្ញើសំណើផ្ទៀងផ្ទាត់ម្តងទៀតទៅ Telegram'
+                                  : isEn
+                                    ? 'Or Send to Shop Telegram for Manual Approval'
+                                    : 'ឬ ផ្ញើទៅ Telegram ម្ចាស់ហាងចុចបញ្ជាក់'}
+                            </span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}

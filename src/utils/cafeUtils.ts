@@ -178,6 +178,15 @@ export function safeSet<T>(key: string, value: T): boolean {
   }
 }
 
+export function safeDel(key: string): void {
+  delete memoryFallback[key];
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+}
+
 export function safeSessionGet(key: string): string | null {
   try {
     return window.sessionStorage.getItem(key);

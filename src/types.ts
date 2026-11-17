@@ -45,6 +45,8 @@ export interface CartItem {
 
 export interface OrderCustomer {
   memberId?: string | number;
+  memberVerified?: boolean;
+  phoneVerified?: boolean;
   name: string;
   phone: string;
   tg?: string;
@@ -79,8 +81,10 @@ export interface Order {
   items: CartItem[];
   payment: PaymentMethod;
   paymentVerified?: boolean;
-  paymentVerifiedBy?: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'slip_ref';
+  paymentVerifiedBy?: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'auto_slip_ocr' | 'slip_ref';
   paymentRef?: string;
+  paymentBankName?: string;
+  paymentSlipHash?: string;
   paymentPaidAmount?: number;
   paymentCurrency?: 'USD' | 'KHR';
   paymentMd5?: string;
@@ -111,6 +115,7 @@ export interface Member {
   telegramPhotoUrl?: string;
   telegramVerified?: boolean;
   points: number;
+  hasPin?: boolean;
   createdAt?: number;
   lastLoginAt?: number;
 }
