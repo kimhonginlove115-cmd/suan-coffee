@@ -639,7 +639,7 @@ export function CartModal({
               slipImg: targetSlip,
             }),
           },
-          22000
+          35000
         );
         const data = await res.json();
         if (!data.ok || !data.proofToken) {

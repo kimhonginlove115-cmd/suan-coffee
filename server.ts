@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -620,6 +620,41 @@ function doesRecipientMatchShop(
   return false;
 }
 
+function formatGeminiSlipErrorMessage(err: unknown): { httpStatus: number; message: string } {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  const upper = raw.toUpperCase();
+  if (upper.includes('API_KEY_INVALID') || upper.includes('API KEY NOT VALID')) {
+    return {
+      httpStatus: 400,
+      message: 'កូដ GEMINI_API_KEY មិនត្រឹមត្រូវទេ! សូមពិនិត្យ Secret GEMINI_API_KEY ក្នុង Settings ម្តងទៀត (HTTP 400)។',
+    };
+  }
+  if (upper.includes('PERMISSION_DENIED') || upper.includes('403')) {
+    return {
+      httpStatus: 403,
+      message: 'GEMINI_API_KEY មិនមានសិទ្ធិប្រើ Gemini API ទេ (HTTP 403)! សូមបង្កើត Key ថ្មីលើ Default Gemini Project ឬផ្ញើទៅ Telegram ហាង។',
+    };
+  }
+  if (upper.includes('RESOURCE_EXHAUSTED') || upper.includes('429')) {
+    return {
+      httpStatus: 429,
+      message: 'ប្រព័ន្ធស្កេន AI លើសកម្រិតប្រើប្រាស់បណ្តោះអាសន្ន (HTTP 429)! សូមរង់ចាំបន្តិច ឬផ្ញើទៅ Telegram ហាង។',
+    };
+  }
+  if (upper.includes('ABORT') || upper.includes('TIMEOUT')) {
+    return {
+      httpStatus: 504,
+      message: 'ការស្កេនវិក្កយបត្រចំណាយពេលយូរពេក (Timeout)! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។',
+    };
+  }
+  const codeMatch = raw.match(/HTTP\s*(\d{3})/i);
+  const codeTag = codeMatch ? ` (HTTP ${codeMatch[1]})` : '';
+  return {
+    httpStatus: 502,
+    message: `ប្រព័ន្ធស្កេនវិក្កយបត្រមានភាពរអាក់រអួលបណ្តោះអាសន្ន${codeTag}! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។`,
+  };
+}
+
 async function analyzeBankSlipWithGemini(
   apiKey: string,
   dataUri: string,
@@ -659,56 +694,74 @@ async function analyzeBankSlipWithGemini(
     .filter(Boolean)
     .join('\n');
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
-    contents: {
-      parts: [
-        { inlineData: { mimeType, data: base64Data } },
-        { text: prompt },
-      ],
-    },
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          isBankReceipt: { type: Type.BOOLEAN },
-          transferStatus: { type: Type.STRING, enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
-          bankName: { type: Type.STRING },
-          paidAmount: { type: Type.NUMBER },
-          currency: { type: Type.STRING, enum: ['USD', 'KHR', 'OTHER'] },
-          transactionId: { type: Type.STRING },
-          recipientName: { type: Type.STRING },
-          recipientAccount: { type: Type.STRING },
-          receiptDateYmd: { type: Type.STRING },
-          receiptTimeHm: { type: Type.STRING },
-          appearsTampered: { type: Type.BOOLEAN },
-          summaryKm: { type: Type.STRING },
-        },
-        required: [
-          'isBankReceipt',
-          'transferStatus',
-          'bankName',
-          'paidAmount',
-          'currency',
-          'transactionId',
-          'recipientName',
-          'recipientAccount',
-          'receiptDateYmd',
-          'receiptTimeHm',
-          'appearsTampered',
-          'summaryKm',
-        ],
-      },
-    },
-  });
+  const candidateModels: Array<{ model: string; useLowThinking: boolean }> = [
+    { model: 'gemini-4-hydrogen', useLowThinking: true },
+    { model: 'gemini-3.1-flash-lite', useLowThinking: true },
+    { model: 'gemini-2.5-flash', useLowThinking: false },
+  ];
 
-  const rawText = (response.text || '{}')
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/```\s*$/i, '')
-    .trim();
-  return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
+  let lastErr: unknown = null;
+  for (const candidate of candidateModels) {
+    try {
+      const response = await ai.models.generateContent({
+        model: candidate.model,
+        contents: {
+          parts: [
+            { inlineData: { mimeType, data: base64Data } },
+            { text: prompt },
+          ],
+        },
+        config: {
+          ...(candidate.useLowThinking ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isBankReceipt: { type: Type.BOOLEAN },
+              transferStatus: { type: Type.STRING, enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
+              bankName: { type: Type.STRING },
+              paidAmount: { type: Type.NUMBER },
+              currency: { type: Type.STRING, enum: ['USD', 'KHR', 'OTHER'] },
+              transactionId: { type: Type.STRING },
+              recipientName: { type: Type.STRING },
+              recipientAccount: { type: Type.STRING },
+              receiptDateYmd: { type: Type.STRING },
+              receiptTimeHm: { type: Type.STRING },
+              appearsTampered: { type: Type.BOOLEAN },
+              summaryKm: { type: Type.STRING },
+            },
+            required: [
+              'isBankReceipt',
+              'transferStatus',
+              'bankName',
+              'paidAmount',
+              'currency',
+              'transactionId',
+              'recipientName',
+              'recipientAccount',
+              'receiptDateYmd',
+              'receiptTimeHm',
+              'appearsTampered',
+              'summaryKm',
+            ],
+          },
+        },
+      });
+
+      const rawText = (response.text || '{}')
+        .trim()
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+      return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message.toUpperCase() : '';
+      const isAuthFailure = msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('403');
+      if (isAuthFailure) throw err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Gemini API call failed');
 }
 
 function validateReceiptAgainstSession(
@@ -2776,10 +2829,11 @@ app.post('/api/payments/khqr/verify-slip', async (req, res) => {
     });
   } catch (err) {
     console.error('Slip OCR verification error:', err instanceof Error ? err.message : err);
-    return res.status(502).json({
+    const mapped = formatGeminiSlipErrorMessage(err);
+    return res.status(mapped.httpStatus).json({
       ok: false,
       needsOwnerReview: true,
-      error: 'ប្រព័ន្ធស្កេនវិក្កយបត្រមានភាពរអាក់រអួលបណ្តោះអាសន្ន! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។',
+      error: mapped.message,
     });
   }
 });

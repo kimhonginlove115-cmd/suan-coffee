@@ -745,6 +745,41 @@ function doesRecipientMatchShop(
   return false;
 }
 
+function formatGeminiSlipErrorMessage(err: unknown): { httpStatus: number; message: string } {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  const upper = raw.toUpperCase();
+  if (upper.includes('API_KEY_INVALID') || upper.includes('API KEY NOT VALID')) {
+    return {
+      httpStatus: 400,
+      message: 'កូដ GEMINI_API_KEY មិនត្រឹមត្រូវទេ! សូមពិនិត្យ Secret GEMINI_API_KEY ក្នុង Settings ម្តងទៀត (HTTP 400)។',
+    };
+  }
+  if (upper.includes('PERMISSION_DENIED') || upper.includes('403')) {
+    return {
+      httpStatus: 403,
+      message: 'GEMINI_API_KEY មិនមានសិទ្ធិប្រើ Gemini API ទេ (HTTP 403)! សូមបង្កើត Key ថ្មីលើ Default Gemini Project ឬផ្ញើទៅ Telegram ហាង។',
+    };
+  }
+  if (upper.includes('RESOURCE_EXHAUSTED') || upper.includes('429')) {
+    return {
+      httpStatus: 429,
+      message: 'ប្រព័ន្ធស្កេន AI លើសកម្រិតប្រើប្រាស់បណ្តោះអាសន្ន (HTTP 429)! សូមរង់ចាំបន្តិច ឬផ្ញើទៅ Telegram ហាង។',
+    };
+  }
+  if (upper.includes('ABORT') || upper.includes('TIMEOUT')) {
+    return {
+      httpStatus: 504,
+      message: 'ការស្កេនវិក្កយបត្រចំណាយពេលយូរពេក (Timeout)! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។',
+    };
+  }
+  const codeMatch = raw.match(/HTTP\s*(\d{3})/i);
+  const codeTag = codeMatch ? ` (HTTP ${codeMatch[1]})` : '';
+  return {
+    httpStatus: 502,
+    message: `ប្រព័ន្ធស្កេនវិក្កយបត្រមានភាពរអាក់រអួលបណ្តោះអាសន្ន${codeTag}! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។`,
+  };
+}
+
 async function analyzeBankSlipWithGeminiRest(
   apiKey: string,
   dataUri: string,
@@ -776,76 +811,102 @@ async function analyzeBankSlipWithGeminiRest(
     .filter(Boolean)
     .join('\n');
 
-  const res = await fetchWithTimeout(
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-        'User-Agent': 'aistudio-build',
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { inlineData: { mimeType, data: base64Data } },
-              { text: prompt },
-            ],
-          },
-        ],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: 'OBJECT',
-            properties: {
-              isBankReceipt: { type: 'BOOLEAN' },
-              transferStatus: { type: 'STRING', enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
-              bankName: { type: 'STRING' },
-              paidAmount: { type: 'NUMBER' },
-              currency: { type: 'STRING', enum: ['USD', 'KHR', 'OTHER'] },
-              transactionId: { type: 'STRING' },
-              recipientName: { type: 'STRING' },
-              recipientAccount: { type: 'STRING' },
-              receiptDateYmd: { type: 'STRING' },
-              receiptTimeHm: { type: 'STRING' },
-              appearsTampered: { type: 'BOOLEAN' },
-              summaryKm: { type: 'STRING' },
-            },
-            required: [
-              'isBankReceipt',
-              'transferStatus',
-              'bankName',
-              'paidAmount',
-              'currency',
-              'transactionId',
-              'recipientName',
-              'recipientAccount',
-              'receiptDateYmd',
-              'receiptTimeHm',
-              'appearsTampered',
-              'summaryKm',
-            ],
-          },
-        },
-      }),
-    },
-    18000
-  );
+  const candidateModels: Array<{ model: string; useLowThinking: boolean }> = [
+    { model: 'gemini-4-hydrogen', useLowThinking: true },
+    { model: 'gemini-3.1-flash-lite', useLowThinking: true },
+    { model: 'gemini-2.5-flash', useLowThinking: false },
+  ];
 
-  if (!res.ok) {
-    throw new Error(`Gemini API HTTP ${res.status}`);
+  let lastErr: unknown = null;
+  for (const candidate of candidateModels) {
+    try {
+      const res = await fetchWithTimeout(
+        `https://generativelanguage.googleapis.com/v1beta/models/${candidate.model}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
+            'User-Agent': 'aistudio-build',
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { inlineData: { mimeType, data: base64Data } },
+                  { text: prompt },
+                ],
+              },
+            ],
+            generationConfig: {
+              ...(candidate.useLowThinking ? { thinkingConfig: { thinkingLevel: 'LOW' } } : {}),
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: 'OBJECT',
+                properties: {
+                  isBankReceipt: { type: 'BOOLEAN' },
+                  transferStatus: { type: 'STRING', enum: ['SUCCESS', 'PENDING', 'FAILED', 'UNKNOWN'] },
+                  bankName: { type: 'STRING' },
+                  paidAmount: { type: 'NUMBER' },
+                  currency: { type: 'STRING', enum: ['USD', 'KHR', 'OTHER'] },
+                  transactionId: { type: 'STRING' },
+                  recipientName: { type: 'STRING' },
+                  recipientAccount: { type: 'STRING' },
+                  receiptDateYmd: { type: 'STRING' },
+                  receiptTimeHm: { type: 'STRING' },
+                  appearsTampered: { type: 'BOOLEAN' },
+                  summaryKm: { type: 'STRING' },
+                },
+                required: [
+                  'isBankReceipt',
+                  'transferStatus',
+                  'bankName',
+                  'paidAmount',
+                  'currency',
+                  'transactionId',
+                  'recipientName',
+                  'recipientAccount',
+                  'receiptDateYmd',
+                  'receiptTimeHm',
+                  'appearsTampered',
+                  'summaryKm',
+                ],
+              },
+            },
+          }),
+        },
+        26000
+      );
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        const apiErr = new Error(`Gemini API HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+        const upperBody = errBody.toUpperCase();
+        if (upperBody.includes('API_KEY_INVALID') || upperBody.includes('API KEY NOT VALID') || res.status === 403) {
+          throw apiErr;
+        }
+        lastErr = apiErr;
+        continue;
+      }
+
+      const data = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      };
+      const rawText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '{}')
+        .trim()
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+      return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message.toUpperCase() : '';
+      const isAuthFailure = msg.includes('API_KEY_INVALID') || msg.includes('API KEY NOT VALID') || msg.includes('PERMISSION_DENIED') || msg.includes('HTTP 403');
+      if (isAuthFailure) throw err;
+    }
   }
-  const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  };
-  const rawText = (data.candidates?.[0]?.content?.parts?.[0]?.text || '{}')
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/```\s*$/i, '')
-    .trim();
-  return JSON.parse(rawText || '{}') as AnalyzedSlipResult;
+  throw lastErr instanceof Error ? lastErr : new Error('Gemini API call failed');
 }
 
 function validateReceiptAgainstSession(
@@ -2884,14 +2945,15 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
         slipHash,
         proofToken: await signPaymentProofToken(db.sessionSecret, sess),
       });
-    } catch {
+    } catch (err) {
+      const mapped = formatGeminiSlipErrorMessage(err);
       return jsonResponse(
         {
           ok: false,
           needsOwnerReview: true,
-          error: 'ប្រព័ន្ធស្កេនវិក្កយបត្រមានភាពរអាក់រអួលបណ្តោះអាសន្ន! សូមសាកល្បងម្តងទៀត ឬផ្ញើទៅ Telegram ហាង។',
+          error: mapped.message,
         },
-        502
+        mapped.httpStatus
       );
     }
   }
