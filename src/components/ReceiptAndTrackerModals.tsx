@@ -82,11 +82,49 @@ export function ReceiptModal({
               <Check className="w-7 h-7 stroke-[2.8]" />
             </motion.div>
             <h3 className="font-bold text-lg text-[#0D4A3E]">
-              {isEn ? 'Order Confirmed!' : 'កម្ម៉ង់បានជោគជ័យ!'}
+              {order.status === 'Brewing'
+                ? isEn
+                  ? 'Shop Confirmed & Brewing!'
+                  : 'ហាងបានបញ្ជាក់ & កំពុងរៀបចំ!'
+                : order.status === 'Ready'
+                  ? isEn
+                    ? 'Order Ready / Out for Delivery!'
+                    : 'រួចរាល់ / កំពុងដឹកជញ្ជូន!'
+                  : order.status === 'Completed'
+                    ? isEn
+                      ? 'Order Completed!'
+                      : 'បានបញ្ចប់ការកម្ម៉ង់!'
+                    : isEn
+                      ? 'Order Sent! Awaiting Shop'
+                      : 'បានផ្ញើការកម្ម៉ង់ជោគជ័យ!'}
             </h3>
             <p className="text-xs text-slate-500 font-mono-num">
               {order.id} · {isEn ? 'Time' : 'ម៉ោង'} {order.timestamp}
             </p>
+            <div className="flex items-center justify-center">
+              <span
+                className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-3 py-1 rounded-full border ${
+                  order.status === 'Pending'
+                    ? 'bg-amber-50 text-amber-800 border-amber-200'
+                    : order.status === 'Completed'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : 'bg-[#E8F2EF] text-[#0D4A3E] border-[#0D4A3E]/25'
+                }`}
+              >
+                {order.status === 'Pending' && <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />}
+                <span>
+                  {order.status === 'Pending'
+                    ? isEn
+                      ? '⏳ Waiting for shop confirmation...'
+                      : '⏳ កំពុងរង់ចាំហាងចុចបញ្ជាក់...'
+                    : order.status === 'Brewing'
+                      ? isEn
+                        ? `✅ Confirmed (${order.confirmedBy === 'telegram' ? 'Telegram' : 'Shop'})`
+                        : `✅ ហាងបានបញ្ជាក់រួចរាល់${order.confirmedBy === 'telegram' ? ' (Telegram)' : ''}`
+                      : getOrderStatusText(order.status, lang)}
+                </span>
+              </span>
+            </div>
 
             <div className="bg-slate-50 p-3.5 rounded-2xl text-left text-xs space-y-1.5 max-h-40 overflow-y-auto">
               {order.items.map((i, idx) => (

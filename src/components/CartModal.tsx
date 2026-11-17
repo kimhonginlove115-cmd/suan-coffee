@@ -31,11 +31,12 @@ import {
 } from '../utils/cafeUtils';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 import { md5Hex } from '../utils/md5';
+import { playPaymentVerifiedSound, unlockAudio } from '../utils/sound';
 
 export interface VerifiedPaymentState {
   sessionId: string;
   proofToken: string;
-  verifiedBy: 'bakong_md5' | 'telegram_owner' | 'slip_ref';
+  verifiedBy: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'slip_ref';
   paidAmount: number;
   currency: 'USD' | 'KHR';
   transactionRef: string;
@@ -139,6 +140,7 @@ export function CartModal({
   const [paymentRefInput, setPaymentRefInput] = useState('');
   const [paidAmountInput, setPaidAmountInput] = useState('');
   const [slipImgData, setSlipImgData] = useState('');
+  const activeSessionKeyRef = useRef<string>('');
 
   useEffect(() => {
     if (currentMember) {
@@ -184,30 +186,50 @@ export function CartModal({
     ]
   );
 
-  // Clear verification state whenever modal closes or switched back to Cash
-  useEffect(() => {
-    if (!isOpen || payment !== 'KHQR / ABA') {
-      setVerifiedPayment(null);
-      setPaySessionId(null);
-      setPayStatus('idle');
-      setPayError('');
-      setPaymentRefInput('');
-      setPaidAmountInput('');
-      setSlipImgData('');
-    }
-  }, [isOpen, payment]);
+  const resetPaymentSession = useCallback(() => {
+    activeSessionKeyRef.current = '';
+    setVerifiedPayment(null);
+    setPaySessionId(null);
+    setPayMd5('');
+    setPayExpiresAt(0);
+    setPayStatus('idle');
+    setPayError('');
+    setPaymentRefInput('');
+    setPaidAmountInput('');
+    setSlipImgData('');
+  }, []);
 
-  // Create fresh KHQR payment session whenever KHQR is selected or amount changes
+  // Reset only when the entire cart becomes empty
+  useEffect(() => {
+    if (cart.length === 0) {
+      resetPaymentSession();
+      setBillMeta({ billNumber: makeBillNonce(), timestampMs: Date.now() });
+    }
+  }, [cart.length, resetPaymentSession]);
+
+  // Create KHQR payment session only when total/currency/bill/QR changes (keep session across close & reopen)
   useEffect(() => {
     if (!isOpen || payment !== 'KHQR / ABA' || grandTotal <= 0) return;
 
+    const khqrCurr = shopSettings.khqrCurrency === 'KHR' ? 'KHR' : 'USD';
+    const sessionKey = `${grandTotal.toFixed(2)}|${khqrCurr}|${billMeta.billNumber}|${dynamicKhqr.payload}`;
+    const stillValid =
+      activeSessionKeyRef.current === sessionKey &&
+      Boolean(paySessionId) &&
+      payStatus !== 'expired' &&
+      (payExpiresAt === 0 || Date.now() < payExpiresAt);
+
+    if (stillValid) {
+      return;
+    }
+
     let cancelled = false;
+    activeSessionKeyRef.current = sessionKey;
     setVerifiedPayment(null);
     setPaySessionId(null);
     setPayError('');
     setPayStatus('creating');
 
-    const khqrCurr = shopSettings.khqrCurrency === 'KHR' ? 'KHR' : 'USD';
     const expectedCurrAmount =
       khqrCurr === 'KHR' ? Math.max(100, Math.round(dynamicKhqr.amount)) : Number(grandTotal.toFixed(2));
     setPaidAmountInput(String(expectedCurrAmount));
@@ -244,12 +266,14 @@ export function CartModal({
           setPayExpiresAt(Date.now() + (Number(data.expiresInSeconds) || 600) * 1000);
           setPayStatus('pending');
         } else {
+          activeSessionKeyRef.current = '';
           setPayStatus('pending');
           setPayError(data?.error || '');
         }
       })
       .catch(() => {
         if (!cancelled) {
+          activeSessionKeyRef.current = '';
           setPayStatus('pending');
         }
       });
@@ -258,7 +282,7 @@ export function CartModal({
       cancelled = true;
       controller.abort();
     };
-    // Intentionally reset only on modal/payment/amount/currency/bill changes
+    // Intentionally reset only when amount/currency/QR/bill changes; preserve state across modal close/reopen
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     isOpen,
@@ -320,6 +344,7 @@ export function CartModal({
             md5: payMd5,
             slipImg: slipImgData || undefined,
           });
+          playPaymentVerifiedSound();
           onToast(
             isEn
               ? '✅ Payment & exact amount verified!'
@@ -352,7 +377,7 @@ export function CartModal({
     [paySessionId, payStatus, dynamicKhqr.amount, billMeta.billNumber, payMd5, slipImgData, onToast, isEn]
   );
 
-  // Automatic polling every 2.5s when Bakong auto-verify or Telegram owner approval is running
+  // Automatic polling every 2.5s when Bakong, Telegram Bot, or Website Admin approval can arrive
   useEffect(() => {
     if (
       !isOpen ||
@@ -363,15 +388,15 @@ export function CartModal({
     ) {
       return;
     }
-    if (!verifyCaps.bakong && payStatus !== 'awaiting_owner') return;
 
+    checkPaymentStatus(false);
     const timer = setInterval(() => {
       if (document.visibilityState !== 'hidden') {
         checkPaymentStatus(false);
       }
     }, 2500);
     return () => clearInterval(timer);
-  }, [isOpen, payment, paySessionId, payStatus, verifyCaps.bakong, checkPaymentStatus]);
+  }, [isOpen, payment, paySessionId, payStatus, checkPaymentStatus]);
 
   // Render crisp EMVCo Dynamic KHQR whenever grandTotal or payment changes
   useEffect(() => {
@@ -392,12 +417,13 @@ export function CartModal({
   }, [isOpen, payment, dynamicKhqr]);
 
   const handleRegenerateQr = () => {
+    unlockAudio();
+    resetPaymentSession();
     setBillMeta({ billNumber: makeBillNonce(), timestampMs: Date.now() });
-    setPayError('');
-    setVerifiedPayment(null);
   };
 
   const handleRequestTelegramVerify = async () => {
+    unlockAudio();
     if (!paySessionId || sendingTgVerify) return;
     setPayError('');
     setSendingTgVerify(true);
@@ -439,6 +465,7 @@ export function CartModal({
   };
 
   const handleVerifySlipInstant = async () => {
+    unlockAudio();
     if (!paySessionId || verifyingSlip) return;
     setPayError('');
     setVerifyingSlip(true);
@@ -477,6 +504,7 @@ export function CartModal({
         md5: payMd5,
         slipImg: slipImgData || undefined,
       });
+      playPaymentVerifiedSound();
       onToast(
         isEn
           ? '✅ Payment amount & slip verified!'
@@ -507,6 +535,7 @@ export function CartModal({
   const isKhqrLocked = payment === 'KHQR / ABA' && !verifiedPayment;
 
   const handleSubmit = async (sendTg: boolean) => {
+    unlockAudio();
     if (submitting) return;
     if (!cart.length) {
       onToast(isEn ? 'Cart is empty!' : 'កន្ត្រកទំនិញទទេ!');
@@ -564,7 +593,8 @@ export function CartModal({
       if (ok !== false) {
         setAppliedPromoPct(0);
         setPromoInput('');
-        setVerifiedPayment(null);
+        resetPaymentSession();
+        setBillMeta({ billNumber: makeBillNonce(), timestampMs: Date.now() });
       }
     } finally {
       setSubmitting(false);
@@ -928,9 +958,13 @@ export function CartModal({
                           ? isEn
                             ? '✓ Confirmed by Shop Owner on Telegram'
                             : '✓ បញ្ជាក់ទទួលប្រាក់ដោយម្ចាស់ហាងតាម Telegram'
-                          : isEn
-                            ? '✓ Exact amount & receipt reference matched'
-                            : '✓ ផ្ទៀងផ្ទាត់ចំនួនទឹកប្រាក់ & លេខយោងត្រឹមត្រូវ'}
+                          : verifiedPayment.verifiedBy === 'web_admin'
+                            ? isEn
+                              ? '✓ Confirmed by Shop Owner on Website'
+                              : '✓ បញ្ជាក់ទទួលប្រាក់ដោយម្ចាស់ហាងលើគេហទំព័រ'
+                            : isEn
+                              ? '✓ Exact amount & receipt reference matched'
+                              : '✓ ផ្ទៀងផ្ទាត់ចំនួនទឹកប្រាក់ & លេខយោងត្រឹមត្រូវ'}
                     </p>
                   </motion.div>
                 ) : (

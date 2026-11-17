@@ -63,6 +63,22 @@ import {
   extractKhqrSummary,
   isValidEmvKhqr,
 } from '../utils/khqr';
+import { playAdminAlertSound, unlockAudio } from '../utils/sound';
+
+interface PendingKhqrSession {
+  id: string;
+  billNumber: string;
+  expectedAmountUsd: number;
+  expectedAmount: number;
+  currency: 'USD' | 'KHR';
+  status: 'pending' | 'awaiting_owner';
+  transactionRef?: string;
+  customerName?: string;
+  customerPhone?: string;
+  slipImg?: string;
+  createdAt: number;
+  expiresAt: number;
+}
 
 interface PinModalProps {
   lang?: AppLang;
@@ -300,6 +316,9 @@ export function AdminDashboard({
   const [confirmClearMenu, setConfirmClearMenu] = useState(false);
   const [decodingKhqr, setDecodingKhqr] = useState(false);
   const [previewSlipUrl, setPreviewSlipUrl] = useState<string | null>(null);
+  const [pendingKhqrSessions, setPendingKhqrSessions] = useState<PendingKhqrSession[]>([]);
+  const [decidingSessionId, setDecidingSessionId] = useState<string | null>(null);
+  const seenPendingPayIdsRef = useRef<Set<string>>(new Set());
   const menuFormRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -379,6 +398,91 @@ export function AdminDashboard({
       .catch(() => {});
     return () => ctrl.abort();
   }, [adminToken, onRequireReauth]);
+
+  useEffect(() => {
+    if (!adminToken || activeTab !== 'orders') return;
+    let cancelled = false;
+    const fetchPendingKhqr = async () => {
+      try {
+        const res = await fetchWithTimeout(
+          '/api/payments/khqr/pending',
+          { headers: { Authorization: `Bearer ${adminToken}` } },
+          6000
+        );
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { ok?: boolean; sessions?: PendingKhqrSession[] };
+        if (!data?.ok || !Array.isArray(data.sessions) || cancelled) return;
+
+        const nextList = data.sessions;
+        const seen = seenPendingPayIdsRef.current;
+        if (seen.size > 0 && nextList.some((s) => !seen.has(s.id))) {
+          playAdminAlertSound();
+        }
+        seenPendingPayIdsRef.current = new Set(nextList.map((s) => s.id));
+        setPendingKhqrSessions(nextList);
+      } catch {
+        // ignore transient poll failure
+      }
+    };
+    fetchPendingKhqr();
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'hidden') fetchPendingKhqr();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [adminToken, activeTab]);
+
+  const handleDecideKhqr = async (
+    sessionId: string,
+    decision: 'approve' | 'amount_mismatch' | 'reject'
+  ) => {
+    unlockAudio();
+    if (!adminToken || decidingSessionId) return;
+    setDecidingSessionId(sessionId);
+    try {
+      const res = await fetchWithTimeout(
+        '/api/payments/khqr/admin-decide',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ sessionId, decision }),
+        },
+        8000
+      );
+      const data = (await res.json()) as { ok?: boolean; error?: string };
+      if (res.status === 401) {
+        onRequireReauth();
+        return;
+      }
+      if (!data?.ok) {
+        onToast(data?.error || (isEn ? 'Failed to update KHQR session' : 'មិនអាចបច្ចុប្បន្នភាព KHQR បានទេ'));
+        return;
+      }
+      setPendingKhqrSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      onToast(
+        decision === 'approve'
+          ? isEn
+            ? '✅ Approved KHQR payment — customer can now submit order!'
+            : '✅ បានអនុម័តការទូទាត់ KHQR! អតិថិជនអាចចុចបញ្ជាក់ការកម្ម៉ង់បានហើយ'
+          : decision === 'amount_mismatch'
+            ? isEn
+              ? '⚠️ Marked KHQR as amount mismatch'
+              : '⚠️ បានជូនដំណឹងភ្ញៀវថា ចំនួនលុយមិនគ្រប់'
+            : isEn
+              ? '❌ Rejected KHQR payment'
+              : '❌ បានបដិសេធ៖ មិនទាន់ឃើញទឹកប្រាក់ចូល'
+      );
+    } catch {
+      onToast(isEn ? 'Could not reach server' : 'មិនអាចភ្ជាប់ទៅ Server បានទេ');
+    } finally {
+      setDecidingSessionId(null);
+    }
+  };
 
   const displayedMembers = serverMembers.length > 0 ? serverMembers : members;
   const totalRevenue = orders.reduce((s, o) => s + Number(o.grandTotal || 0), 0);
@@ -1040,6 +1144,104 @@ export function AdminDashboard({
             </div>
           </div>
 
+          {pendingKhqrSessions.length > 0 && (
+            <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-bold text-sky-950 flex items-center gap-1.5">
+                  <QrCode className="w-4 h-4 text-[#E1232E] shrink-0" />
+                  <span>
+                    {isEn
+                      ? `Pending KHQR Payments (${pendingKhqrSessions.length})`
+                      : `ការទូទាត់ KHQR កំពុងរង់ចាំអនុម័ត (${pendingKhqrSessions.length})`}
+                  </span>
+                </p>
+                <span className="text-[10px] font-semibold text-sky-800 bg-white px-2 py-0.5 rounded-lg border border-sky-200">
+                  {isEn ? 'Approve on Web or Telegram' : 'អនុម័តលើវេបសាយ ឬ Telegram'}
+                </span>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-2.5">
+                {pendingKhqrSessions.map((sess) => {
+                  const amtDisplay =
+                    sess.currency === 'KHR'
+                      ? `${Math.round(sess.expectedAmount).toLocaleString()} ៛ ($${sess.expectedAmountUsd.toFixed(2)})`
+                      : `$${sess.expectedAmountUsd.toFixed(2)}`;
+                  const busy = decidingSessionId === sess.id;
+                  return (
+                    <div
+                      key={sess.id}
+                      className="bg-white border border-sky-200/80 rounded-xl p-3 space-y-2 shadow-sm"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-slate-900 font-mono-num truncate">
+                            {sess.billNumber}{' '}
+                            <span className="text-[10px] font-sans font-semibold text-sky-700 bg-sky-50 px-1.5 py-0.5 rounded">
+                              {sess.status === 'awaiting_owner'
+                                ? isEn
+                                  ? 'Requested'
+                                  : 'ភ្ញៀវផ្ញើសំណើ'
+                                : isEn
+                                  ? 'Scanning QR'
+                                  : 'កំពុងស្កេន QR'}
+                            </span>
+                          </p>
+                          <p className="text-[11px] text-slate-600 truncate mt-0.5">
+                            {sess.customerName || (isEn ? 'Guest' : 'ភ្ញៀវ')}{' '}
+                            {sess.customerPhone ? `(${sess.customerPhone})` : ''}
+                          </p>
+                          {sess.transactionRef && (
+                            <p className="text-[10px] font-mono-num text-slate-500 truncate">
+                              Ref: {sess.transactionRef}
+                            </p>
+                          )}
+                        </div>
+                        <span className="font-bold font-mono-num text-xs text-[#E1232E] shrink-0">
+                          {amtDisplay}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => handleDecideKhqr(sess.id, 'approve')}
+                          className="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-[11px] font-bold px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                        >
+                          ✅ {isEn ? 'Approve Paid' : 'ប្រាក់ចូលគ្រប់ & អនុម័ត'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => handleDecideKhqr(sess.id, 'amount_mismatch')}
+                          className="bg-amber-100 hover:bg-amber-200 disabled:opacity-60 text-amber-900 text-[11px] font-bold px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                        >
+                          ⚠️ {isEn ? 'Short' : 'ខ្វះលុយ'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => handleDecideKhqr(sess.id, 'reject')}
+                          className="bg-red-50 hover:bg-red-100 disabled:opacity-60 text-red-700 text-[11px] font-bold px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                        >
+                          ❌ {isEn ? 'Reject' : 'បដិសេធ'}
+                        </button>
+                        {sess.slipImg && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewSlipUrl(sess.slipImg || null)}
+                            className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                          >
+                            {isEn ? 'Slip' : 'មើល Slip'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-wrap justify-between items-center gap-2">
             <div className="flex gap-1.5 overflow-x-auto">
               {(['All', 'Pending', 'Brewing', 'Ready', 'Completed'] as const).map((st) => (
@@ -1110,9 +1312,11 @@ export function AdminDashboard({
                                     ? ' · Bakong Auto'
                                     : o.paymentVerifiedBy === 'telegram_owner'
                                       ? ' · Telegram Bot'
-                                      : o.paymentVerifiedBy === 'slip_ref'
-                                        ? ' · Slip & TX'
-                                        : ''}
+                                      : o.paymentVerifiedBy === 'web_admin'
+                                        ? ' · Website Admin'
+                                        : o.paymentVerifiedBy === 'slip_ref'
+                                          ? ' · Slip & TX'
+                                          : ''}
                                 </span>
                               </span>
                             ) : (
@@ -1264,17 +1468,69 @@ export function AdminDashboard({
                       </div>
                     )}
 
-                    <div className="flex flex-wrap justify-between items-center gap-2 pt-2 border-t border-slate-100">
-                      <select
-                        value={o.status}
-                        onChange={(e) => onUpdateOrderStatus(o.id, e.target.value as OrderStatus)}
-                        className="text-xs font-bold border border-slate-200 rounded-xl px-2.5 py-1.5"
-                      >
-                        <option value="Pending">{getOrderStatusText('Pending', lang)}</option>
-                        <option value="Brewing">{getOrderStatusText('Brewing', lang)}</option>
-                        <option value="Ready">{getOrderStatusText('Ready', lang)}</option>
-                        <option value="Completed">{getOrderStatusText('Completed', lang)}</option>
-                      </select>
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {o.status === 'Pending' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              unlockAudio();
+                              onUpdateOrderStatus(o.id, 'Brewing');
+                            }}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3 py-1.5 rounded-xl shadow-sm transition-colors"
+                          >
+                            ✅ {isEn ? 'Confirm Order' : 'បញ្ជាក់ទទួលកម្ម៉ង់'}
+                          </button>
+                        )}
+                        {o.status === 'Brewing' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              unlockAudio();
+                              onUpdateOrderStatus(o.id, 'Ready');
+                            }}
+                            className="bg-amber-400 hover:bg-amber-500 text-slate-900 text-xs font-bold px-3 py-1.5 rounded-xl shadow-sm transition-colors"
+                          >
+                            🚀 {isEn ? 'Mark Ready / Dispatch' : 'រួចរាល់ / កំពុងដឹក'}
+                          </button>
+                        )}
+                        {o.status === 'Ready' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              unlockAudio();
+                              onUpdateOrderStatus(o.id, 'Completed');
+                            }}
+                            className="bg-[#0D4A3E] hover:bg-[#09352C] text-white text-xs font-bold px-3 py-1.5 rounded-xl shadow-sm transition-colors"
+                          >
+                            ✔️ {isEn ? 'Mark Completed' : 'បញ្ចប់ដល់ដៃ'}
+                          </button>
+                        )}
+                        <select
+                          value={o.status}
+                          onChange={(e) => {
+                            unlockAudio();
+                            onUpdateOrderStatus(o.id, e.target.value as OrderStatus);
+                          }}
+                          className="text-xs font-bold border border-slate-200 rounded-xl px-2.5 py-1.5 bg-white"
+                        >
+                          <option value="Pending">{getOrderStatusText('Pending', lang)}</option>
+                          <option value="Brewing">{getOrderStatusText('Brewing', lang)}</option>
+                          <option value="Ready">{getOrderStatusText('Ready', lang)}</option>
+                          <option value="Completed">{getOrderStatusText('Completed', lang)}</option>
+                        </select>
+                        {o.confirmedBy && o.status !== 'Pending' && (
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-lg">
+                            {o.confirmedBy === 'telegram'
+                              ? isEn
+                                ? '✓ Telegram'
+                                : '✓ បញ្ជាក់តាម Telegram'
+                              : isEn
+                                ? '✓ Website'
+                                : '✓ បញ្ជាក់លើវេបសាយ'}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex gap-2 items-center">
                         <button
                           type="button"

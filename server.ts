@@ -228,7 +228,7 @@ interface PaymentVerifySession {
   createdAt: number;
   expiresAt: number;
   status: 'pending' | 'awaiting_owner' | 'verified' | 'amount_mismatch' | 'rejected';
-  verifiedBy?: 'bakong_md5' | 'telegram_owner' | 'slip_ref';
+  verifiedBy?: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'slip_ref';
   paidAmount?: number;
   transactionRef?: string;
   customerName?: string;
@@ -417,7 +417,7 @@ interface PaymentProofPayload {
   amtUsd: number;
   amtCur: number;
   cur: 'USD' | 'KHR';
-  by: 'bakong_md5' | 'telegram_owner' | 'slip_ref';
+  by: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'slip_ref';
   md5: string;
   ref: string;
   iat: number;
@@ -696,6 +696,115 @@ function getShopBrandTitle(): string {
   );
 }
 
+function getOrderTelegramKeyboard(orderId: string, status: unknown): Record<string, unknown> {
+  const st = String(status || 'Pending');
+  if (st === 'Completed') return { inline_keyboard: [] };
+  if (st === 'Ready') {
+    return {
+      inline_keyboard: [[{ text: '✔️ បញ្ចប់ដល់ដៃ (Completed)', callback_data: `ord_done:${orderId}` }]],
+    };
+  }
+  if (st === 'Brewing') {
+    return {
+      inline_keyboard: [
+        [
+          { text: '🚀 រួចរាល់ / កំពុងដឹក (Ready)', callback_data: `ord_rdy:${orderId}` },
+          { text: '✔️ បញ្ចប់ (Done)', callback_data: `ord_done:${orderId}` },
+        ],
+      ],
+    };
+  }
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ បញ្ជាក់ទទួលកម្ម៉ង់ (Confirm)', callback_data: `ord_ok:${orderId}` },
+        { text: '🚀 រួចរាល់ (Ready)', callback_data: `ord_rdy:${orderId}` },
+      ],
+      [{ text: '✔️ បញ្ចប់ (Done)', callback_data: `ord_done:${orderId}` }],
+    ],
+  };
+}
+
+function buildOrderTelegramMessageText(order: Record<string, unknown>, statusFooterHtml?: string): string {
+  const cust = (order.customer || {}) as Record<string, unknown>;
+  const items = Array.isArray(order.items) ? (order.items as Array<Record<string, unknown>>) : [];
+  const itemsTxt = items
+    .map((i) => `• ${i.qty}x ${i.name} (${i.options}) = $${(Number(i.unitPrice) * Number(i.qty)).toFixed(2)}`)
+    .join('\n');
+  const coords = cust.coords as { lat?: number; lng?: number } | undefined;
+  const locTxt =
+    order.type === 'dinein'
+      ? `🪑 តុលេខ ${cust.tableNum || 1}`
+      : `📍 ${cust.addressName || '-'}${
+          coords ? `\n🗺 https://maps.google.com/?q=${coords.lat},${coords.lng}` : ''
+        }`;
+  const payStatusLine =
+    order.payment === 'KHQR / ABA' && order.paymentVerified
+      ? `✅ <b>ទូទាត់ KHQR បានផ្ទៀងផ្ទាត់</b> (${
+          order.paymentVerifiedBy === 'bakong_md5'
+            ? 'Bakong Auto'
+            : order.paymentVerifiedBy === 'telegram_owner'
+              ? 'Telegram Approved'
+              : order.paymentVerifiedBy === 'web_admin'
+                ? 'Website Approved'
+                : 'Slip Verified'
+        })${order.paymentRef ? ` · Ref: <code>${order.paymentRef}</code>` : ''}`
+      : `💵 ទូទាត់៖ ${order.payment}`;
+  const st = String(order.status || 'Pending');
+  const stLabel =
+    st === 'Brewing'
+      ? '✅ <b>ស្ថានភាព៖ ហាងបានបញ្ជាក់ & កំពុងរៀបចំ (Confirmed)</b>'
+      : st === 'Ready'
+        ? '🚀 <b>ស្ថានភាព៖ រួចរាល់ / កំពុងដឹកជញ្ជូន (Ready)</b>'
+        : st === 'Completed'
+          ? '✔️ <b>ស្ថានភាព៖ បានបញ្ចប់ជោគជ័យ (Completed)</b>'
+          : '⏳ <b>ស្ថានភាព៖ រង់ចាំការបញ្ជាក់ (Pending)</b>';
+  return [
+    `🔔 <b>កម្ម៉ង់ ${order.id}</b> (${order.timestamp})`,
+    `👤 ${cust.name || '-'} (${cust.phone || '-'})`,
+    locTxt,
+    '',
+    itemsTxt,
+    '',
+    `💰 សរុប៖ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b>`,
+    payStatusLine,
+    statusFooterHtml || stLabel,
+  ]
+    .filter((v) => v !== undefined)
+    .join('\n');
+}
+
+async function editTelegramOrderMessage(
+  botToken: string,
+  order: Record<string, unknown>,
+  statusFooterHtml?: string
+): Promise<void> {
+  const msgId = Number(order.tgMessageId || 0);
+  const chatId = String(order.tgChatId || getEffectiveChatId() || '').trim();
+  if (!botToken || !chatId || !msgId) return;
+  try {
+    await fetchWithTimeout(
+      `https://api.telegram.org/bot${botToken}/editMessageText`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: msgId,
+          text: buildOrderTelegramMessageText(order, statusFooterHtml),
+          parse_mode: 'HTML',
+          reply_markup: getOrderTelegramKeyboard(String(order.id), order.status),
+        }),
+      },
+      5000
+    );
+  } catch {
+    // ignore
+  }
+}
+
+let lastOrdersTgPollAt = 0;
+
 async function processTelegramUpdates(botToken: string): Promise<void> {
   if (!botToken) return;
   try {
@@ -712,6 +821,7 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
           id: string;
           data?: string;
           from?: { id: number; first_name?: string; username?: string };
+          message?: { message_id?: number; chat?: { id?: number | string } };
         };
         message?: {
           text?: string;
@@ -737,16 +847,54 @@ async function processTelegramUpdates(botToken: string): Promise<void> {
         offsetChanged = true;
       }
 
-      // 1. Handle Shop Owner Inline Button Approval for KHQR Payments
+      // 1. Handle Shop Owner Inline Button Approval for KHQR Payments & Order Confirmations
       if (upd.callback_query?.data) {
         const cb = upd.callback_query;
         const dataStr = cb.data || '';
         const colonIdx = dataStr.indexOf(':');
         const action = colonIdx > 0 ? dataStr.slice(0, colonIdx) : '';
-        const sid = colonIdx > 0 ? dataStr.slice(colonIdx + 1) : '';
-        const sess = sid ? paymentSessionStore.get(sid) : undefined;
+        const targetId = colonIdx > 0 ? dataStr.slice(colonIdx + 1) : '';
         const reviewerName = sanitizeText(cb.from?.first_name || cb.from?.username || 'ម្ចាស់ហាង', 40);
 
+        if (action === 'ord_ok' || action === 'ord_rdy' || action === 'ord_done') {
+          const ord = targetId ? serverOrders.get(targetId) : undefined;
+          if (!ord) {
+            await answerTelegramCallback(botToken, cb.id, 'រកមិនឃើញការកម្ម៉ង់នេះទេ');
+            continue;
+          }
+          if (!ord.tgMessageId && cb.message?.message_id) {
+            ord.tgMessageId = cb.message.message_id;
+          }
+          if (!ord.tgChatId && cb.message?.chat?.id !== undefined) {
+            ord.tgChatId = String(cb.message.chat.id);
+          }
+
+          const nextStatus =
+            action === 'ord_ok' ? 'Brewing' : action === 'ord_rdy' ? 'Ready' : 'Completed';
+          ord.status = nextStatus;
+          if (!ord.confirmedAt) ord.confirmedAt = Date.now();
+          ord.confirmedBy = 'telegram';
+          serverOrders.set(targetId, ord);
+          offsetChanged = true;
+
+          const answerText =
+            nextStatus === 'Brewing'
+              ? `✅ បានបញ្ជាក់ទទួលកម្ម៉ង់ ${targetId}!`
+              : nextStatus === 'Ready'
+                ? `🚀 កម្ម៉ង់ ${targetId} រួចរាល់!`
+                : `✔️ កម្ម៉ង់ ${targetId} បានបញ្ចប់!`;
+          const footerHtml =
+            nextStatus === 'Brewing'
+              ? `✅ <b>ស្ថានភាព៖ បានបញ្ជាក់ & កំពុងរៀបចំដោយ ${reviewerName} (Telegram)</b>`
+              : nextStatus === 'Ready'
+                ? `🚀 <b>ស្ថានភាព៖ រួចរាល់ / កំពុងដឹកជញ្ជូន (${reviewerName})</b>`
+                : `✔️ <b>ស្ថានភាព៖ បានបញ្ចប់រួចរាល់ (${reviewerName})</b>`;
+          await answerTelegramCallback(botToken, cb.id, answerText);
+          await editTelegramOrderMessage(botToken, ord, footerHtml);
+          continue;
+        }
+
+        const sess = targetId ? paymentSessionStore.get(targetId) : undefined;
         if (!sess || sess.expiresAt < Date.now()) {
           await answerTelegramCallback(botToken, cb.id, 'វគ្គទូទាត់នេះផុតកំណត់ ឬរួចរាល់ហើយ');
           continue;
@@ -1721,6 +1869,80 @@ app.post('/api/payments/khqr/verify-slip', (req, res) => {
   });
 });
 
+app.get('/api/payments/khqr/pending', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const now = Date.now();
+  const pending = Array.from(paymentSessionStore.values())
+    .filter((s) => s.expiresAt > now && (s.status === 'pending' || s.status === 'awaiting_owner'))
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((s) => ({
+      id: s.id,
+      billNumber: s.billNumber,
+      expectedAmountUsd: s.expectedAmountUsd,
+      expectedAmount: s.expectedAmount,
+      currency: s.currency,
+      status: s.status,
+      transactionRef: s.transactionRef,
+      customerName: s.customerName,
+      customerPhone: s.customerPhone,
+      slipImg: s.slipImg,
+      createdAt: s.createdAt,
+      expiresAt: s.expiresAt,
+    }));
+  return res.json({ ok: true, sessions: pending });
+});
+
+app.post('/api/payments/khqr/admin-decide', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const sessionId = String(req.body?.sessionId || '').trim();
+  const decision = String(req.body?.decision || '').trim();
+  const sess = paymentSessionStore.get(sessionId);
+  if (!sess || sess.expiresAt < Date.now()) {
+    return res.status(404).json({ ok: false, error: 'វគ្គទូទាត់នេះផុតកំណត់ ឬរួចរាល់ហើយ' });
+  }
+
+  const botToken = getEffectiveBotToken();
+  if (decision === 'approve') {
+    sess.status = 'verified';
+    sess.verifiedBy = 'web_admin';
+    sess.paidAmount = sess.expectedAmount;
+    sess.transactionRef = sess.transactionRef || sess.billNumber;
+    sess.error = undefined;
+    if (botToken && sess.telegramMessageId) {
+      await editTelegramPaymentMessage(
+        botToken,
+        sess,
+        '✅ <b>ស្ថានភាព៖ បានបញ្ជាក់ទទួលលុយគ្រប់ (Website Admin)</b>'
+      );
+    }
+    return res.json({ ok: true, status: 'verified' });
+  }
+
+  if (decision === 'amount_mismatch') {
+    sess.status = 'amount_mismatch';
+    sess.error = 'ម្ចាស់ហាងជូនដំណឹងថា ចំនួនលុយវេរចូលមិនគ្រប់តាមវិក្កយបត្រទេ! សូមពិនិត្យម្តងទៀត។';
+    if (botToken && sess.telegramMessageId) {
+      await editTelegramPaymentMessage(
+        botToken,
+        sess,
+        '⚠️ <b>ស្ថានភាព៖ លុយចូលមិនគ្រប់ចំនួន (Website Admin)</b>'
+      );
+    }
+    return res.json({ ok: true, status: 'amount_mismatch' });
+  }
+
+  sess.status = 'rejected';
+  sess.error = 'ម្ចាស់ហាងជូនដំណឹងថា មិនទាន់ឃើញទឹកប្រាក់ចូលធនាគារទេ! សូមផ្ទៀងផ្ទាត់ម្តងទៀត។';
+  if (botToken && sess.telegramMessageId) {
+    await editTelegramPaymentMessage(
+      botToken,
+      sess,
+      '❌ <b>ស្ថានភាព៖ មិនទាន់ទទួលបានប្រាក់ (Website Admin)</b>'
+    );
+  }
+  return res.json({ ok: true, status: 'rejected' });
+});
+
 // ---- Official Telegram Mini App initData HMAC-SHA256 Verification ----
 app.post('/api/auth/telegram/verify-webapp', (req, res) => {
   const initData = String(req.body?.initData || '');
@@ -1872,7 +2094,12 @@ app.put('/api/shop', (req, res) => {
   return res.json({ ok: true, storagePersistent: true });
 });
 
-app.get('/api/orders', (_req, res) => {
+app.get('/api/orders', async (req, res) => {
+  const botToken = getEffectiveBotToken();
+  if (botToken && req.query.skipTg !== '1' && Date.now() - lastOrdersTgPollAt >= 1200) {
+    lastOrdersTgPollAt = Date.now();
+    await processTelegramUpdates(botToken);
+  }
   const list = Array.from(serverOrders.values()).sort(
     (a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)
   );
@@ -1884,8 +2111,11 @@ app.post('/api/orders', async (req, res) => {
   if (!rawOrder || typeof rawOrder.id !== 'string') {
     return res.status(400).json({ ok: false, error: 'Invalid order payload' });
   }
-  const order: Record<string, unknown> = { ...rawOrder };
-  const isNew = !serverOrders.has(String(order.id));
+  const existingOrder = serverOrders.get(String(rawOrder.id));
+  const order: Record<string, unknown> = existingOrder
+    ? { ...existingOrder, ...rawOrder }
+    : { ...rawOrder };
+  const isNew = !existingOrder;
 
   if (isNew && order.payment === 'KHQR / ABA') {
     const proof = verifyPaymentProofToken(order.paymentProofToken);
@@ -1963,38 +2193,39 @@ app.post('/api/orders', async (req, res) => {
     }
   }
 
+  if (!isNew && existingOrder && existingOrder.status !== order.status && !order.confirmedAt && order.status !== 'Pending') {
+    order.confirmedAt = Date.now();
+    if (!order.confirmedBy) order.confirmedBy = 'website';
+    serverOrders.set(String(order.id), order);
+  }
+
   flushDb();
 
-  // Send official Telegram Bot order alert from server when a new order arrives
+  // Send official Telegram Bot order alert with inline confirmation buttons, or sync status edits
+  const botToken = getEffectiveBotToken();
+  const chatId = getEffectiveChatId();
   if (isNew) {
-    const botToken = getEffectiveBotToken();
-    const chatId = getEffectiveChatId();
     if (botToken && chatId) {
-      const cust = (order.customer || {}) as Record<string, unknown>;
-      const items = Array.isArray(order.items) ? (order.items as Array<Record<string, unknown>>) : [];
-      const itemsTxt = items
-        .map((i) => `• ${i.qty}x ${i.name} (${i.options}) = $${(Number(i.unitPrice) * Number(i.qty)).toFixed(2)}`)
-        .join('\n');
-      const coords = cust.coords as { lat?: number; lng?: number } | undefined;
-      const locTxt =
-        order.type === 'dinein'
-          ? `🪑 តុលេខ ${cust.tableNum || 1}`
-          : `📍 ${cust.addressName || '-'}${
-              coords ? `\n🗺 https://maps.google.com/?q=${coords.lat},${coords.lng}` : ''
-            }`;
-      const payStatusLine =
-        order.payment === 'KHQR / ABA' && order.paymentVerified
-          ? `✅ <b>ទូទាត់ KHQR បានផ្ទៀងផ្ទាត់</b> (${
-              order.paymentVerifiedBy === 'bakong_md5'
-                ? 'Bakong Auto'
-                : order.paymentVerifiedBy === 'telegram_owner'
-                  ? 'Telegram Approved'
-                  : 'Slip Verified'
-            })${order.paymentRef ? ` · Ref: <code>${order.paymentRef}</code>` : ''}`
-          : `💵 ទូទាត់៖ ${order.payment}`;
-      const msg = `🔔 <b>កម្ម៉ង់ថ្មី ${order.id}</b> (${order.timestamp})\n👤 ${cust.name || '-'} (${cust.phone || '-'})\n${locTxt}\n\n${itemsTxt}\n\n💰 សរុប៖ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b>\n${payStatusLine}`;
-      sendTelegramBotMessage(botToken, chatId, msg).catch(() => {});
+      const msg = buildOrderTelegramMessageText(order);
+      const markup = getOrderTelegramKeyboard(String(order.id), order.status);
+      const sent = await sendTelegramBotMessage(botToken, chatId, msg, markup);
+      if (sent.ok && sent.messageId) {
+        order.tgMessageId = sent.messageId;
+        order.tgChatId = chatId;
+        serverOrders.set(String(order.id), order);
+        flushDb();
+      }
     }
+  } else if (existingOrder && existingOrder.status !== order.status && botToken && order.tgMessageId) {
+    const footer =
+      order.status === 'Brewing'
+        ? '✅ <b>ស្ថានភាព៖ បានបញ្ជាក់ & កំពុងរៀបចំ (Website Admin)</b>'
+        : order.status === 'Ready'
+          ? '🚀 <b>ស្ថានភាព៖ រួចរាល់ / កំពុងដឹកជញ្ជូន (Website Admin)</b>'
+          : order.status === 'Completed'
+            ? '✔️ <b>ស្ថានភាព៖ បានបញ្ចប់រួចរាល់ (Website Admin)</b>'
+            : undefined;
+    editTelegramOrderMessage(botToken, order, footer).catch(() => {});
   }
 
   return res.json({ ok: true, order });

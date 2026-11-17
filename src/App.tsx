@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion, useScroll, useSpring } from 
 import {
   Armchair,
   ArrowRight,
+  BellRing,
   Bike,
   ChevronDown,
   ChevronRight,
@@ -56,7 +57,6 @@ import {
   normalizeOrders,
   normalizeShopSettings,
   normalizeToppings,
-  playDingSound,
   resolveAssetUrl,
   safeGet,
   safeSessionDel,
@@ -70,6 +70,12 @@ import {
   getMenuDesc,
   getMenuName,
 } from './utils/i18n';
+import {
+  initAudioUnlocker,
+  playAdminAlertSound,
+  playOrderConfirmedSound,
+  unlockAudio,
+} from './utils/sound';
 import { CoffeeCupSteamIllustration, DeliveryRiderIllustration } from './components/AnimatedIllustrations';
 import { AuthModal } from './components/AuthModal';
 import { LocationPickerModal } from './components/LocationPickerModal';
@@ -174,24 +180,60 @@ export default function App() {
   const [lastOrderCountState] = useState(0);
   void lastOrderCountState;
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [liveConfirmAlert, setLiveConfirmAlert] = useState<{
+    orderId: string;
+    status: OrderStatus;
+    title: string;
+    subtitle: string;
+  } | null>(null);
+  const [myOrderIds, setMyOrderIds] = useState<string[]>(() => {
+    const stored = safeGet<string[]>('cafe_my_order_ids_v15', []);
+    return Array.isArray(stored) ? stored : [];
+  });
   const [serverPersistent, setServerPersistent] = useState(true);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const alertBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastOrderCountRef = useRef(orders.length);
   const isFetchingOrdersRef = useRef(false);
   const isFetchingShopRef = useRef(false);
   const clearingOrdersRef = useRef(false);
   const lastOrdersSigRef = useRef('');
   const lastShopSigRef = useRef('');
+  const prevOrderStatusesRef = useRef<Map<string, OrderStatus>>(new Map());
+  const ordersInitializedRef = useRef(false);
+  const myOrderIdsRef = useRef<string[]>(myOrderIds);
+  const currentMemberRef = useRef<Member | null>(currentMember);
+
+  useEffect(() => {
+    myOrderIdsRef.current = myOrderIds;
+    safeSet('cafe_my_order_ids_v15', myOrderIds);
+  }, [myOrderIds]);
+
+  useEffect(() => {
+    currentMemberRef.current = currentMember;
+  }, [currentMember]);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = setTimeout(() => setToastMsg(null), 2800);
+    toastTimerRef.current = setTimeout(() => setToastMsg(null), 3200);
   }, []);
 
+  const showLiveOrderAlert = useCallback(
+    (payload: { orderId: string; status: OrderStatus; title: string; subtitle: string }) => {
+      setLiveConfirmAlert(payload);
+      if (alertBannerTimerRef.current) clearTimeout(alertBannerTimerRef.current);
+      alertBannerTimerRef.current = setTimeout(() => setLiveConfirmAlert(null), 9000);
+    },
+    []
+  );
+
   useEffect(() => {
+    const cleanupAudio = initAudioUnlocker();
     return () => {
+      cleanupAudio();
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      if (alertBannerTimerRef.current) clearTimeout(alertBannerTimerRef.current);
     };
   }, []);
 
@@ -380,20 +422,98 @@ export default function App() {
       const sig = sorted
         .map(
           (o) =>
-            `${o.id}:${o.status}:${o.driverCoords?.lat ?? ''},${o.driverCoords?.lng ?? ''}:${o.customer?.coords?.lat ?? ''},${o.customer?.coords?.lng ?? ''}:${o.driverInfo?.name ?? ''}:${o.driverInfo?.phone ?? ''}:${o.driverInfo?.arrivedAt ?? ''}:${o.feedback?.rating ?? ''}:${o.feedback?.submittedAt ?? ''}`
+            `${o.id}:${o.status}:${o.confirmedAt ?? ''}:${o.confirmedBy ?? ''}:${o.driverCoords?.lat ?? ''},${o.driverCoords?.lng ?? ''}:${o.customer?.coords?.lat ?? ''},${o.customer?.coords?.lng ?? ''}:${o.driverInfo?.name ?? ''}:${o.driverInfo?.phone ?? ''}:${o.driverInfo?.arrivedAt ?? ''}:${o.feedback?.rating ?? ''}:${o.feedback?.submittedAt ?? ''}`
         )
         .join('|');
+
+      if (ordersInitializedRef.current) {
+        const prevMap = prevOrderStatusesRef.current;
+        const member = currentMemberRef.current;
+        const memberPhoneDigits = member?.phone ? member.phone.replace(/\D/g, '') : '';
+        const myIds = myOrderIdsRef.current;
+
+        for (const o of sorted) {
+          const prevStatus = prevMap.get(o.id);
+          if (prevStatus && prevStatus !== o.status) {
+            const custPhoneDigits = o.customer?.phone ? o.customer.phone.replace(/\D/g, '') : '';
+            const isMine =
+              myIds.includes(o.id) ||
+              (member &&
+                ((o.customer?.memberId && String(o.customer.memberId) === String(member.id)) ||
+                  (memberPhoneDigits && custPhoneDigits && memberPhoneDigits === custPhoneDigits)));
+
+            if (isMine && (o.status === 'Brewing' || o.status === 'Ready' || o.status === 'Completed')) {
+              playOrderConfirmedSound();
+              if (o.status === 'Brewing') {
+                showLiveOrderAlert({
+                  orderId: o.id,
+                  status: o.status,
+                  title: isEn
+                    ? `Order ${o.id} Confirmed!`
+                    : `ហាងបានបញ្ជាក់ទទួលការកម្ម៉ង់ ${o.id}!`,
+                  subtitle: isEn
+                    ? `Shop confirmed (${o.confirmedBy === 'telegram' ? 'Telegram' : 'Website'}) · Preparing now`
+                    : `បញ្ជាក់ដោយម្ចាស់ហាង (${o.confirmedBy === 'telegram' ? 'Telegram' : 'Website'}) · កំពុងរៀបចំជូនអ្នក`,
+                });
+                showToast(
+                  isEn
+                    ? `🔔 Order ${o.id} confirmed by shop!`
+                    : `🔔 ហាងបានបញ្ជាក់ទទួលការកម្ម៉ង់ ${o.id} ហើយ!`
+                );
+              } else if (o.status === 'Ready') {
+                showLiveOrderAlert({
+                  orderId: o.id,
+                  status: o.status,
+                  title: isEn
+                    ? `Order ${o.id} Ready / Dispatched!`
+                    : `ការកម្ម៉ង់ ${o.id} រួចរាល់ / កំពុងដឹកជូន!`,
+                  subtitle:
+                    o.type === 'delivery'
+                      ? isEn
+                        ? 'Tap to track your driver live'
+                        : 'ចុចដើម្បីមើលទីតាំងអ្នកដឹកជញ្ជូន'
+                      : isEn
+                        ? 'Ready at counter / table'
+                        : 'ភេសជ្ជៈរួចរាល់សម្រាប់ជូនដល់តុហើយ',
+                });
+              } else if (o.status === 'Completed') {
+                showLiveOrderAlert({
+                  orderId: o.id,
+                  status: o.status,
+                  title: isEn ? `Order ${o.id} Completed!` : `ការកម្ម៉ង់ ${o.id} បានបញ្ចប់ជោគជ័យ!`,
+                  subtitle: isEn ? 'Thank you for ordering!' : 'សូមអរគុណសម្រាប់ការគាំទ្រ!',
+                });
+              }
+            }
+          }
+        }
+      }
+
+      const nextStatusMap = new Map<string, OrderStatus>();
+      for (const o of sorted) {
+        nextStatusMap.set(o.id, o.status);
+      }
+      prevOrderStatusesRef.current = nextStatusMap;
+      ordersInitializedRef.current = true;
+
       if (sorted.length > lastOrderCountRef.current && isAdminUnlocked) {
-        playDingSound();
+        playAdminAlertSound();
         showToast(isEn ? '🔔 New order received!' : '🔔 មានការកម្ម៉ង់ថ្មីចូល!');
       }
       lastOrderCountRef.current = sorted.length;
+
       if (sig !== lastOrdersSigRef.current) {
         lastOrdersSigRef.current = sig;
         setOrders(sorted);
+        setReceiptState((prev) => {
+          if (!prev.order) return prev;
+          const fresh = sorted.find((o) => o.id === prev.order?.id);
+          if (!fresh || fresh.status === prev.order.status) return prev;
+          return { ...prev, order: fresh };
+        });
       }
     },
-    [isAdminUnlocked, isEn, showToast]
+    [isAdminUnlocked, isEn, showToast, showLiveOrderAlert]
   );
 
   const fetchOrdersFromSources = useCallback(async () => {
@@ -592,15 +712,48 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const hasActiveMyOrders = useMemo(
+    () =>
+      orders.some((o) => {
+        if (o.status === 'Completed') return false;
+        if (myOrderIds.includes(o.id)) return true;
+        if (!currentMember) return false;
+        const mPhone = currentMember.phone ? currentMember.phone.replace(/\D/g, '') : '';
+        const cPhone = o.customer?.phone ? o.customer.phone.replace(/\D/g, '') : '';
+        return Boolean(
+          (o.customer?.memberId && String(o.customer.memberId) === String(currentMember.id)) ||
+            (mPhone && cPhone && mPhone === cPhone)
+        );
+      }),
+    [orders, myOrderIds, currentMember]
+  );
+
   useEffect(() => {
-    if (!isAdminUnlocked && !liveTrackOrderId && viewMode !== 'driver') return;
+    if (
+      !isAdminUnlocked &&
+      !liveTrackOrderId &&
+      viewMode !== 'driver' &&
+      !isTrackerOpen &&
+      !receiptState.order &&
+      !hasActiveMyOrders
+    ) {
+      return;
+    }
     const timer = setInterval(() => {
       if (document.visibilityState !== 'hidden') {
         fetchOrdersFromSources();
       }
     }, 3500);
     return () => clearInterval(timer);
-  }, [isAdminUnlocked, liveTrackOrderId, viewMode, fetchOrdersFromSources]);
+  }, [
+    isAdminUnlocked,
+    liveTrackOrderId,
+    viewMode,
+    isTrackerOpen,
+    receiptState.order,
+    hasActiveMyOrders,
+    fetchOrdersFromSources,
+  ]);
 
   useEffect(() => {
     if (viewMode !== 'customer') return;
@@ -784,6 +937,9 @@ export default function App() {
     }
 
     setOrders((prev) => [cleanOrder, ...prev]);
+    setMyOrderIds((prev) => [cleanOrder.id, ...prev.filter((id) => id !== cleanOrder.id)].slice(0, 30));
+    prevOrderStatusesRef.current.set(cleanOrder.id, cleanOrder.status);
+    ordersInitializedRef.current = true;
     lastOrderCountRef.current += 1;
     setCart([]);
     setIsCartOpen(false);
@@ -821,10 +977,17 @@ export default function App() {
   };
 
   const handleUpdateOrderStatus = (orderId: string, status: OrderStatus) => {
+    unlockAudio();
+    prevOrderStatusesRef.current.set(orderId, status);
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
-        const updated = { ...o, status };
+        const updated: Order = {
+          ...o,
+          status,
+          confirmedAt: o.confirmedAt || (status !== 'Pending' ? Date.now() : undefined),
+          confirmedBy: status !== 'Pending' ? 'website' : o.confirmedBy,
+        };
         syncOrderEverywhere(updated);
         return updated;
       })
@@ -986,6 +1149,49 @@ export default function App() {
             className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] bg-slate-900 text-white text-xs font-bold px-4 py-2.5 rounded-full shadow-xl max-w-[92vw] truncate"
           >
             {toastMsg}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {liveConfirmAlert && (
+          <motion.div
+            initial={{ opacity: 0, y: -24, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -18, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+            className="fixed top-14 sm:top-5 left-1/2 -translate-x-1/2 z-[95] w-[92vw] max-w-md bg-[#0D4A3E] text-white border border-amber-300/60 rounded-2xl p-3.5 shadow-2xl flex items-center gap-3"
+          >
+            <div className="w-10 h-10 rounded-xl bg-amber-400 text-slate-900 flex items-center justify-center shrink-0">
+              <BellRing className="w-5 h-5 animate-bounce" />
+            </div>
+            <div className="min-w-0 flex-1 text-left">
+              <p className="text-xs sm:text-sm font-bold truncate">{liveConfirmAlert.title}</p>
+              <p className="text-[11px] text-emerald-100 truncate mt-0.5">{liveConfirmAlert.subtitle}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const targetOrd = orders.find((o) => o.id === liveConfirmAlert.orderId);
+                setLiveConfirmAlert(null);
+                if (targetOrd?.type === 'delivery' && targetOrd.status === 'Ready') {
+                  setLiveTrackOrderId(targetOrd.id);
+                } else {
+                  setIsTrackerOpen(true);
+                }
+              }}
+              className="bg-white text-[#0D4A3E] px-2.5 py-1.5 rounded-lg text-[11px] font-bold shrink-0"
+            >
+              {isEn ? 'View' : 'មើល'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setLiveConfirmAlert(null)}
+              aria-label={isEn ? 'Dismiss' : 'បិទ'}
+              className="text-emerald-200 hover:text-white p-1 shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </motion.div>
         )}
       </AnimatePresence>

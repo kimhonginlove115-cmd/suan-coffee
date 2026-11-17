@@ -79,7 +79,7 @@ export interface Order {
   items: CartItem[];
   payment: PaymentMethod;
   paymentVerified?: boolean;
-  paymentVerifiedBy?: 'bakong_md5' | 'telegram_owner' | 'slip_ref';
+  paymentVerifiedBy?: 'bakong_md5' | 'telegram_owner' | 'web_admin' | 'slip_ref';
   paymentRef?: string;
   paymentPaidAmount?: number;
   paymentCurrency?: 'USD' | 'KHR';
@@ -94,6 +94,9 @@ export interface Order {
   driverCoords: Coords | null;
   driverInfo?: DriverInfo;
   status: OrderStatus;
+  confirmedAt?: number;
+  confirmedBy?: 'website' | 'telegram';
+  tgMessageId?: number;
   feedback?: OrderFeedback;
 }
 
