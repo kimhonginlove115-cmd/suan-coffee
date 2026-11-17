@@ -625,7 +625,7 @@ function sanitizeGeminiDiagnostic(raw: string): string {
     .replace(/AIza[0-9A-Za-z_-]{10,}/g, '[REDACTED]')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 140);
+    .slice(0, 220);
 }
 
 function formatGeminiSlipErrorMessage(err: unknown): { httpStatus: number; message: string } {
@@ -691,7 +691,7 @@ function isAllowedDiscoveredGeminiModel(name: string): boolean {
 async function discoverActiveGeminiFlashModels(apiKey: string): Promise<string[]> {
   try {
     const res = await fetchWithTimeout(
-      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=100',
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
       {
         method: 'GET',
         headers: {
@@ -713,16 +713,18 @@ async function discoverActiveGeminiFlashModels(apiKey: string): Promise<string[]
     const score = (name: string): number => {
       const n = name.toLowerCase();
       let s = 0;
-      if (n.includes('gemini-4')) s += 400;
-      else if (n.includes('gemini-3.1')) s += 310;
+      if (n.includes('gemini-4')) s += 500;
+      else if (n.includes('gemini-3.5')) s += 380;
+      else if (n.includes('gemini-3.1')) s += 320;
       else if (n.includes('gemini-3')) s += 300;
-      else if (n.includes('gemini-2.5')) s += 250;
-      if (n.includes('flash') || n.includes('hydrogen')) s += 40;
+      else if (n.includes('gemini-2.5')) s += 200;
+      if (n.includes('flash') || n.includes('hydrogen')) s += 50;
       if (n.includes('lite')) s += 10;
-      if (n.includes('image')) s -= 200;
+      if (n.includes('preview')) s -= 5;
+      if (n.includes('image')) s -= 250;
       return s;
     };
-    return list.sort((a, b) => score(b) - score(a)).slice(0, 4);
+    return list.sort((a, b) => score(b) - score(a)).slice(0, 10);
   } catch {
     return [];
   }
@@ -823,6 +825,8 @@ async function analyzeBankSlipWithGemini(
 
   const candidateModels: Array<{ model: string; useLowThinking: boolean }> = [
     { model: 'gemini-4-hydrogen', useLowThinking: true },
+    { model: 'gemini-3.5-flash', useLowThinking: false },
+    { model: 'gemini-3.5-flash-lite', useLowThinking: false },
     { model: 'gemini-3.1-flash-lite', useLowThinking: true },
     { model: 'gemini-3.1-flash-lite-preview', useLowThinking: true },
     { model: 'gemini-3-flash-preview', useLowThinking: true },
@@ -831,11 +835,30 @@ async function analyzeBankSlipWithGemini(
   ];
 
   const tried = new Set<string>();
+  const suggestedModels: string[] = [];
   let lastErr: unknown = null;
   for (const candidate of candidateModels) {
     tried.add(candidate.model);
     try {
       return await trySdkModel(candidate.model, candidate.useLowThinking);
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : '';
+      const upper = msg.toUpperCase();
+      const isAuthFailure = upper.includes('API_KEY_INVALID') || upper.includes('API KEY NOT VALID') || upper.includes('PERMISSION_DENIED') || upper.includes('403');
+      if (isAuthFailure) throw err;
+      const hintMatches = msg.matchAll(/(?:use|try)\s+models\/(gemini-[a-z0-9._-]+)/gi);
+      for (const hm of hintMatches) {
+        if (hm[1] && !tried.has(hm[1])) suggestedModels.push(hm[1]);
+      }
+    }
+  }
+
+  for (const hinted of suggestedModels) {
+    if (tried.has(hinted)) continue;
+    tried.add(hinted);
+    try {
+      return await trySdkModel(hinted, false);
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message.toUpperCase() : '';
