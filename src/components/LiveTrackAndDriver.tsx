@@ -842,7 +842,12 @@ export function DriverConsole({
   const visibleList = queueTab === 'active' ? activeDeliveries : completedDeliveries;
 
   return (
-    <div className="max-w-lg mx-auto min-h-screen bg-white shadow-xl flex flex-col">
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25 }}
+      className="max-w-lg mx-auto min-h-screen bg-white shadow-xl flex flex-col"
+    >
       {/* Header */}
       <div className="bg-slate-900 text-white px-4 py-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -1024,7 +1029,11 @@ export function DriverConsole({
 
           <div className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] space-y-3 flex-1 overflow-y-auto">
             {/* COD vs KHQR Payment Callout */}
-            <div
+            <motion.div
+              key={`drv-pay-${currentOrder.id}`}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.22 }}
               className={`p-3 rounded-2xl border flex items-center justify-between gap-2 text-xs font-bold ${
                 currentOrder.payment === 'Cash'
                   ? 'bg-amber-50 border-amber-300 text-amber-950'
@@ -1050,7 +1059,7 @@ export function DriverConsole({
               <span className="font-mono-num text-base font-extrabold">
                 ${Number(currentOrder.grandTotal || 0).toFixed(2)}
               </span>
-            </div>
+            </motion.div>
 
             {/* Customer Card */}
             <div className="bg-[#E8F2EF] p-3.5 rounded-2xl space-y-2">
@@ -1250,6 +1259,6 @@ export function DriverConsole({
           </div>
         </>
       )}
-    </div>
+    </motion.div>
   );
 }

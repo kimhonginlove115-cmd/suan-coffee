@@ -155,6 +155,7 @@ export const DEFAULT_SETTINGS: ShopSettings = {
   freeDeliveryOver: 15,
   lat: 11.5564,
   lng: 104.9282,
+  tableCount: 10,
 };
 
 const memoryFallback: Record<string, unknown> = {};
@@ -316,6 +317,7 @@ export function normalizeShopSettings(raw: unknown, fallback: ShopSettings = DEF
     lat: parseFloat(String(merged.lat)) || fallback.lat,
     lng: parseFloat(String(merged.lng)) || fallback.lng,
     khqrKhrRate: Number(merged.khqrKhrRate) > 0 ? Number(merged.khqrKhrRate) : 4100,
+    tableCount: Math.min(100, Math.max(1, Math.round(Number(merged.tableCount) || fallback.tableCount || 10))),
   };
 }
 

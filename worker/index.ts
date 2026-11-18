@@ -734,13 +734,31 @@ function doesRecipientMatchShop(
   if (!merchantHints.length) return true;
   const combined = `${recipientName || ''} ${recipientAccount || ''}`.toLowerCase();
   const cleanCombinedDigits = combined.replace(/\D/g, '');
-  if (!combined.trim() || combined.trim().length < 3) return true;
+  if (!combined.trim() || combined.trim().length < 2) return true;
+
+  // Strip masking characters (*, •, x) when checking partial names displayed by some Cambodian banks
+  const unmaskedWords = combined
+    .replace(/[*•]+/g, ' ')
+    .split(/[^a-z0-9\u1780-\u17ff]+/)
+    .filter((w) => w.length >= 2);
+  const hasMasking = /[*•]/.test(combined);
+  // If bank completely masked the recipient string, do not reject solely on masked text
+  if (hasMasking && unmaskedWords.length === 0 && cleanCombinedDigits.length < 3) {
+    return true;
+  }
+
   for (const hint of merchantHints) {
     if (/^\d+$/.test(hint)) {
       const tail = hint.slice(-4);
       if (cleanCombinedDigits.includes(tail)) return true;
-    } else if (combined.includes(hint)) {
-      return true;
+    } else {
+      if (combined.includes(hint)) return true;
+      if (
+        hint.length >= 3 &&
+        unmaskedWords.some((w) => w.startsWith(hint.slice(0, 3)) || hint.startsWith(w))
+      ) {
+        return true;
+      }
     }
   }
   return false;
@@ -1112,18 +1130,137 @@ function buildSlipOcrPrompt(db: PersistedDatabase, sess: PaymentVerifySession): 
   const nowPP = formatPhnomPenhDateTime(Date.now());
   const merchantHints = getShopMerchantHints(db.shopSettings);
   return [
-    'Strict Cambodia bank slip OCR. Return ONLY compact JSON (no markdown):',
-    `Expected: ${sess.expectedAmount} ${sess.currency} ($${sess.expectedAmountUsd.toFixed(2)}).`,
-    merchantHints.length ? `Recipient hints: ${merchantHints.join(', ')}.` : '',
-    `Time: ${nowPP.display}.`,
-    'Rules: isBankReceipt=true only if completed transfer confirmation receipt (KHQR scan-to-pay screen=false). transferStatus=SUCCESS only if clearly completed/paid. Extract exact numeric paidAmount, currency (USD|KHR|OTHER), transactionId, recipientName, recipientAccount, receiptDateYmd (YYYY-MM-DD or ""), receiptTimeHm (24h HH:MM or ""), appearsTampered (boolean), summaryKm (short Khmer reason if invalid).',
-    'Keys: {"isBankReceipt":boolean,"transferStatus":"SUCCESS"|"PENDING"|"FAILED"|"UNKNOWN","bankName":string,"paidAmount":number,"currency":"USD"|"KHR"|"OTHER","transactionId":string,"recipientName":string,"recipientAccount":string,"receiptDateYmd":string,"receiptTimeHm":string,"appearsTampered":boolean,"summaryKm":string}',
+    'You are verifying a Cambodian mobile banking transfer receipt image (ABA, ACLEDA, Bakong, Wing, Canadia, Chip Mong, Sathapana, Prince, KB Prasac).',
+    'Output ONLY a single raw JSON object (no markdown, no explanation).',
+    `Expected order payment: ${sess.expectedAmount} ${sess.currency} ($${sess.expectedAmountUsd.toFixed(2)}).`,
+    merchantHints.length ? `Shop recipient hints: ${merchantHints.join(', ')}.` : '',
+    `Current Cambodia time: ${nowPP.display}.`,
+    'Extraction rules:',
+    '- isBankReceipt: true ONLY if this is a completed payment confirmation screen/slip. false if it is an unpaid KHQR QR-scan page, photo, or unrelated image.',
+    '- transferStatus: "SUCCESS" if clearly paid/completed/successful (e.g. Completed, Paid, Success, Transferred, ជោគជ័យ). Otherwise "PENDING", "FAILED", or "UNKNOWN".',
+    '- paidAmount: exact numeric amount paid (number only, no $ or commas). Convert 4,100 to 4100.',
+    '- currency: "USD" or "KHR" or "OTHER". Use "USD" for $ / US$, "KHR" for ៛ / Riel.',
+    '- transactionId: Trx ID / Ref / Trace No / Hash string on receipt, or "" if none.',
+    '- recipientName & recipientAccount: payee name/account shown on receipt (or "").',
+    '- receiptDateYmd: "YYYY-MM-DD" in Cambodia time if visible, or "".',
+    '- receiptTimeHm: 24-hour "HH:MM" if visible, or "".',
+    '- appearsTampered: false for normal mobile screenshots, slight JPEG blur, or cropping. Set true ONLY if numbers/text were clearly pasted/photoshopped.',
+    '- summaryKm: short Khmer message if invalid/rejected, else "".',
+    'JSON schema keys: {"isBankReceipt":boolean,"transferStatus":"SUCCESS"|"PENDING"|"FAILED"|"UNKNOWN","bankName":string,"paidAmount":number,"currency":"USD"|"KHR"|"OTHER","transactionId":string,"recipientName":string,"recipientAccount":string,"receiptDateYmd":string,"receiptTimeHm":string,"appearsTampered":boolean,"summaryKm":string}',
   ]
     .filter(Boolean)
     .join('\n');
 }
 
-function extractWorkersAiJson(res: unknown): AnalyzedSlipResult {
+function parseSlipNumberAmount(rawVal: unknown): number {
+  if (typeof rawVal === 'number') return Number.isFinite(rawVal) ? rawVal : 0;
+  let str = String(rawVal || '').trim();
+  if (!str) return 0;
+  // Handle European decimal like "1,50" when unambiguous, otherwise treat comma as thousands separator
+  str = str.replace(/[^0-9.,-]/g, '');
+  if (/^\d+,\d{2}$/.test(str) && !str.includes('.')) {
+    str = str.replace(',', '.');
+  } else {
+    str = str.replace(/,/g, '');
+  }
+  const num = parseFloat(str);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function normalizeAnalyzedSlip(raw: unknown, sess?: PaymentVerifySession): AnalyzedSlipResult {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const paidAmount = parseSlipNumberAmount(r.paidAmount);
+
+  const rawCurrency = String(r.currency || '').trim().toUpperCase();
+  const rawPaidStr = String(r.paidAmount || '').toUpperCase();
+  let currency: 'USD' | 'KHR' | 'OTHER' = 'OTHER';
+  if (
+    rawCurrency === 'USD' ||
+    rawCurrency === 'US$' ||
+    rawCurrency === '$' ||
+    rawCurrency.includes('DOLLAR') ||
+    rawPaidStr.includes('$') ||
+    rawPaidStr.includes('USD')
+  ) {
+    currency = 'USD';
+  } else if (
+    rawCurrency === 'KHR' ||
+    rawCurrency === 'RIEL' ||
+    rawCurrency === 'RIELS' ||
+    rawCurrency === '៛' ||
+    rawPaidStr.includes('KHR') ||
+    rawPaidStr.includes('៛')
+  ) {
+    currency = 'KHR';
+  } else if (paidAmount > 0 && sess) {
+    // Disambiguate omitted currency when magnitude unmistakably fits KHR (>= 100) vs USD (< 100)
+    if (sess.currency === 'KHR' && paidAmount >= 100) currency = 'KHR';
+    else if (paidAmount < 100 && Math.abs(paidAmount - sess.expectedAmountUsd) <= 0.05) currency = 'USD';
+    else if (sess.currency === 'USD' && paidAmount >= 400) currency = 'KHR';
+  }
+
+  const rawStatus = String(r.transferStatus || '').trim().toUpperCase();
+  let transferStatus: AnalyzedSlipResult['transferStatus'] = 'UNKNOWN';
+  if (
+    /SUCCESS|COMPLETE|COMPLET|PAID|CONFIRMED|APPROVED|DONE|SENT|TRANSFERRED|ជោគជ័យ|បានវេរ/.test(
+      rawStatus
+    )
+  ) {
+    transferStatus = 'SUCCESS';
+  } else if (/PEND|PROCESS|WAIT|កំពុង/.test(rawStatus)) {
+    transferStatus = 'PENDING';
+  } else if (/FAIL|DECLIN|REJECT|CANCEL|ERROR|បរាជ័យ/.test(rawStatus)) {
+    transferStatus = 'FAILED';
+  }
+
+  const rawReceiptFlag = r.isBankReceipt;
+  const bankName = sanitizeText(r.bankName, 40);
+  const isBankReceipt =
+    rawReceiptFlag === true ||
+    String(rawReceiptFlag).trim().toLowerCase() === 'true' ||
+    rawReceiptFlag === 1 ||
+    (rawReceiptFlag === undefined && paidAmount > 0 && transferStatus === 'SUCCESS' && Boolean(bankName));
+
+  const appearsTampered =
+    r.appearsTampered === true || String(r.appearsTampered).trim().toLowerCase() === 'true';
+
+  // Normalize common YYYY/MM/DD or DD-MM-YYYY date strings to YYYY-MM-DD
+  let receiptDateYmd = String(r.receiptDateYmd || '').trim().replace(/\//g, '-');
+  const dmyMatch = receiptDateYmd.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (dmyMatch) {
+    receiptDateYmd = `${dmyMatch[3]}-${dmyMatch[2]}-${dmyMatch[1]}`;
+  }
+
+  const timeMatch = String(r.receiptTimeHm || '').trim().match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+  let receiptTimeHm = '';
+  if (timeMatch) {
+    let hh = parseInt(timeMatch[1], 10);
+    const mm = timeMatch[2];
+    const ap = (timeMatch[3] || '').toUpperCase();
+    if (ap === 'PM' && hh < 12) hh += 12;
+    if (ap === 'AM' && hh === 12) hh = 0;
+    if (hh >= 0 && hh <= 23) {
+      receiptTimeHm = `${String(hh).padStart(2, '0')}:${mm}`;
+    }
+  }
+
+  return {
+    isBankReceipt,
+    transferStatus,
+    bankName,
+    paidAmount,
+    currency,
+    transactionId: sanitizeText(r.transactionId, 60),
+    recipientName: sanitizeText(r.recipientName, 80),
+    recipientAccount: sanitizeText(r.recipientAccount, 40),
+    receiptDateYmd,
+    receiptTimeHm,
+    appearsTampered,
+    summaryKm: sanitizeText(r.summaryKm, 180),
+  };
+}
+
+function extractWorkersAiJson(res: unknown, sess?: PaymentVerifySession): AnalyzedSlipResult {
   if (!res || typeof res !== 'object') {
     throw new Error('Workers AI empty response');
   }
@@ -1136,7 +1273,7 @@ function extractWorkersAiJson(res: unknown): AnalyzedSlipResult {
     candidate = obj.choices[0]?.message?.content;
   }
   if (candidate && typeof candidate === 'object' && 'isBankReceipt' in (candidate as Record<string, unknown>)) {
-    return candidate as AnalyzedSlipResult;
+    return normalizeAnalyzedSlip(candidate, sess);
   }
   const rawText = (typeof candidate === 'string' ? candidate : JSON.stringify(candidate ?? obj))
     .trim()
@@ -1147,7 +1284,7 @@ function extractWorkersAiJson(res: unknown): AnalyzedSlipResult {
   if (!jsonMatch) {
     throw new Error(`Workers AI non-JSON response: ${rawText.slice(0, 120)}`);
   }
-  return JSON.parse(jsonMatch[0]) as AnalyzedSlipResult;
+  return normalizeAnalyzedSlip(JSON.parse(jsonMatch[0]), sess);
 }
 
 async function analyzeBankSlipWithWorkersAi(
@@ -1157,21 +1294,24 @@ async function analyzeBankSlipWithWorkersAi(
   sess: PaymentVerifySession
 ): Promise<AnalyzedSlipResult> {
   const prompt = buildSlipOcrPrompt(db, sess);
-  const baseModels = [
-    '@cf/meta/llama-3.2-11b-vision-instruct',
-    '@cf/meta/llama-4-scout-17b-16e-instruct',
-    '@cf/mistralai/mistral-small-3.1-24b-instruct',
+  const baseModels: Array<{ id: string; supportsJsonMode: boolean }> = [
+    { id: '@cf/meta/llama-4-scout-17b-16e-instruct', supportsJsonMode: true },
+    { id: '@cf/meta/llama-3.2-11b-vision-instruct', supportsJsonMode: false },
+    { id: '@cf/mistralai/mistral-small-3.1-24b-instruct', supportsJsonMode: true },
   ];
   const models =
-    cachedWorkingWorkersAiModel && baseModels.includes(cachedWorkingWorkersAiModel)
-      ? [cachedWorkingWorkersAiModel, ...baseModels.filter((m) => m !== cachedWorkingWorkersAiModel)]
+    cachedWorkingWorkersAiModel && baseModels.some((m) => m.id === cachedWorkingWorkersAiModel)
+      ? [
+          baseModels.find((m) => m.id === cachedWorkingWorkersAiModel)!,
+          ...baseModels.filter((m) => m.id !== cachedWorkingWorkersAiModel),
+        ]
       : baseModels;
 
   let lastErr: unknown = null;
-  for (const model of models) {
-    const runInference = (): Promise<unknown> =>
+  for (const modelSpec of models) {
+    const runInference = (useJsonMode: boolean): Promise<unknown> =>
       runWithTimeout(
-        ai.run(model, {
+        ai.run(modelSpec.id, {
           messages: [
             {
               role: 'user',
@@ -1181,35 +1321,46 @@ async function analyzeBankSlipWithWorkersAi(
               ],
             },
           ],
+          ...(useJsonMode ? { response_format: { type: 'json_object' } } : {}),
           max_tokens: 240,
           temperature: 0.05,
         }),
-        10500,
-        `Workers AI timeout on ${model}`
+        11500,
+        `Workers AI timeout on ${modelSpec.id}`
       );
 
     try {
-      const res = await runInference();
-      const parsed = extractWorkersAiJson(res);
-      cachedWorkingWorkersAiModel = model;
+      let res: unknown;
+      try {
+        res = await runInference(modelSpec.supportsJsonMode);
+      } catch (innerErr) {
+        const innerMsg = innerErr instanceof Error ? innerErr.message : String(innerErr || '');
+        if (modelSpec.supportsJsonMode && /response_format|json_object|unsupported/i.test(innerMsg)) {
+          res = await runInference(false);
+        } else {
+          throw innerErr;
+        }
+      }
+      const parsed = extractWorkersAiJson(res, sess);
+      cachedWorkingWorkersAiModel = modelSpec.id;
       return parsed;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err || '');
       // Automatically accept Meta model license terms on first Workers AI invocation
-      if (!agreedWorkersAiModels.has(model) && /agree|license|5016|accept/i.test(msg)) {
+      if (!agreedWorkersAiModels.has(modelSpec.id) && /agree|license|5016|accept/i.test(msg)) {
         try {
-          await runWithTimeout(ai.run(model, { prompt: 'agree' }), 4500, 'License accept timeout');
-          agreedWorkersAiModels.add(model);
-          const retryRes = await runInference();
-          const parsed = extractWorkersAiJson(retryRes);
-          cachedWorkingWorkersAiModel = model;
+          await runWithTimeout(ai.run(modelSpec.id, { prompt: 'agree' }), 4500, 'License accept timeout');
+          agreedWorkersAiModels.add(modelSpec.id);
+          const retryRes = await runInference(modelSpec.supportsJsonMode);
+          const parsed = extractWorkersAiJson(retryRes, sess);
+          cachedWorkingWorkersAiModel = modelSpec.id;
           return parsed;
         } catch (retryErr) {
           lastErr = retryErr;
           continue;
         }
       }
-      if (cachedWorkingWorkersAiModel === model) {
+      if (cachedWorkingWorkersAiModel === modelSpec.id) {
         cachedWorkingWorkersAiModel = null;
       }
       lastErr = err;
@@ -1219,7 +1370,7 @@ async function analyzeBankSlipWithWorkersAi(
 }
 
 function validateReceiptAgainstSession(
-  ocr: AnalyzedSlipResult,
+  rawOcr: AnalyzedSlipResult,
   db: PersistedDatabase,
   sess: PaymentVerifySession,
   slipHash: string,
@@ -1230,6 +1381,7 @@ function validateReceiptAgainstSession(
   status: 'amount_mismatch' | 'rejected';
   error: string;
 } {
+  const ocr = normalizeAnalyzedSlip(rawOcr, sess);
   if (!ocr.isBankReceipt) {
     return {
       ok: false,
@@ -2267,7 +2419,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       telegramOrderVerifyReady: Boolean(botToken && chatId),
       bakongVerifyReady: Boolean(getEffectiveBakongToken(env, db)),
       slipAutoVerifyReady: isSlipAutoVerifyReady(env),
-      ocrVersion: 'v5-fast-ocr',
+      ocrVersion: 'v6-reliable-ocr',
       phoneOtpReady: phoneOtpChannel !== 'none',
       phoneOtpChannel,
       botUsername,

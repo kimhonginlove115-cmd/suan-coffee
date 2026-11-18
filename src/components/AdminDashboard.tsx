@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import QRCode from 'qrcode';
 import {
   Check,
@@ -13,6 +14,7 @@ import {
   Loader2,
   Lock,
   MessageSquare,
+  Minus,
   Plus,
   Printer,
   QrCode,
@@ -92,6 +94,7 @@ interface PinModalProps {
 
 export function AdminPinModal({ lang = 'km', isOpen, onClose, onSuccess }: PinModalProps) {
   const isEn = lang === 'en';
+  const shouldReduceMotion = useReducedMotion();
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -103,8 +106,6 @@ export function AdminPinModal({ lang = 'km', isOpen, onClose, onSuccess }: PinMo
       setLoading(false);
     }
   }, [isOpen]);
-
-  if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -139,50 +140,69 @@ export function AdminPinModal({ lang = 'km', isOpen, onClose, onSuccess }: PinMo
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
-      <div className="bg-white w-full max-w-xs rounded-3xl p-6 text-center shadow-2xl">
-        <div className="w-12 h-12 rounded-2xl bg-[#E8F2EF] text-[#0D4A3E] flex items-center justify-center mx-auto mb-2">
-          <Lock className="w-5 h-5" />
-        </div>
-        <h3 className="font-bold text-lg text-slate-900">
-          {isEn ? 'Shop Owner Login' : 'ចូលគ្រប់គ្រងហាង'}
-        </h3>
-        <p className="text-xs text-slate-500 mt-1">
-          {isEn ? 'Enter owner PIN ' : 'បញ្ចូលលេខកូដ PIN ម្ចាស់ហាង '}
-          <span className="text-[#0D4A3E] font-bold">
-            {isEn ? '(Default: 1234)' : '(កូដដំបូង: 1234)'}
-          </span>
-        </p>
-        <form onSubmit={handleSubmit} className="mt-4 space-y-3">
-          <input
-            type="password"
-            inputMode="numeric"
-            autoFocus
-            value={pin}
-            onChange={(e) => setPin(e.target.value)}
-            placeholder="••••"
-            className="w-full text-center text-2xl tracking-[0.5em] font-mono-num font-bold border-2 border-slate-200 focus:border-[#0D4A3E] rounded-2xl py-2.5 outline-none"
-          />
-          {error && <p className="text-xs text-red-600 font-bold">{error}</p>}
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 bg-slate-100 py-2.5 rounded-xl text-xs font-bold text-slate-700"
-            >
-              {isEn ? 'Cancel' : 'បោះបង់'}
-            </button>
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex-1 bg-[#0D4A3E] text-white py-2.5 rounded-xl text-xs font-bold"
-            >
-              {loading ? '...' : isEn ? 'Unlock' : 'ចូល'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.18 }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onClose();
+          }}
+          className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[70] flex items-center justify-center p-4"
+        >
+          <motion.div
+            initial={shouldReduceMotion ? false : { opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={shouldReduceMotion ? undefined : { opacity: 0, y: 12, scale: 0.96 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 360 }}
+            className="bg-white w-full max-w-xs rounded-3xl p-6 text-center shadow-2xl"
+          >
+            <div className="w-12 h-12 rounded-2xl bg-[#E8F2EF] text-[#0D4A3E] flex items-center justify-center mx-auto mb-2">
+              <Lock className="w-5 h-5" />
+            </div>
+            <h3 className="font-bold text-lg text-slate-900">
+              {isEn ? 'Shop Owner Login' : 'ចូលគ្រប់គ្រងហាង'}
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              {isEn ? 'Enter owner PIN ' : 'បញ្ចូលលេខកូដ PIN ម្ចាស់ហាង '}
+              <span className="text-[#0D4A3E] font-bold">
+                {isEn ? '(Default: 1234)' : '(កូដដំបូង: 1234)'}
+              </span>
+            </p>
+            <form onSubmit={handleSubmit} className="mt-4 space-y-3">
+              <input
+                type="password"
+                inputMode="numeric"
+                autoFocus
+                value={pin}
+                onChange={(e) => setPin(e.target.value)}
+                placeholder="••••"
+                className="w-full text-center text-2xl tracking-[0.5em] font-mono-num font-bold border-2 border-slate-200 focus:border-[#0D4A3E] rounded-2xl py-2.5 outline-none"
+              />
+              {error && <p className="text-xs text-red-600 font-bold">{error}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="flex-1 bg-slate-100 py-2.5 rounded-xl text-xs font-bold text-slate-700"
+                >
+                  {isEn ? 'Cancel' : 'បោះបង់'}
+                </button>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="flex-1 bg-[#0D4A3E] text-white py-2.5 rounded-xl text-xs font-bold"
+                >
+                  {loading ? '...' : isEn ? 'Unlock' : 'ចូល'}
+                </button>
+              </div>
+            </form>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
 
@@ -265,6 +285,7 @@ export function AdminDashboard({
   onToast,
 }: AdminDashboardProps) {
   const isEn = lang === 'en';
+  const shouldReduceMotion = useReducedMotion();
   const [activeTab, setActiveTab] = useState<AdminTab>('orders');
   const [orderFilter, setOrderFilter] = useState<'All' | OrderStatus>('All');
 
@@ -299,8 +320,10 @@ export function AdminDashboard({
   const [newTopNameEn, setNewTopNameEn] = useState('');
   const [newTopPrice, setNewTopPrice] = useState('');
 
-  // QR generator state
-  const [qrTableCount, setQrTableCount] = useState(6);
+  // QR generator state (persisted via shopSettings.tableCount)
+  const [qrTableCount, setQrTableCount] = useState(() =>
+    Math.min(100, Math.max(1, Number(shopSettings.tableCount) || 10))
+  );
   const [qrBaseUrl, setQrBaseUrl] = useState(() =>
     typeof window !== 'undefined' && window.location.href.startsWith('http')
       ? window.location.href.split('?')[0]
@@ -328,6 +351,8 @@ export function AdminDashboard({
 
   useEffect(() => {
     setDraft(shopSettings);
+    const nextTables = Math.min(100, Math.max(1, Number(shopSettings.tableCount) || 10));
+    setQrTableCount(nextTables);
   }, [shopSettings]);
 
   const sampleDynamicKhqr = useMemo(
@@ -537,9 +562,9 @@ export function AdminDashboard({
     return set;
   }, [menuItems]);
 
-  const generateQRs = async () => {
+  const generateQRs = async (explicitCount?: number) => {
     if (generatingQRs) return;
-    const count = Math.min(50, Math.max(1, Number(qrTableCount) || 6));
+    const count = Math.min(100, Math.max(1, Number(explicitCount ?? qrTableCount) || 10));
     const base = qrBaseUrl.trim().split('?')[0].split('#')[0] || 'https://emerald-brew.cafe';
     setGeneratingQRs(true);
     try {
@@ -559,6 +584,19 @@ export function AdminDashboard({
     } finally {
       setGeneratingQRs(false);
     }
+  };
+
+  const handleApplyTableCount = async (rawNextCount: number) => {
+    const nextCount = Math.min(100, Math.max(1, Math.round(rawNextCount) || 1));
+    setQrTableCount(nextCount);
+    setDraft((prev) => ({ ...prev, tableCount: nextCount }));
+    await onUpdateShopSettings({ ...shopSettings, tableCount: nextCount });
+    await generateQRs(nextCount);
+    onToast(
+      isEn
+        ? `✓ Updated shop to ${nextCount} tables`
+        : `✓ បានកំណត់ចំនួនតុសរុប ${nextCount} រួចរាល់!`
+    );
   };
 
   useEffect(() => {
@@ -1091,7 +1129,12 @@ export function AdminDashboard({
 
       {/* KPIs */}
       <div className="no-print grid grid-cols-3 gap-2 sm:gap-3">
-        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2">
+        <motion.div
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25 }}
+          className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2 shadow-xs"
+        >
           <div className="min-w-0">
             <p className="text-[11px] sm:text-xs text-slate-500 truncate">
               {isEn ? 'Total Revenue' : 'ចំណូលសរុប'}
@@ -1103,8 +1146,13 @@ export function AdminDashboard({
           <div className="hidden sm:flex w-10 h-10 rounded-xl bg-[#E8F2EF] text-[#0D4A3E] items-center justify-center shrink-0">
             <DollarSign className="w-5 h-5" />
           </div>
-        </div>
-        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2">
+        </motion.div>
+        <motion.div
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, delay: 0.05 }}
+          className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2 shadow-xs"
+        >
           <div className="min-w-0">
             <p className="text-[11px] sm:text-xs text-slate-500 truncate">
               {isEn ? 'Orders' : 'ការកម្ម៉ង់'}
@@ -1114,8 +1162,13 @@ export function AdminDashboard({
           <div className="hidden sm:flex w-10 h-10 rounded-xl bg-amber-50 text-amber-600 items-center justify-center shrink-0">
             <ShoppingBag className="w-5 h-5" />
           </div>
-        </div>
-        <div className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2">
+        </motion.div>
+        <motion.div
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, delay: 0.1 }}
+          className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2 shadow-xs"
+        >
           <div className="min-w-0">
             <p className="text-[11px] sm:text-xs text-slate-500 truncate">
               {isEn ? 'Members' : 'សមាជិក'}
@@ -1127,7 +1180,7 @@ export function AdminDashboard({
           <div className="hidden sm:flex w-10 h-10 rounded-xl bg-sky-50 text-sky-600 items-center justify-center shrink-0">
             <Users className="w-5 h-5" />
           </div>
-        </div>
+        </motion.div>
       </div>
 
       {/* Tabs */}
@@ -1165,24 +1218,44 @@ export function AdminDashboard({
               <SlidersHorizontal key="i-s" className="w-3.5 h-3.5" />,
             ],
           ] as Array<[AdminTab, string, React.ReactNode]>
-        ).map(([id, label, icon]) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setActiveTab(id)}
-            className={`px-3 sm:px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors shrink-0 flex items-center gap-1.5 ${
-              activeTab === id ? 'bg-[#0D4A3E] text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600'
-            }`}
-          >
-            {icon}
-            <span>{label}</span>
-          </button>
-        ))}
+        ).map(([id, label, icon]) => {
+          const isCurrent = activeTab === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setActiveTab(id)}
+              className={`relative px-3 sm:px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors shrink-0 flex items-center gap-1.5 ${
+                isCurrent ? 'text-white' : 'bg-white border border-slate-200 text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              {isCurrent && (
+                <motion.span
+                  layoutId="adminActiveTabBg"
+                  transition={{ type: 'spring', stiffness: 400, damping: 32 }}
+                  className="absolute inset-0 bg-[#0D4A3E] rounded-xl shadow-sm"
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-1.5">
+                {icon}
+                <span>{label}</span>
+              </span>
+            </button>
+          );
+        })}
       </div>
 
+      <AnimatePresence mode="wait">
       {/* Orders Tab */}
       {activeTab === 'orders' && (
-        <div className="space-y-4">
+        <motion.div
+          key="tab-orders"
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={shouldReduceMotion ? undefined : { opacity: 0, y: -6 }}
+          transition={{ duration: 0.2 }}
+          className="space-y-4"
+        >
           {/* Driver Portal Dispatch Banner */}
           <div className="bg-[#E8F2EF] border border-[#0D4A3E]/20 rounded-2xl p-3 sm:p-3.5 flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -1642,12 +1715,19 @@ export function AdminDashboard({
               })}
             </div>
           )}
-        </div>
+        </motion.div>
       )}
 
       {/* Customer Feedback Tab */}
       {activeTab === 'feedback' && (
-        <div className="space-y-4">
+        <motion.div
+          key="tab-feedback"
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={shouldReduceMotion ? undefined : { opacity: 0, y: -6 }}
+          transition={{ duration: 0.2 }}
+          className="space-y-4"
+        >
           <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0">
@@ -1745,12 +1825,19 @@ export function AdminDashboard({
               })}
             </div>
           )}
-        </div>
+        </motion.div>
       )}
 
       {/* Menu & Toppings Tab */}
       {activeTab === 'menu' && (
-        <div className="space-y-4">
+        <motion.div
+          key="tab-menu"
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={shouldReduceMotion ? undefined : { opacity: 0, y: -6 }}
+          transition={{ duration: 0.2 }}
+          className="space-y-4"
+        >
           {/* Top Bar for Quick Menu Selection (Presets) */}
           <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex items-center gap-2.5">
@@ -2496,34 +2583,92 @@ export function AdminDashboard({
               </div>
             </div>
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* QR Tab */}
       {activeTab === 'qr' && (
-        <div className="space-y-4">
+        <motion.div
+          key="tab-qr"
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={shouldReduceMotion ? undefined : { opacity: 0, y: -6 }}
+          transition={{ duration: 0.2 }}
+          className="space-y-4"
+        >
           <div className="no-print bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold text-sm text-[#0D4A3E]">
-                {isEn ? 'Table QR Codes' : 'QR Code បិទតាមតុ'}
-              </h3>
+            <div className="flex flex-wrap justify-between items-center gap-2">
+              <div>
+                <h3 className="font-bold text-sm text-[#0D4A3E]">
+                  {isEn ? 'Table Management & QR Stickers' : 'គ្រប់គ្រងចំនួនតុ & QR បិទតាមតុ'}
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  {isEn
+                    ? 'Add or remove tables here — customers on normal website visits will see these tables immediately.'
+                    : 'បន្ថែម ឬដកចំនួនតុនៅទីនេះ (១–១០០ តុ) ដើម្បីឱ្យភ្ញៀវរើសលេខតុ និងបង្កើត QR ភ្លាមៗ'}
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => window.print()}
-                className="bg-slate-900 text-white px-3.5 py-1.5 rounded-xl text-xs font-bold"
+                className="bg-slate-900 text-white px-3.5 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5"
               >
-                Print QR
+                <Printer className="w-3.5 h-3.5" />
+                <span>Print QR</span>
               </button>
             </div>
-            <div className="grid sm:grid-cols-3 gap-2">
-              <input
-                type="number"
-                min={1}
-                max={50}
-                value={qrTableCount}
-                onChange={(e) => setQrTableCount(Math.min(50, Math.max(1, Number(e.target.value) || 6)))}
-                className="px-3 py-2 border border-slate-200 rounded-xl text-xs"
-              />
+
+            <div className="bg-[#F4F8F6] border border-[#0D4A3E]/15 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-[#0D4A3E]">
+                  {isEn ? 'Total Tables:' : 'ចំនួនតុសរុប៖'}
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={qrTableCount <= 1 || generatingQRs}
+                    onClick={() => handleApplyTableCount(qrTableCount - 1)}
+                    className="h-8 px-2.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 disabled:opacity-40 text-xs font-bold text-slate-700 inline-flex items-center gap-1"
+                  >
+                    <Minus className="w-3.5 h-3.5" />
+                    <span>{isEn ? '-1' : 'ដក ១'}</span>
+                  </button>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={qrTableCount}
+                    onChange={(e) => setQrTableCount(Math.min(100, Math.max(1, Number(e.target.value) || 1)))}
+                    className="w-16 text-center px-2 py-1.5 border border-slate-200 bg-white rounded-lg text-xs font-bold font-mono-num text-[#0D4A3E]"
+                  />
+                  <button
+                    type="button"
+                    disabled={qrTableCount >= 100 || generatingQRs}
+                    onClick={() => handleApplyTableCount(qrTableCount + 1)}
+                    className="h-8 px-3 rounded-lg bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-40 text-xs font-bold text-white inline-flex items-center gap-1 shadow-xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>{isEn ? 'Add Table (+1)' : 'បន្ថែមតុ (+1)'}</span>
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={generatingQRs}
+                onClick={() => handleApplyTableCount(qrTableCount)}
+                className="bg-amber-400 hover:bg-amber-500 disabled:opacity-60 text-slate-900 px-3.5 py-2 rounded-xl text-xs font-bold transition-colors"
+              >
+                {generatingQRs
+                  ? isEn
+                    ? 'Saving & Generating...'
+                    : 'កំពុងរក្សាទុក & បង្កើត...'
+                  : isEn
+                    ? 'Save Table Count & Regenerate QRs'
+                    : '✓ រក្សាទុកចំនួនតុ & បង្កើត QR'}
+              </button>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-2">
               <input
                 type="text"
                 value={qrBaseUrl}
@@ -2538,26 +2683,17 @@ export function AdminDashboard({
                 className="px-3 py-2 border border-slate-200 rounded-xl text-xs"
               />
             </div>
-            <button
-              type="button"
-              disabled={generatingQRs}
-              onClick={generateQRs}
-              className="bg-[#0D4A3E] disabled:opacity-60 text-white px-4 py-2 rounded-xl text-xs font-bold"
-            >
-              {generatingQRs
-                ? isEn
-                  ? 'Generating QRs...'
-                  : 'កំពុងបង្កើត QR...'
-                : isEn
-                  ? 'Generate QR Stickers'
-                  : 'បង្កើត QR Stickers'}
-            </button>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-            {Array.from({ length: Math.min(50, Math.max(1, qrTableCount)) }, (_, idx) => idx + 1).map((tNum) => (
-              <div
+            {Array.from({ length: Math.min(100, Math.max(1, qrTableCount)) }, (_, idx) => idx + 1).map((tNum) => (
+              <motion.div
                 key={tNum}
+                layout={!shouldReduceMotion}
+                initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.22 }}
+                whileHover={shouldReduceMotion ? undefined : { y: -3 }}
                 className="bg-white rounded-3xl border-2 border-[#0D4A3E] overflow-hidden shadow-sm flex flex-col items-center text-center"
               >
                 <div className="w-full bg-[#0D4A3E] text-white py-3 px-4 flex items-center justify-center gap-2">
@@ -2601,15 +2737,22 @@ export function AdminDashboard({
                     </button>
                   </div>
                 </div>
-              </div>
+              </motion.div>
             ))}
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* Members Tab */}
       {activeTab === 'members' && (
-        <div className="bg-white p-4 rounded-2xl border border-slate-200">
+        <motion.div
+          key="tab-members"
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={shouldReduceMotion ? undefined : { opacity: 0, y: -6 }}
+          transition={{ duration: 0.2 }}
+          className="bg-white p-4 rounded-2xl border border-slate-200"
+        >
           <h3 className="font-bold text-sm mb-3 text-[#0D4A3E]">
             {isEn
               ? `Registered Members (${displayedMembers.length})`
@@ -2651,12 +2794,19 @@ export function AdminDashboard({
               ))}
             </div>
           )}
-        </div>
+        </motion.div>
       )}
 
       {/* Settings Tab */}
       {activeTab === 'settings' && (
-        <div className="max-w-2xl space-y-4">
+        <motion.div
+          key="tab-settings"
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={shouldReduceMotion ? undefined : { opacity: 0, y: -6 }}
+          transition={{ duration: 0.2 }}
+          className="max-w-2xl space-y-4"
+        >
           <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
             <h3 className="font-bold text-sm text-[#0D4A3E] border-b border-slate-100 pb-2">
               {isEn ? '1. Shop Name, Branding & Images' : '១. ប្តូរឈ្មោះហាង និង រូបភាពហាង'}
@@ -3050,8 +3200,28 @@ export function AdminDashboard({
 
           <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
             <h3 className="font-bold text-sm text-[#0D4A3E] border-b border-slate-100 pb-2">
-              {isEn ? '3. Shop Location & Delivery Fees' : '៣. ទីតាំងហាង & តម្លៃដឹកជញ្ជូន'}
+              {isEn ? '3. Shop Location, Tables & Delivery Fees' : '៣. ទីតាំងហាង, ចំនួនតុ & តម្លៃដឹកជញ្ជូន'}
             </h3>
+            <div className="bg-[#F4F8F6] border border-[#0D4A3E]/15 p-3 rounded-xl flex items-center justify-between gap-2">
+              <div>
+                <label className="text-xs font-bold text-[#0D4A3E] block">
+                  {isEn ? 'Total Shop Tables (1–100)' : 'ចំនួនតុក្នុងហាង (1–100)'}
+                </label>
+                <p className="text-[11px] text-slate-500">
+                  {isEn ? 'Used for customer table selection & Table QR stickers' : 'សម្រាប់ភ្ញៀវរើសលេខតុ និងផ្ទាំងបង្កើត QR'}
+                </p>
+              </div>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={draft.tableCount ?? 10}
+                onChange={(e) =>
+                  setDraft({ ...draft, tableCount: Math.min(100, Math.max(1, Number(e.target.value) || 1)) })
+                }
+                className="w-20 text-center px-2.5 py-1.5 border border-slate-200 bg-white rounded-xl text-xs font-bold font-mono-num text-[#0D4A3E]"
+              />
+            </div>
             <select
               value={draft.deliveryMode}
               onChange={(e) => setDraft({ ...draft, deliveryMode: e.target.value as DeliveryMode })}
@@ -3377,39 +3547,50 @@ export function AdminDashboard({
                   : '💾 រក្សាទុកការកំណត់ផ្លូវការ (ចែករំលែកគ្រប់គ្នា)'}
             </button>
           </div>
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
 
-      {previewSlipUrl && (
-        <div
-          className="fixed inset-0 bg-slate-950/75 backdrop-blur-sm z-[90] flex items-center justify-center p-4"
-          onClick={() => setPreviewSlipUrl(null)}
-        >
-          <div
-            className="bg-white rounded-3xl p-3 max-w-sm w-full space-y-2.5 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
+      <AnimatePresence>
+        {previewSlipUrl && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="fixed inset-0 bg-slate-950/75 backdrop-blur-sm z-[90] flex items-center justify-center p-4"
+            onClick={() => setPreviewSlipUrl(null)}
           >
-            <div className="flex items-center justify-between px-1">
-              <span className="text-xs font-bold text-[#0D4A3E]">
-                {isEn ? 'Payment Slip' : 'រូបភាពវិក្កយបត្រវេរប្រាក់ (Slip)'}
-              </span>
-              <button
-                type="button"
-                onClick={() => setPreviewSlipUrl(null)}
-                className="p-1.5 rounded-full bg-slate-100 hover:bg-slate-200"
-                aria-label={isEn ? 'Close' : 'បិទ'}
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <img
-              src={previewSlipUrl}
-              alt="Payment Slip"
-              className="w-full max-h-[70vh] object-contain rounded-2xl border border-slate-100 bg-slate-50"
-            />
-          </div>
-        </div>
-      )}
+            <motion.div
+              initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.94, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={shouldReduceMotion ? undefined : { opacity: 0, scale: 0.94, y: 10 }}
+              transition={{ type: 'spring', damping: 28, stiffness: 360 }}
+              className="bg-white rounded-3xl p-3 max-w-sm w-full space-y-2.5 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-1">
+                <span className="text-xs font-bold text-[#0D4A3E]">
+                  {isEn ? 'Payment Slip' : 'រូបភាពវិក្កយបត្រវេរប្រាក់ (Slip)'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPreviewSlipUrl(null)}
+                  className="p-1.5 rounded-full bg-slate-100 hover:bg-slate-200"
+                  aria-label={isEn ? 'Close' : 'បិទ'}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <img
+                src={previewSlipUrl}
+                alt="Payment Slip"
+                className="w-full max-h-[70vh] object-contain rounded-2xl border border-slate-100 bg-slate-50"
+              />
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

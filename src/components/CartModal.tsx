@@ -62,6 +62,9 @@ interface CartModalProps {
   selectedCoords: Coords;
   distanceKm: number;
   initialTableNum: number;
+  isTableLocked?: boolean;
+  maxTableCount?: number;
+  onChangeTableNum?: (n: number) => void;
   onClose: () => void;
   onChangeOrderType: (t: OrderType) => void;
   onChangeQty: (idx: number, delta: number) => void;
@@ -137,6 +140,9 @@ export function CartModal({
   selectedCoords,
   distanceKm,
   initialTableNum,
+  isTableLocked = false,
+  maxTableCount = 10,
+  onChangeTableNum,
   onClose,
   onChangeOrderType,
   onChangeQty,
@@ -163,7 +169,9 @@ export function CartModal({
   const [custPhone, setCustPhone] = useState(() => savedCheckout?.custPhone || '');
   const [custTg, setCustTg] = useState(() => savedCheckout?.custTg || '');
   const [addressNote, setAddressNote] = useState(() => savedCheckout?.addressNote || '');
-  const [tableNum, setTableNum] = useState(() => savedCheckout?.tableNum || initialTableNum || 1);
+  const [tableNum, setTableNum] = useState(() =>
+    isTableLocked ? initialTableNum || 1 : initialTableNum || savedCheckout?.tableNum || 1
+  );
   const [dineInPhone, setDineInPhone] = useState(() => savedCheckout?.dineInPhone || '');
   const [submitting, setSubmitting] = useState(false);
   const khqrCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -240,10 +248,20 @@ export function CartModal({
   }, [currentMember]);
 
   useEffect(() => {
-    if (initialTableNum && initialTableNum > 1) {
-      setTableNum(initialTableNum);
+    if (initialTableNum >= 1) {
+      setTableNum(isTableLocked ? initialTableNum : Math.min(maxTableCount, initialTableNum));
     }
-  }, [initialTableNum]);
+  }, [initialTableNum, isTableLocked, maxTableCount]);
+
+  const updateTableNumber = useCallback(
+    (next: number) => {
+      if (isTableLocked) return;
+      const clamped = Math.min(maxTableCount, Math.max(1, Math.round(next) || 1));
+      setTableNum(clamped);
+      onChangeTableNum?.(clamped);
+    },
+    [isTableLocked, maxTableCount, onChangeTableNum]
+  );
 
   const subtotal = cart.reduce((s, i) => s + i.unitPrice * i.qty, 0);
   const promoDisc = subtotal * (appliedPromoPct / 100);
@@ -728,7 +746,10 @@ export function CartModal({
       return;
     }
 
-    if (orderType === 'delivery') {
+    const effectiveOrderType: OrderType = isTableLocked ? 'dinein' : orderType;
+    const effectiveTableNum = isTableLocked ? initialTableNum : tableNum;
+
+    if (effectiveOrderType === 'delivery') {
       if (!custName.trim() || !custPhone.trim()) {
         onToast(isEn ? 'Please enter your name and phone number!' : 'សូមបំពេញឈ្មោះ និងលេខទូរស័ព្ទ!');
         return;
@@ -750,12 +771,12 @@ export function CartModal({
         sendTg,
         payment,
         promoDisc,
-        fee: orderType === 'delivery' ? fee : 0,
+        fee: effectiveOrderType === 'delivery' ? fee : 0,
         subtotal,
         grandTotal,
         paymentVerification: payment === 'KHQR / ABA' ? verifiedPayment || undefined : undefined,
         customer:
-          orderType === 'delivery'
+          effectiveOrderType === 'delivery'
             ? {
                 name: custName.trim(),
                 phone: custPhone.trim(),
@@ -766,10 +787,10 @@ export function CartModal({
                 distanceKm: distanceKm.toFixed(2),
               }
             : {
-                name: currentMember ? currentMember.name : `ភ្ញៀវតុលេខ ${tableNum}`,
+                name: currentMember ? currentMember.name : `ភ្ញៀវតុលេខ ${effectiveTableNum}`,
                 phone: dineInPhone.trim(),
                 tg: currentMember ? currentMember.telegramUsername || currentMember.tg || '' : '',
-                tableNum,
+                tableNum: effectiveTableNum,
               },
       });
       if (ok !== false) {
@@ -884,12 +905,14 @@ export function CartModal({
                 type="button"
                 onClick={() => onChangeOrderType('delivery')}
                 className={`py-2.5 rounded-xl text-xs font-bold border transition-colors flex items-center justify-center gap-1.5 ${
-                  orderType === 'delivery'
-                    ? 'border-[#0D4A3E] bg-[#E8F2EF] text-[#0D4A3E]'
-                    : 'border-slate-200 text-slate-600'
+                  isTableLocked
+                    ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed opacity-75'
+                    : orderType === 'delivery'
+                      ? 'border-[#0D4A3E] bg-[#E8F2EF] text-[#0D4A3E]'
+                      : 'border-slate-200 text-slate-600'
                 }`}
               >
-                <Bike className="w-4 h-4" />
+                {isTableLocked ? <Lock className="w-3.5 h-3.5" /> : <Bike className="w-4 h-4" />}
                 <span>{isEn ? 'Delivery' : 'ដឹកជញ្ជូន'}</span>
               </button>
               <button
@@ -906,87 +929,165 @@ export function CartModal({
               </button>
             </div>
 
-            {orderType === 'delivery' ? (
-              <div className="mt-3 space-y-2">
-                <div className="bg-[#E8F2EF] p-2.5 rounded-xl flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <MapPin className="w-4 h-4 text-[#0D4A3E] shrink-0" />
-                    <p className="text-xs font-bold text-[#0D4A3E] truncate">
-                      {pickedAddressName} ({distanceKm.toFixed(2)} km)
-                    </p>
+            <AnimatePresence mode="wait">
+              {orderType === 'delivery' && !isTableLocked ? (
+                <motion.div
+                  key="cart-delivery-form"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.18 }}
+                  className="mt-3 space-y-2"
+                >
+                  <div className="bg-[#E8F2EF] p-2.5 rounded-xl flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <MapPin className="w-4 h-4 text-[#0D4A3E] shrink-0" />
+                      <p className="text-xs font-bold text-[#0D4A3E] truncate">
+                        {pickedAddressName} ({distanceKm.toFixed(2)} km)
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onOpenLocationPicker}
+                      className="bg-[#0D4A3E] text-white px-3 py-1.5 rounded-lg text-xs font-bold shrink-0"
+                    >
+                      {isEn ? 'Open Map' : 'បើកផែនទី'}
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={onOpenLocationPicker}
-                    className="bg-[#0D4A3E] text-white px-3 py-1.5 rounded-lg text-xs font-bold shrink-0"
-                  >
-                    {isEn ? 'Open Map' : 'បើកផែនទី'}
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  value={custName}
-                  onChange={(e) => setCustName(e.target.value)}
-                  placeholder={isEn ? 'Your Name *' : 'ឈ្មោះ *'}
-                  className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs focus:outline-none focus:border-[#0D4A3E]"
-                />
-                <div className="space-y-1">
+                  <input
+                    type="text"
+                    value={custName}
+                    onChange={(e) => setCustName(e.target.value)}
+                    placeholder={isEn ? 'Your Name *' : 'ឈ្មោះ *'}
+                    className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs focus:outline-none focus:border-[#0D4A3E]"
+                  />
+                  <div className="space-y-1">
+                    <input
+                      type="tel"
+                      value={custPhone}
+                      onChange={(e) => setCustPhone(e.target.value)}
+                      placeholder={isEn ? 'Phone Number *' : 'លេខទូរស័ព្ទ *'}
+                      className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs font-mono-num focus:outline-none focus:border-[#0D4A3E]"
+                    />
+                    {currentMember?.phoneVerified &&
+                      custPhone.replace(/\D/g, '').replace(/^855/, '0') ===
+                        (currentMember.phone || '').replace(/\D/g, '').replace(/^855/, '0') && (
+                        <p className="text-[11px] font-medium text-emerald-700 flex items-center gap-1 px-1">
+                          <CheckCircle2 className="w-3 h-3 shrink-0" />
+                          <span>
+                            {isEn
+                              ? 'Verified member phone protected against spoofing'
+                              : 'លេខទូរស័ព្ទបានផ្ទៀងផ្ទាត់ & ការពារការបន្លំ ✓'}
+                          </span>
+                        </p>
+                      )}
+                  </div>
+                  <input
+                    type="text"
+                    value={custTg}
+                    onChange={(e) => setCustTg(e.target.value)}
+                    placeholder="Telegram (@username)"
+                    className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs focus:outline-none focus:border-[#0D4A3E]"
+                  />
+                  <input
+                    type="text"
+                    value={addressNote}
+                    onChange={(e) => setAddressNote(e.target.value)}
+                    placeholder={isEn ? 'House #, Street / Delivery Note...' : 'លេខផ្ទះ / ផ្លូវ / ចំណាំបន្ថែម...'}
+                    className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs focus:outline-none focus:border-[#0D4A3E]"
+                  />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="cart-dinein-form"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.18 }}
+                  className="mt-3 space-y-2.5"
+                >
+                  {isTableLocked ? (
+                    <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                          <span>
+                            {isEn
+                              ? `Locked to Table ${initialTableNum}`
+                              : `ចាក់សោតុលេខ ${initialTableNum}`}
+                          </span>
+                        </span>
+                        <span className="font-mono-num text-sm font-extrabold text-[#0D4A3E] bg-white px-2.5 py-0.5 rounded-lg border border-amber-200">
+                          #{initialTableNum}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-amber-900">
+                        {isEn
+                          ? 'Scanned Table QR — table number & delivery cannot be changed.'
+                          : 'បានស្កេន QR តុ — មិនអាចប្តូរលេខតុ ឬកម្ម៉ង់ដឹកជញ្ជូនបានទេ។'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-xs font-bold text-slate-700">
+                          {isEn ? `Select Table (1-${maxTableCount})` : `ជ្រើសរើសលេខតុ (1-${maxTableCount})`}
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => updateTableNumber(tableNum - 1)}
+                            aria-label={isEn ? 'Decrease table' : 'បន្ថយលេខតុ'}
+                            className="w-8 h-8 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 flex items-center justify-center text-slate-700"
+                          >
+                            <Minus className="w-3.5 h-3.5" />
+                          </button>
+                          <input
+                            type="number"
+                            min={1}
+                            max={maxTableCount}
+                            value={tableNum}
+                            onChange={(e) => updateTableNumber(Number(e.target.value) || 1)}
+                            className="w-14 text-center border border-slate-200 bg-white rounded-lg py-1 text-sm font-bold font-mono-num text-[#0D4A3E]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => updateTableNumber(tableNum + 1)}
+                            aria-label={isEn ? 'Increase table' : 'បន្ថែមលេខតុ'}
+                            className="w-8 h-8 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 flex items-center justify-center text-slate-700"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pt-0.5">
+                        {Array.from({ length: maxTableCount }, (_, idx) => idx + 1).map((tNo) => (
+                          <button
+                            key={`modal-t-${tNo}`}
+                            type="button"
+                            onClick={() => updateTableNumber(tNo)}
+                            className={`min-w-[34px] h-7 px-2 rounded-lg text-xs font-bold font-mono-num transition-colors ${
+                              tableNum === tNo
+                                ? 'bg-[#0D4A3E] text-white shadow-xs'
+                                : 'bg-white border border-slate-200 text-slate-700 hover:border-[#0D4A3E]/50'
+                            }`}
+                          >
+                            {tNo}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <input
                     type="tel"
-                    value={custPhone}
-                    onChange={(e) => setCustPhone(e.target.value)}
-                    placeholder={isEn ? 'Phone Number *' : 'លេខទូរស័ព្ទ *'}
-                    className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs font-mono-num focus:outline-none focus:border-[#0D4A3E]"
+                    value={dineInPhone}
+                    onChange={(e) => setDineInPhone(e.target.value)}
+                    placeholder={isEn ? 'Phone / Telegram (Optional)' : 'លេខទូរស័ព្ទ / Telegram (ស្រេចចិត្ត)'}
+                    className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs"
                   />
-                  {currentMember?.phoneVerified &&
-                    custPhone.replace(/\D/g, '').replace(/^855/, '0') ===
-                      (currentMember.phone || '').replace(/\D/g, '').replace(/^855/, '0') && (
-                      <p className="text-[11px] font-medium text-emerald-700 flex items-center gap-1 px-1">
-                        <CheckCircle2 className="w-3 h-3 shrink-0" />
-                        <span>
-                          {isEn
-                            ? 'Verified member phone protected against spoofing'
-                            : 'លេខទូរស័ព្ទបានផ្ទៀងផ្ទាត់ & ការពារការបន្លំ ✓'}
-                        </span>
-                      </p>
-                    )}
-                </div>
-                <input
-                  type="text"
-                  value={custTg}
-                  onChange={(e) => setCustTg(e.target.value)}
-                  placeholder="Telegram (@username)"
-                  className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs focus:outline-none focus:border-[#0D4A3E]"
-                />
-                <input
-                  type="text"
-                  value={addressNote}
-                  onChange={(e) => setAddressNote(e.target.value)}
-                  placeholder={isEn ? 'House #, Street / Delivery Note...' : 'លេខផ្ទះ / ផ្លូវ / ចំណាំបន្ថែម...'}
-                  className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs focus:outline-none focus:border-[#0D4A3E]"
-                />
-              </div>
-            ) : (
-              <div className="mt-3 space-y-2">
-                <label className="text-[11px] font-semibold text-slate-600 block">
-                  {isEn ? 'Table Number' : 'លេខតុ'}
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  value={tableNum}
-                  onChange={(e) => setTableNum(Math.max(1, Number(e.target.value) || 1))}
-                  className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-sm font-bold font-mono-num text-[#0D4A3E]"
-                />
-                <input
-                  type="tel"
-                  value={dineInPhone}
-                  onChange={(e) => setDineInPhone(e.target.value)}
-                  placeholder={isEn ? 'Phone / Telegram (Optional)' : 'លេខទូរស័ព្ទ / Telegram (ស្រេចចិត្ត)'}
-                  className="w-full border border-slate-200 rounded-xl px-3.5 py-2 text-base sm:text-xs"
-                />
-              </div>
-            )}
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-bold">
               {(['Cash', 'KHQR / ABA'] as const).map((pm) => (
@@ -1015,8 +1116,16 @@ export function CartModal({
               ))}
             </div>
 
-            {payment === 'KHQR / ABA' && (
-              <div className="mt-3 bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-3">
+            <AnimatePresence>
+              {payment === 'KHQR / ABA' && (
+                <motion.div
+                  key="cart-khqr-panel"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.22 }}
+                  className="mt-3 bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-3"
+                >
                 {/* Security Header & Countdown */}
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[11px] font-bold text-[#0D4A3E] flex items-center gap-1.5">
@@ -1332,7 +1441,7 @@ export function CartModal({
                             if (f) {
                               compressImageFile(
                                 f,
-                                960,
+                                840,
                                 (compressedDataUri) => {
                                   setSlipImgData(compressedDataUri);
                                   setPayError('');
@@ -1347,12 +1456,21 @@ export function CartModal({
                                   }
                                 },
                                 onToast,
-                                0.76
+                                0.74
                               );
                             }
                           }}
                         />
                       </label>
+                      {verifyingSlip && (
+                        <div className="h-1.5 w-full rounded-full bg-emerald-100 overflow-hidden">
+                          <motion.div
+                            className="h-full w-1/2 rounded-full bg-gradient-to-r from-[#0D4A3E] via-emerald-500 to-amber-400"
+                            animate={{ x: ['-100%', '200%'] }}
+                            transition={{ duration: 1.15, repeat: Infinity, ease: 'easeInOut' }}
+                          />
+                        </div>
+                      )}
 
                       {/* Optional Manual Ref for extra trace */}
                       <div className="flex items-center gap-2">
@@ -1446,8 +1564,9 @@ export function CartModal({
                     </div>
                   </div>
                 )}
-              </div>
+              </motion.div>
             )}
+            </AnimatePresence>
 
             <div className="mt-3 bg-slate-50 p-3 rounded-xl space-y-1 text-xs">
               <div className="flex justify-between">

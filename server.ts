@@ -608,13 +608,29 @@ function doesRecipientMatchShop(
   if (!merchantHints.length) return true;
   const combined = `${recipientName || ''} ${recipientAccount || ''}`.toLowerCase();
   const cleanCombinedDigits = combined.replace(/\D/g, '');
-  if (!combined.trim() || combined.trim().length < 3) return true;
+  if (!combined.trim() || combined.trim().length < 2) return true;
+
+  const unmaskedWords = combined
+    .replace(/[*•]+/g, ' ')
+    .split(/[^a-z0-9\u1780-\u17ff]+/)
+    .filter((w) => w.length >= 2);
+  const hasMasking = /[*•]/.test(combined);
+  if (hasMasking && unmaskedWords.length === 0 && cleanCombinedDigits.length < 3) {
+    return true;
+  }
+
   for (const hint of merchantHints) {
     if (/^\d+$/.test(hint)) {
       const tail = hint.slice(-4);
       if (cleanCombinedDigits.includes(tail)) return true;
-    } else if (combined.includes(hint)) {
-      return true;
+    } else {
+      if (combined.includes(hint)) return true;
+      if (
+        hint.length >= 3 &&
+        unmaskedWords.some((w) => w.startsWith(hint.slice(0, 3)) || hint.startsWith(w))
+      ) {
+        return true;
+      }
     }
   }
   return false;
@@ -941,8 +957,109 @@ async function analyzeBankSlipWithGemini(
   throw lastErr instanceof Error ? lastErr : new Error('Gemini API call failed');
 }
 
+function parseSlipNumberAmount(rawVal: unknown): number {
+  if (typeof rawVal === 'number') return Number.isFinite(rawVal) ? rawVal : 0;
+  let str = String(rawVal || '').trim();
+  if (!str) return 0;
+  str = str.replace(/[^0-9.,-]/g, '');
+  if (/^\d+,\d{2}$/.test(str) && !str.includes('.')) {
+    str = str.replace(',', '.');
+  } else {
+    str = str.replace(/,/g, '');
+  }
+  const num = parseFloat(str);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function normalizeAnalyzedSlip(raw: unknown, sess?: PaymentVerifySession): AnalyzedSlipResult {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const paidAmount = parseSlipNumberAmount(r.paidAmount);
+
+  const rawCurrency = String(r.currency || '').trim().toUpperCase();
+  const rawPaidStr = String(r.paidAmount || '').toUpperCase();
+  let currency: 'USD' | 'KHR' | 'OTHER' = 'OTHER';
+  if (
+    rawCurrency === 'USD' ||
+    rawCurrency === 'US$' ||
+    rawCurrency === '$' ||
+    rawCurrency.includes('DOLLAR') ||
+    rawPaidStr.includes('$') ||
+    rawPaidStr.includes('USD')
+  ) {
+    currency = 'USD';
+  } else if (
+    rawCurrency === 'KHR' ||
+    rawCurrency === 'RIEL' ||
+    rawCurrency === 'RIELS' ||
+    rawCurrency === '៛' ||
+    rawPaidStr.includes('KHR') ||
+    rawPaidStr.includes('៛')
+  ) {
+    currency = 'KHR';
+  } else if (paidAmount > 0 && sess) {
+    if (sess.currency === 'KHR' && paidAmount >= 100) currency = 'KHR';
+    else if (paidAmount < 100 && Math.abs(paidAmount - sess.expectedAmountUsd) <= 0.05) currency = 'USD';
+    else if (sess.currency === 'USD' && paidAmount >= 400) currency = 'KHR';
+  }
+
+  const rawStatus = String(r.transferStatus || '').trim().toUpperCase();
+  let transferStatus: AnalyzedSlipResult['transferStatus'] = 'UNKNOWN';
+  if (/SUCCESS|COMPLETE|COMPLET|PAID|CONFIRMED|APPROVED|DONE|SENT|TRANSFERRED|ជោគជ័យ|បានវេរ/.test(rawStatus)) {
+    transferStatus = 'SUCCESS';
+  } else if (/PEND|PROCESS|WAIT|កំពុង/.test(rawStatus)) {
+    transferStatus = 'PENDING';
+  } else if (/FAIL|DECLIN|REJECT|CANCEL|ERROR|បរាជ័យ/.test(rawStatus)) {
+    transferStatus = 'FAILED';
+  }
+
+  const rawReceiptFlag = r.isBankReceipt;
+  const bankName = sanitizeText(r.bankName, 40);
+  const isBankReceipt =
+    rawReceiptFlag === true ||
+    String(rawReceiptFlag).trim().toLowerCase() === 'true' ||
+    rawReceiptFlag === 1 ||
+    (rawReceiptFlag === undefined && paidAmount > 0 && transferStatus === 'SUCCESS' && Boolean(bankName));
+
+  const appearsTampered =
+    r.appearsTampered === true || String(r.appearsTampered).trim().toLowerCase() === 'true';
+
+  let receiptDateYmd = String(r.receiptDateYmd || '').trim().replace(/\//g, '-');
+  const dmyMatch = receiptDateYmd.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (dmyMatch) {
+    receiptDateYmd = `${dmyMatch[3]}-${dmyMatch[2]}-${dmyMatch[1]}`;
+  }
+
+  const timeMatch = String(r.receiptTimeHm || '').trim().match(/(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
+  let receiptTimeHm = '';
+  if (timeMatch) {
+    let hh = parseInt(timeMatch[1], 10);
+    const mm = timeMatch[2];
+    const ap = (timeMatch[3] || '').toUpperCase();
+    if (ap === 'PM' && hh < 12) hh += 12;
+    if (ap === 'AM' && hh === 12) hh = 0;
+    if (hh >= 0 && hh <= 23) {
+      receiptTimeHm = `${String(hh).padStart(2, '0')}:${mm}`;
+    }
+  }
+
+  return {
+    isBankReceipt,
+    transferStatus,
+    bankName,
+    paidAmount,
+    currency,
+    transactionId: sanitizeText(r.transactionId, 60),
+    recipientName: sanitizeText(r.recipientName, 80),
+    recipientAccount: sanitizeText(r.recipientAccount, 40),
+    receiptDateYmd,
+    receiptTimeHm,
+    appearsTampered,
+    summaryKm: sanitizeText(r.summaryKm, 180),
+  };
+}
+
 function validateReceiptAgainstSession(
-  ocr: AnalyzedSlipResult,
+  rawOcr: AnalyzedSlipResult,
   sess: PaymentVerifySession,
   slipHash: string,
   manualRef: string
@@ -952,6 +1069,7 @@ function validateReceiptAgainstSession(
   status: 'amount_mismatch' | 'rejected';
   error: string;
 } {
+  const ocr = normalizeAnalyzedSlip(rawOcr, sess);
   if (!ocr.isBankReceipt) {
     return {
       ok: false,
@@ -2000,7 +2118,7 @@ app.get('/api/auth/capabilities', async (_req, res) => {
     telegramOrderVerifyReady: Boolean(botToken && chatId),
     bakongVerifyReady: Boolean(getEffectiveBakongToken()),
     slipAutoVerifyReady: Boolean(getEffectiveGeminiKey()),
-    ocrVersion: 'v5-fast-ocr',
+    ocrVersion: 'v6-reliable-ocr',
     phoneOtpReady: phoneOtpChannel !== 'none',
     phoneOtpChannel,
     botUsername,

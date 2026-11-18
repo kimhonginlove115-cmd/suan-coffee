@@ -149,6 +149,7 @@ export interface ShopSettings {
   freeDeliveryOver: number;
   lat: number;
   lng: number;
+  tableCount?: number;
 }
 
 export interface AdminSecretsConfig {

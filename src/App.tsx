@@ -14,6 +14,7 @@ import {
   Globe,
   LayoutGrid,
   Leaf,
+  Lock,
   MapPin,
   Minus,
   Plus,
@@ -168,6 +169,32 @@ export default function App() {
     return stored === 'dinein' ? 'dinein' : 'delivery';
   });
   const [tableNumberFromQR, setTableNumberFromQR] = useState<number | null>(null);
+  const [selectedTableNum, setSelectedTableNum] = useState<number>(() => {
+    const stored = Number(safeGet<number>('cafe_table_num_v15', 1));
+    return Number.isFinite(stored) && stored >= 1 ? Math.min(100, Math.round(stored)) : 1;
+  });
+
+  const maxTableCount = Math.min(100, Math.max(1, Number(shopSettings.tableCount) || 10));
+  const isTableLocked = tableNumberFromQR !== null;
+  const activeTableNum = isTableLocked
+    ? tableNumberFromQR
+    : Math.min(maxTableCount, Math.max(1, selectedTableNum));
+
+  useEffect(() => {
+    safeSet('cafe_table_num_v15', selectedTableNum);
+  }, [selectedTableNum]);
+
+  useEffect(() => {
+    if (selectedTableNum > maxTableCount) {
+      setSelectedTableNum(maxTableCount);
+    }
+  }, [selectedTableNum, maxTableCount]);
+
+  useEffect(() => {
+    if (isTableLocked && orderType !== 'dinein') {
+      setOrderType('dinein');
+    }
+  }, [isTableLocked, orderType]);
 
   const [selectedCoords, setSelectedCoords] = useState<Coords>(() => {
     const stored = safeGet<{ coords?: Coords; addressName?: string } | null>('cafe_customer_loc_v15', null);
@@ -255,6 +282,22 @@ export default function App() {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToastMsg(null), 3200);
   }, []);
+
+  const handleRequestOrderTypeChange = useCallback(
+    (nextType: OrderType) => {
+      if (isTableLocked && nextType === 'delivery') {
+        showToast(
+          isEn
+            ? `Locked to Table ${tableNumberFromQR} (Dine-In Only)`
+            : `បានស្កេន QR តុលេខ ${tableNumberFromQR} — អាចកម្ម៉ង់ញ៉ាំនៅហាងតែប៉ុណ្ណោះ!`
+        );
+        setOrderType('dinein');
+        return;
+      }
+      setOrderType(nextType);
+    },
+    [isTableLocked, tableNumberFromQR, isEn, showToast]
+  );
 
   const showLiveOrderAlert = useCallback(
     (payload: { orderId: string; status: OrderStatus; title: string; subtitle: string }) => {
@@ -977,20 +1020,22 @@ export default function App() {
       return false;
     }
 
-    const customerPayload: Order['customer'] = currentMember
-      ? { ...payload.customer, memberId: currentMember.id }
-      : payload.customer;
+    const finalOrderType: OrderType = isTableLocked ? 'dinein' : orderType;
+    const customerPayload: Order['customer'] = {
+      ...(currentMember ? { ...payload.customer, memberId: currentMember.id } : payload.customer),
+      ...(isTableLocked ? { tableNum: tableNumberFromQR } : {}),
+    };
 
     const orderForServer: Order = {
       id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
       createdAt: Date.now(),
       timestamp: new Date().toLocaleTimeString('km-KH', { hour: '2-digit', minute: '2-digit' }),
-      type: orderType,
+      type: finalOrderType,
       items: [...cart],
       payment: payload.payment,
       subtotal: payload.subtotal,
       promoDisc: payload.promoDisc,
-      fee: payload.fee,
+      fee: finalOrderType === 'delivery' ? payload.fee : 0,
       grandTotal: payload.grandTotal,
       customer: customerPayload,
       driverCoords: null,
@@ -1295,31 +1340,47 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {viewMode === 'driver' && (
-        <DriverConsole
-          lang={lang}
-          onChangeLang={setLang}
-          order={activeDriverOrder}
-          orders={orders}
-          shopSettings={shopSettings}
-          onSelectOrder={(id) => setActiveDriverOrderId(id)}
-          onExit={() => setViewMode(isAdminUnlocked ? 'admin' : 'customer')}
-          onUpdateDriverCoords={handleUpdateDriverCoords}
-          onUpdateDriverInfo={handleUpdateDriverInfo}
-          onCompleteDelivery={(id) => {
-            handleUpdateDriverInfo(id, { deliveredAt: Date.now() }, 'Completed');
-            showToast(isEn ? '✅ Delivery completed!' : '✅ បានបញ្ចប់ការដឹកជញ្ជូន!');
-            const nextRemaining = orders.find(
-              (o) => o.type === 'delivery' && o.status !== 'Completed' && o.id !== id
-            );
-            setActiveDriverOrderId(nextRemaining ? nextRemaining.id : null);
-          }}
-          onToast={showToast}
-        />
-      )}
+      <AnimatePresence mode="wait">
+        {viewMode === 'driver' && (
+          <motion.div
+            key="view-driver"
+            initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={shouldReduceMotion ? undefined : { opacity: 0, y: -8 }}
+            transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <DriverConsole
+              lang={lang}
+              onChangeLang={setLang}
+              order={activeDriverOrder}
+              orders={orders}
+              shopSettings={shopSettings}
+              onSelectOrder={(id) => setActiveDriverOrderId(id)}
+              onExit={() => setViewMode(isAdminUnlocked ? 'admin' : 'customer')}
+              onUpdateDriverCoords={handleUpdateDriverCoords}
+              onUpdateDriverInfo={handleUpdateDriverInfo}
+              onCompleteDelivery={(id) => {
+                handleUpdateDriverInfo(id, { deliveredAt: Date.now() }, 'Completed');
+                showToast(isEn ? '✅ Delivery completed!' : '✅ បានបញ្ចប់ការដឹកជញ្ជូន!');
+                const nextRemaining = orders.find(
+                  (o) => o.type === 'delivery' && o.status !== 'Completed' && o.id !== id
+                );
+                setActiveDriverOrderId(nextRemaining ? nextRemaining.id : null);
+              }}
+              onToast={showToast}
+            />
+          </motion.div>
+        )}
 
-      {viewMode === 'admin' && (
-        <AdminDashboard
+        {viewMode === 'admin' && (
+          <motion.div
+            key="view-admin"
+            initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={shouldReduceMotion ? undefined : { opacity: 0, y: -8 }}
+            transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <AdminDashboard
           lang={lang}
           onChangeLang={setLang}
           adminToken={adminToken}
@@ -1394,19 +1455,27 @@ export default function App() {
           onOpenDriverConsole={handleOpenDriverConsole}
           onOpenDriverPortal={handleOpenDriverPortal}
           onOpenShopMapPicker={() => setLocationPickerState({ open: true, purpose: 'shop' })}
-          onOpenTableView={(tNum) => {
-            setTableNumberFromQR(tNum);
-            setOrderType('dinein');
-            setAdminToken(null);
-            safeSessionDel('cafe_admin_token');
-            setViewMode('customer');
-          }}
-          onToast={showToast}
-        />
-      )}
+            onOpenTableView={(tNum) => {
+              setTableNumberFromQR(tNum);
+              setOrderType('dinein');
+              setAdminToken(null);
+              safeSessionDel('cafe_admin_token');
+              setViewMode('customer');
+            }}
+            onToast={showToast}
+          />
+          </motion.div>
+        )}
 
-      {viewMode === 'customer' && (
-        <div className="min-h-screen flex flex-col justify-between pb-24 lg:pb-10">
+        {viewMode === 'customer' && (
+          <motion.div
+            key="view-customer"
+            initial={shouldReduceMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={shouldReduceMotion ? undefined : { opacity: 0 }}
+            transition={{ duration: 0.22 }}
+            className="min-h-screen flex flex-col justify-between pb-24 lg:pb-10"
+          >
           <div>
             <header className="sticky top-0 z-30 bg-white/92 backdrop-blur-md border-b border-slate-200/80 shadow-[0_1px_12px_rgba(15,23,42,0.04)]">
               <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-8">
@@ -1440,10 +1509,27 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
-                    className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
+                    onClick={() => {
+                      if (isTableLocked) {
+                        showToast(
+                          isEn
+                            ? `Locked to Table ${tableNumberFromQR} (Dine-In Only)`
+                            : `បានស្កេន QR តុលេខ ${tableNumberFromQR} — កម្ម៉ង់ញ៉ាំនៅហាងតែប៉ុណ្ណោះ!`
+                        );
+                        return;
+                      }
+                      setLocationPickerState({ open: true, purpose: 'customer' });
+                    }}
+                    className={`nav-link-underline transition-colors whitespace-nowrap shrink-0 flex items-center gap-1 ${
+                      isTableLocked ? 'text-amber-700 font-bold' : 'hover:text-[#0D4A3E]'
+                    }`}
                   >
-                    {t.locationNav}
+                    {isTableLocked && <Lock className="w-3.5 h-3.5" />}
+                    <span>
+                      {isTableLocked
+                        ? `${t.tableNumLabel} ${tableNumberFromQR}`
+                        : t.locationNav}
+                    </span>
                   </button>
                   <button
                     type="button"
@@ -1516,29 +1602,40 @@ export default function App() {
             </header>
 
             <main id="top" className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 sm:pt-6 space-y-5 sm:space-y-8">
-              {shopSettings.isOpen === false && (
-                <div className="bg-red-600 text-white px-4 py-3 rounded-2xl text-xs font-bold text-center">
-                  {t.shopClosedBanner}
-                </div>
-              )}
-
-              {tableNumberFromQR !== null && (
-                <div className="bg-amber-400 text-slate-900 px-3.5 py-2.5 rounded-2xl text-xs flex items-center justify-between gap-2 font-bold">
-                  <span>
-                    🪑 {t.dineInLabel} · {t.tableNumLabel} {tableNumberFromQR}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTableNumberFromQR(null);
-                      setOrderType('delivery');
-                    }}
-                    className="bg-slate-900 text-white px-3 py-1 rounded-lg text-[11px] shrink-0"
+              <AnimatePresence>
+                {shopSettings.isOpen === false && (
+                  <motion.div
+                    initial={shouldReduceMotion ? false : { opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={shouldReduceMotion ? undefined : { opacity: 0, y: -8 }}
+                    className="bg-red-600 text-white px-4 py-3 rounded-2xl text-xs font-bold text-center"
                   >
-                    {t.switchToDelivery}
-                  </button>
-                </div>
-              )}
+                    {t.shopClosedBanner}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <AnimatePresence>
+                {isTableLocked && (
+                  <motion.div
+                    initial={shouldReduceMotion ? false : { opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={shouldReduceMotion ? undefined : { opacity: 0, y: -8 }}
+                    className="bg-amber-400 text-slate-900 px-3.5 py-2.5 rounded-2xl text-xs flex flex-wrap items-center justify-between gap-2 font-bold shadow-sm"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        🪑 {t.dineInLabel} · {t.tableNumLabel} {tableNumberFromQR}
+                      </span>
+                    </span>
+                    <span className="bg-slate-900 text-amber-300 px-2.5 py-1 rounded-lg text-[11px] inline-flex items-center gap-1 shrink-0">
+                      <Lock className="w-3 h-3" />
+                      <span>{isEn ? 'Table Locked · Dine-In Only' : 'ចាក់សោតុ · ញ៉ាំនៅហាងតែប៉ុណ្ណោះ'}</span>
+                    </span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {activeLiveOrder && (
                 <motion.button
@@ -1620,23 +1717,35 @@ export default function App() {
                   <div className="relative z-10 grid sm:grid-cols-2 gap-2.5 sm:gap-3 pt-1">
                     <motion.button
                       type="button"
-                      whileHover={shouldReduceMotion ? undefined : { y: -2 }}
+                      whileHover={shouldReduceMotion || isTableLocked ? undefined : { y: -2 }}
                       whileTap={shouldReduceMotion ? undefined : { scale: 0.97 }}
-                      onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
+                      onClick={() => {
+                        if (isTableLocked) {
+                          showToast(
+                            isEn
+                              ? `Locked to Table ${tableNumberFromQR} (Dine-In Only)`
+                              : `បានស្កេន QR តុលេខ ${tableNumberFromQR} — មិនអាចប្តូរទីតាំងដឹកជញ្ជូនបានទេ!`
+                          );
+                          return;
+                        }
+                        setLocationPickerState({ open: true, purpose: 'customer' });
+                      }}
                       className="text-left bg-white/12 hover:bg-white/20 px-3 py-2 sm:px-3.5 sm:py-2.5 rounded-xl sm:rounded-2xl flex items-center gap-2.5 border border-white/15 transition-colors"
                     >
                       <div className="bg-amber-400 text-slate-900 p-1.5 sm:p-2 rounded-lg sm:rounded-xl shrink-0">
-                        <MapPin className="w-4 h-4" />
+                        {isTableLocked ? <Lock className="w-4 h-4" /> : <MapPin className="w-4 h-4" />}
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="text-[10px] sm:text-[11px] text-emerald-200">
-                          {tableNumberFromQR ? t.dineInLabel : t.deliverToMap}
+                          {isTableLocked ? t.dineInLabel : t.deliverToMap}
                         </p>
                         <p className="text-xs font-bold truncate">
-                          {tableNumberFromQR ? `${t.tableNumLabel} ${tableNumberFromQR}` : pickedAddressName}
+                          {isTableLocked
+                            ? `${t.tableNumLabel} ${tableNumberFromQR} (${isEn ? 'Locked' : 'ចាក់សោ'})`
+                            : pickedAddressName}
                         </p>
                       </div>
-                      <ChevronDown className="w-4 h-4 text-emerald-200 shrink-0" />
+                      {!isTableLocked && <ChevronDown className="w-4 h-4 text-emerald-200 shrink-0" />}
                     </motion.button>
 
                     <div className="relative flex items-center">
@@ -1717,13 +1826,18 @@ export default function App() {
 
                   {/* Mobile horizontal scroll strip */}
                   <div className="flex gap-3 overflow-x-auto hide-scrollbar pb-1 lg:hidden">
-                    {featuredMenu.map((item) => {
+                    {featuredMenu.map((item, idx) => {
                       const fp = getDiscountedPrice(item);
                       const displayName = getMenuName(item, lang);
                       return (
-                        <button
+                        <motion.button
                           key={`feat-mob-${item.id}`}
                           type="button"
+                          initial={shouldReduceMotion ? false : { opacity: 0, x: 14 }}
+                          whileInView={{ opacity: 1, x: 0 }}
+                          viewport={{ once: true, amount: 0.2 }}
+                          transition={{ duration: 0.28, delay: Math.min(idx * 0.05, 0.2) }}
+                          whileTap={shouldReduceMotion ? undefined : { scale: 0.96 }}
                           onClick={() => setCustomizingItem(item)}
                           className="shrink-0 w-56 sm:w-64 bg-white border border-amber-200/80 rounded-2xl p-2.5 flex items-center gap-3 text-left hover:shadow-md transition-shadow"
                         >
@@ -1743,7 +1857,7 @@ export default function App() {
                               ${fp.toFixed(2)}
                             </p>
                           </div>
-                        </button>
+                        </motion.button>
                       );
                     })}
                   </div>
@@ -1973,13 +2087,18 @@ export default function App() {
                         ] as const
                       ).map(({ id, label, Icon }) => {
                         const active = orderType === id;
+                        const lockedOut = isTableLocked && id === 'delivery';
                         return (
                           <button
                             key={id}
                             type="button"
-                            onClick={() => setOrderType(id)}
+                            onClick={() => handleRequestOrderTypeChange(id)}
                             className={`relative py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors ${
-                              active ? 'text-[#0D4A3E]' : 'text-slate-500 hover:text-slate-800'
+                              lockedOut
+                                ? 'text-slate-400 cursor-not-allowed opacity-70'
+                                : active
+                                  ? 'text-[#0D4A3E]'
+                                  : 'text-slate-500 hover:text-slate-800'
                             }`}
                           >
                             {active && (
@@ -1990,7 +2109,7 @@ export default function App() {
                               />
                             )}
                             <span className="relative z-10 flex items-center gap-1.5">
-                              <Icon className="w-3.5 h-3.5" />
+                              {lockedOut ? <Lock className="w-3.5 h-3.5" /> : <Icon className="w-3.5 h-3.5" />}
                               <span>{label}</span>
                             </span>
                           </button>
@@ -1998,34 +2117,115 @@ export default function App() {
                       })}
                     </div>
 
-                    {orderType === 'delivery' ? (
-                      <button
-                        type="button"
-                        onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
-                        className="w-full text-left bg-[#F4F8F6] hover:bg-[#E8F2EF] border border-emerald-900/10 rounded-xl px-3 py-2.5 flex items-center gap-2 transition-colors"
-                      >
-                        <MapPin className="w-4 h-4 text-[#0D4A3E] shrink-0" />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-[11px] font-bold text-[#0D4A3E] truncate">{pickedAddressName}</p>
-                          <p className="text-[10px] text-slate-500 font-mono-num">
-                            {distanceKm.toFixed(2)} km ·{' '}
-                            {estimatedDeliveryFee === 0
-                              ? isEn
-                                ? 'Free delivery'
-                                : 'ដឹកជញ្ជូនហ្វ្រី'
-                              : `$${estimatedDeliveryFee.toFixed(2)}`}
-                          </p>
-                        </div>
-                        <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
-                      </button>
-                    ) : (
-                      <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-xs font-bold text-amber-900 flex items-center justify-between">
-                        <span>{t.dineInLabel}</span>
-                        <span className="font-mono-num">
-                          {t.tableNumLabel} {tableNumberFromQR || 1}
-                        </span>
-                      </div>
-                    )}
+                    <AnimatePresence mode="wait">
+                      {orderType === 'delivery' ? (
+                        <motion.button
+                          key="sidebar-delivery"
+                          type="button"
+                          initial={shouldReduceMotion ? false : { opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={shouldReduceMotion ? undefined : { opacity: 0, y: -6 }}
+                          transition={{ duration: 0.18 }}
+                          onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
+                          className="w-full text-left bg-[#F4F8F6] hover:bg-[#E8F2EF] border border-emerald-900/10 rounded-xl px-3 py-2.5 flex items-center gap-2 transition-colors"
+                        >
+                          <MapPin className="w-4 h-4 text-[#0D4A3E] shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11px] font-bold text-[#0D4A3E] truncate">{pickedAddressName}</p>
+                            <p className="text-[10px] text-slate-500 font-mono-num">
+                              {distanceKm.toFixed(2)} km ·{' '}
+                              {estimatedDeliveryFee === 0
+                                ? isEn
+                                  ? 'Free delivery'
+                                  : 'ដឹកជញ្ជូនហ្វ្រី'
+                                : `$${estimatedDeliveryFee.toFixed(2)}`}
+                            </p>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
+                        </motion.button>
+                      ) : (
+                        <motion.div
+                          key="sidebar-dinein"
+                          initial={shouldReduceMotion ? false : { opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={shouldReduceMotion ? undefined : { opacity: 0, y: -6 }}
+                          transition={{ duration: 0.18 }}
+                          className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-2"
+                        >
+                          <div className="flex items-center justify-between gap-2 text-xs font-bold text-amber-950">
+                            <span className="flex items-center gap-1.5">
+                              {isTableLocked && <Lock className="w-3.5 h-3.5 text-amber-700 shrink-0" />}
+                              <span>{t.dineInLabel}</span>
+                            </span>
+                            <span className="font-mono-num bg-white border border-amber-200 px-2 py-0.5 rounded-lg text-[#0D4A3E]">
+                              {t.tableNumLabel} {activeTableNum}
+                            </span>
+                          </div>
+                          {isTableLocked ? (
+                            <p className="text-[10px] font-semibold text-amber-800">
+                              {isEn
+                                ? 'Scanned Table QR — table & dine-in mode locked.'
+                                : 'ស្កេនពី QR តុ — ចាក់សោលេខតុ & ញ៉ាំនៅហាងតែប៉ុណ្ណោះ។'}
+                            </p>
+                          ) : (
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] font-semibold text-amber-900">
+                                  {isEn ? 'Select Table:' : 'ជ្រើសរើសលេខតុ៖'}
+                                </span>
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedTableNum((n) => Math.max(1, n - 1))}
+                                    aria-label={isEn ? 'Previous table' : 'បន្ថយលេខតុ'}
+                                    className="w-6 h-6 rounded-md bg-white border border-amber-200 hover:bg-amber-100 flex items-center justify-center text-amber-900"
+                                  >
+                                    <Minus className="w-3 h-3" />
+                                  </button>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={maxTableCount}
+                                    value={selectedTableNum}
+                                    onChange={(e) => {
+                                      const v = parseInt(e.target.value, 10);
+                                      if (Number.isFinite(v)) {
+                                        setSelectedTableNum(Math.min(maxTableCount, Math.max(1, v)));
+                                      }
+                                    }}
+                                    className="w-11 text-center bg-white border border-amber-200 rounded-md py-0.5 text-xs font-bold font-mono-num text-[#0D4A3E]"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedTableNum((n) => Math.min(maxTableCount, n + 1))}
+                                    aria-label={isEn ? 'Next table' : 'បន្ថែមលេខតុ'}
+                                    className="w-6 h-6 rounded-md bg-white border border-amber-200 hover:bg-amber-100 flex items-center justify-center text-amber-900"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
+                                {Array.from({ length: maxTableCount }, (_, idx) => idx + 1).map((tNo) => (
+                                  <button
+                                    key={`sb-t-${tNo}`}
+                                    type="button"
+                                    onClick={() => setSelectedTableNum(tNo)}
+                                    className={`min-w-[28px] h-6 px-1.5 rounded-md text-[11px] font-bold font-mono-num transition-colors ${
+                                      selectedTableNum === tNo
+                                        ? 'bg-[#0D4A3E] text-white shadow-xs'
+                                        : 'bg-white border border-amber-200/80 text-amber-950 hover:bg-amber-100'
+                                    }`}
+                                  >
+                                    {tNo}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
 
                     {/* Items List or Empty State */}
                     {cart.length === 0 ? (
@@ -2189,8 +2389,9 @@ export default function App() {
               </motion.button>
             )}
           </AnimatePresence>
-        </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AuthModal
         lang={lang}
@@ -2269,11 +2470,21 @@ export default function App() {
         pickedAddressName={pickedAddressName}
         selectedCoords={selectedCoords}
         distanceKm={distanceKm}
-        initialTableNum={tableNumberFromQR || 1}
+        initialTableNum={activeTableNum}
+        isTableLocked={isTableLocked}
+        maxTableCount={maxTableCount}
+        onChangeTableNum={(n) => {
+          if (!isTableLocked) {
+            setSelectedTableNum(Math.min(maxTableCount, Math.max(1, n)));
+          }
+        }}
         onClose={() => setIsCartOpen(false)}
-        onChangeOrderType={setOrderType}
+        onChangeOrderType={handleRequestOrderTypeChange}
         onChangeQty={handleChangeCartQty}
-        onOpenLocationPicker={() => setLocationPickerState({ open: true, purpose: 'customer' })}
+        onOpenLocationPicker={() => {
+          if (isTableLocked) return;
+          setLocationPickerState({ open: true, purpose: 'customer' });
+        }}
         onSubmitOrder={handleSubmitOrder}
         onToast={showToast}
       />
