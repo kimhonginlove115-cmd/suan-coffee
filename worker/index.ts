@@ -4066,6 +4066,12 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       order.paymentBankName = existingOrder.paymentBankName;
       order.paymentSlipHash = existingOrder.paymentSlipHash;
       order.paymentMd5 = existingOrder.paymentMd5;
+      order.unpaidAlertAt = existingOrder.unpaidAlertAt;
+      order.unpaidAlertCount = existingOrder.unpaidAlertCount;
+    }
+    if (existingOrder) {
+      if (!order.tgMessageId && existingOrder.tgMessageId) order.tgMessageId = existingOrder.tgMessageId;
+      if (!order.tgChatId && existingOrder.tgChatId) order.tgChatId = existingOrder.tgChatId;
     }
 
     if (isNew && order.payment === 'KHQR / ABA') {
@@ -4175,6 +4181,65 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
               ? '✔️ <b>ស្ថានភាព៖ បានបញ្ចប់រួចរាល់ (Website Admin)</b>'
               : undefined;
       await editTelegramOrderMessage(env, botToken, db, order, footer);
+    }
+
+    if (
+      !isNew &&
+      existingOrder &&
+      callerIsAdmin &&
+      botToken &&
+      !existingOrder.paymentVerified &&
+      order.paymentVerified &&
+      order.tgMessageId
+    ) {
+      await editTelegramOrderMessage(
+        env,
+        botToken,
+        db,
+        order,
+        '💵 <b>ស្ថានភាព៖ ទទួលប្រាក់រួចរាល់ (Website Admin)</b>'
+      );
+    }
+
+    if (
+      !isNew &&
+      existingOrder &&
+      callerIsAdmin &&
+      botToken &&
+      Number(order.unpaidAlertAt || 0) > Number(existingOrder.unpaidAlertAt || 0)
+    ) {
+      const cust = (order.customer || {}) as Record<string, unknown>;
+      const locTxt =
+        order.type === 'dinein'
+          ? `🪑 តុលេខ ${cust.tableNum || 1}`
+          : `🛵 ដឹកជញ្ជូន (${String(cust.addressName || '-')})`;
+      const shopTargetChat = String(chatId || order.tgChatId || '').trim();
+      const shopBrand = getShopBrandTitle(db);
+      const alertText = [
+        `🚨 <b>ដាស់តឿនភ្ញៀវភ្លេចទូទាត់ប្រាក់! · ${shopBrand}</b>`,
+        `🧾 កម្ម៉ង់៖ <code>${order.id}</code>`,
+        locTxt,
+        `👤 អតិថិជន៖ ${String(cust.name || '-')} (${String(cust.phone || '-')})`,
+        `💰 ទឹកប្រាក់មិនទាន់បង់៖ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b>`,
+        `🔊 <i>បានបន្លឺសំលេងហៅនៅហាង & បញ្ជូនសារដាស់តឿនទៅភ្ញៀវរួចរាល់!</i>`,
+      ].join('\n');
+      if (shopTargetChat) {
+        await sendTelegramBotMessage(botToken, shopTargetChat, alertText);
+      }
+      const normPhone = typeof cust.phone === 'string' && cust.phone.trim() ? normalizePhone(cust.phone) : '';
+      const linkedMember = db.members.find(
+        (m) =>
+          (cust.memberId !== undefined && String(m.id) === String(cust.memberId)) ||
+          (normPhone && m.phone && normalizePhone(m.phone) === normPhone)
+      );
+      if (linkedMember?.telegramId) {
+        const custAlert = [
+          `🙏 <b>សូមអភ័យទោស ${String(cust.name || linkedMember.name || 'អតិថិជន')}!</b>`,
+          `ការកម្ម៉ង់លេខ <code>${order.id}</code> (${locTxt}) នៅ <b>${shopBrand}</b> មិនទាន់បានទូទាត់ប្រាក់ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b> នៅឡើយទេ។`,
+          `💳 សូមមេត្តាអញ្ជើញទូទាត់ប្រាក់នៅតុគិតលុយ ឬតាម KHQR ហាង។ សូមអរគុណ!`,
+        ].join('\n\n');
+        await sendTelegramBotMessage(botToken, String(linkedMember.telegramId), custAlert);
+      }
     }
 
     await saveDb(env, db);

@@ -11,6 +11,7 @@ import {
   Coffee,
   Croissant,
   CupSoda,
+  DollarSign,
   Globe,
   LayoutGrid,
   Leaf,
@@ -27,6 +28,7 @@ import {
   Tag,
   User,
   UtensilsCrossed,
+  Volume2,
   X,
 } from 'lucide-react';
 import type {
@@ -73,9 +75,12 @@ import {
   getMenuName,
 } from './utils/i18n';
 import {
+  buildUnpaidAlertMessage,
   initAudioUnlocker,
   playAdminAlertSound,
   playOrderConfirmedSound,
+  playUnpaidVoiceAlert,
+  stopUnpaidVoiceAlert,
   unlockAudio,
 } from './utils/sound';
 import { CoffeeCupSteamIllustration, DeliveryRiderIllustration } from './components/AnimatedIllustrations';
@@ -250,6 +255,13 @@ export default function App() {
     title: string;
     subtitle: string;
   } | null>(null);
+  const [liveUnpaidAlert, setLiveUnpaidAlert] = useState<{
+    orderId: string;
+    tableNum?: string | number;
+    amountUsd: number;
+    customerName: string;
+    messageText: string;
+  } | null>(null);
   const [myOrderIds, setMyOrderIds] = useState<string[]>(() => {
     const stored = safeGet<string[]>('cafe_my_order_ids_v15', []);
     return Array.isArray(stored) ? stored : [];
@@ -264,9 +276,11 @@ export default function App() {
   const lastOrdersSigRef = useRef('');
   const lastShopSigRef = useRef('');
   const prevOrderStatusesRef = useRef<Map<string, OrderStatus>>(new Map());
+  const prevUnpaidAlertAtRef = useRef<Map<string, number>>(new Map());
   const ordersInitializedRef = useRef(false);
   const myOrderIdsRef = useRef<string[]>(myOrderIds);
   const currentMemberRef = useRef<Member | null>(currentMember);
+  const shopSettingsRef = useRef<ShopSettings>(shopSettings);
 
   useEffect(() => {
     myOrderIdsRef.current = myOrderIds;
@@ -276,6 +290,10 @@ export default function App() {
   useEffect(() => {
     currentMemberRef.current = currentMember;
   }, [currentMember]);
+
+  useEffect(() => {
+    shopSettingsRef.current = shopSettings;
+  }, [shopSettings]);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -461,7 +479,8 @@ export default function App() {
 
   const syncOrderEverywhere = useCallback(
     async (
-      order: Order
+      order: Order,
+      opts?: { asAdmin?: boolean }
     ): Promise<{
       ok: boolean;
       error?: string;
@@ -471,6 +490,7 @@ export default function App() {
     }> => {
       let serverError: string | undefined;
       let savedOrder: Order | undefined;
+      const bearer = opts?.asAdmin && adminToken ? adminToken : authToken;
       try {
         const res = await fetchWithTimeout(
           '/api/orders',
@@ -478,7 +498,7 @@ export default function App() {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+              ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
             },
             body: JSON.stringify(order),
           },
@@ -529,7 +549,7 @@ export default function App() {
       }
       return { ok: true, order: savedOrder };
     },
-    [shopSettings.firebaseUrl, authToken]
+    [shopSettings.firebaseUrl, authToken, adminToken]
   );
 
   const applyFetchedOrders = useCallback(
@@ -538,30 +558,39 @@ export default function App() {
       const sig = sorted
         .map(
           (o) =>
-            `${o.id}:${o.status}:${o.confirmedAt ?? ''}:${o.confirmedBy ?? ''}:${o.driverCoords?.lat ?? ''},${o.driverCoords?.lng ?? ''}:${o.customer?.coords?.lat ?? ''},${o.customer?.coords?.lng ?? ''}:${o.driverInfo?.name ?? ''}:${o.driverInfo?.phone ?? ''}:${o.driverInfo?.arrivedAt ?? ''}:${o.feedback?.rating ?? ''}:${o.feedback?.submittedAt ?? ''}`
+            `${o.id}:${o.status}:${o.confirmedAt ?? ''}:${o.confirmedBy ?? ''}:${o.paymentVerified ? 1 : 0}:${o.unpaidAlertAt ?? ''}:${o.unpaidAlertCount ?? ''}:${o.driverCoords?.lat ?? ''},${o.driverCoords?.lng ?? ''}:${o.customer?.coords?.lat ?? ''},${o.customer?.coords?.lng ?? ''}:${o.driverInfo?.name ?? ''}:${o.driverInfo?.phone ?? ''}:${o.driverInfo?.arrivedAt ?? ''}:${o.feedback?.rating ?? ''}:${o.feedback?.submittedAt ?? ''}`
         )
         .join('|');
 
       if (ordersInitializedRef.current) {
         const prevMap = prevOrderStatusesRef.current;
+        const prevAlertMap = prevUnpaidAlertAtRef.current;
         const member = currentMemberRef.current;
         const memberPhoneDigits = member?.phone ? member.phone.replace(/\D/g, '') : '';
         const myIds = myOrderIdsRef.current;
+        const latestSettings = shopSettingsRef.current;
 
         for (const o of sorted) {
-          const prevStatus = prevMap.get(o.id);
-          if (prevStatus && prevStatus !== o.status) {
-            const custPhoneDigits = o.customer?.phone ? o.customer.phone.replace(/\D/g, '') : '';
-            const isMine =
-              myIds.includes(o.id) ||
-              (member &&
+          const custPhoneDigits = o.customer?.phone ? o.customer.phone.replace(/\D/g, '') : '';
+          const matchesTableQR =
+            tableNumberFromQR !== null &&
+            o.type === 'dinein' &&
+            String(o.customer?.tableNum || '') === String(tableNumberFromQR);
+          const isMine =
+            myIds.includes(o.id) ||
+            matchesTableQR ||
+            Boolean(
+              member &&
                 ((o.customer?.memberId && String(o.customer.memberId) === String(member.id)) ||
                   (!o.customer?.memberId &&
                     member.phoneVerified &&
                     memberPhoneDigits &&
                     custPhoneDigits &&
-                    memberPhoneDigits === custPhoneDigits)));
+                    memberPhoneDigits === custPhoneDigits))
+            );
 
+          const prevStatus = prevMap.get(o.id);
+          if (prevStatus && prevStatus !== o.status) {
             if (isMine && (o.status === 'Brewing' || o.status === 'Ready' || o.status === 'Completed')) {
               playOrderConfirmedSound();
               if (o.status === 'Brewing') {
@@ -606,14 +635,44 @@ export default function App() {
               }
             }
           }
+
+          const nextUnpaidAt = Number(o.unpaidAlertAt || 0);
+          const prevUnpaidAt = prevAlertMap.get(o.id) || 0;
+          if (!o.paymentVerified && nextUnpaidAt > prevUnpaidAt && isMine && !isAdminUnlocked) {
+            const msg = buildUnpaidAlertMessage({
+              text: latestSettings.unpaidVoiceAlertText,
+              lang,
+              tableNum: o.customer?.tableNum,
+              amountUsd: o.grandTotal,
+              customerName: o.customer?.name,
+            });
+            playUnpaidVoiceAlert({
+              audioDataUri: latestSettings.unpaidVoiceAlertAudio,
+              text: latestSettings.unpaidVoiceAlertText,
+              lang,
+              tableNum: o.customer?.tableNum,
+              amountUsd: o.grandTotal,
+              customerName: o.customer?.name,
+            });
+            setLiveUnpaidAlert({
+              orderId: o.id,
+              tableNum: o.customer?.tableNum,
+              amountUsd: Number(o.grandTotal || 0),
+              customerName: o.customer?.name || '-',
+              messageText: msg,
+            });
+          }
         }
       }
 
       const nextStatusMap = new Map<string, OrderStatus>();
+      const nextUnpaidMap = new Map<string, number>();
       for (const o of sorted) {
         nextStatusMap.set(o.id, o.status);
+        if (o.unpaidAlertAt) nextUnpaidMap.set(o.id, o.unpaidAlertAt);
       }
       prevOrderStatusesRef.current = nextStatusMap;
+      prevUnpaidAlertAtRef.current = nextUnpaidMap;
       ordersInitializedRef.current = true;
 
       if (sorted.length > lastOrderCountRef.current && isAdminUnlocked) {
@@ -628,12 +687,12 @@ export default function App() {
         setReceiptState((prev) => {
           if (!prev.order) return prev;
           const fresh = sorted.find((o) => o.id === prev.order?.id);
-          if (!fresh || fresh.status === prev.order.status) return prev;
+          if (!fresh) return prev;
           return { ...prev, order: fresh };
         });
       }
     },
-    [isAdminUnlocked, isEn, showToast, showLiveOrderAlert]
+    [isAdminUnlocked, isEn, lang, tableNumberFromQR, showToast, showLiveOrderAlert]
   );
 
   const fetchOrdersFromSources = useCallback(async () => {
@@ -841,9 +900,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const hasActiveMyOrders = useMemo(
+  const activeMyOrdersCount = useMemo(
     () =>
-      orders.some((o) => {
+      orders.filter((o) => {
         if (o.status === 'Completed') return false;
         if (myOrderIds.includes(o.id)) return true;
         if (!currentMember) return false;
@@ -855,9 +914,10 @@ export default function App() {
         return Boolean(
           currentMember.phoneVerified && mPhone && cPhone && mPhone === cPhone
         );
-      }),
+      }).length,
     [orders, myOrderIds, currentMember]
   );
+  const hasActiveMyOrders = activeMyOrdersCount > 0;
 
   useEffect(() => {
     if (
@@ -970,7 +1030,7 @@ export default function App() {
     options: string;
   }) => {
     setCart((prev) => [...prev, { cartId: Date.now() + Math.random(), ...payload }]);
-    showToast('បានដាក់ចូលកន្ត្រកហើយ!');
+    showToast(isEn ? 'Added to cart!' : 'បានដាក់ចូលកន្ត្រកហើយ!');
   };
 
   const handleChangeCartQty = (idx: number, delta: number) => {
@@ -1027,7 +1087,7 @@ export default function App() {
     };
 
     const orderForServer: Order = {
-      id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
+      id: `ORD-${String(Date.now()).slice(-4)}${Math.floor(10 + Math.random() * 89)}`,
       createdAt: Date.now(),
       timestamp: new Date().toLocaleTimeString('km-KH', { hour: '2-digit', minute: '2-digit' }),
       type: finalOrderType,
@@ -1132,10 +1192,88 @@ export default function App() {
           confirmedAt: o.confirmedAt || (status !== 'Pending' ? Date.now() : undefined),
           confirmedBy: status !== 'Pending' ? 'website' : o.confirmedBy,
         };
-        syncOrderEverywhere(updated);
+        syncOrderEverywhere(updated, { asAdmin: true });
         return updated;
       })
     );
+  };
+
+  const handleMarkOrderPaid = async (orderId: string) => {
+    unlockAudio();
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+    const updated: Order = {
+      ...target,
+      paymentVerified: true,
+      paymentVerifiedBy: 'web_admin',
+      paymentPaidAmount: Number(target.grandTotal || 0),
+      paymentCurrency: 'USD',
+    };
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
+    await syncOrderEverywhere(updated, { asAdmin: true });
+    showToast(
+      isEn
+        ? `✓ Marked ${orderId} as Paid!`
+        : `✓ បានបញ្ជាក់ថាទទួលលុយពី ${orderId} រួចរាល់!`
+    );
+  };
+
+  const handleSendUnpaidVoiceAlert = async (order: Order) => {
+    const alertAt = Date.now();
+    prevUnpaidAlertAtRef.current.set(order.id, alertAt);
+    const updated: Order = {
+      ...order,
+      unpaidAlertAt: alertAt,
+      unpaidAlertCount: (order.unpaidAlertCount || 0) + 1,
+    };
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? updated : o)));
+    await syncOrderEverywhere(updated, { asAdmin: true });
+    showToast(
+      isEn
+        ? `🔊 Sent unpaid voice & Telegram alert for ${order.id}!`
+        : `🔊 បានហៅសំលេង & ផ្ញើសារដាស់តឿនភ្ញៀវ (${order.id}) ភ្លេចគិតលុយ!`
+    );
+  };
+
+  const deleteOrderFromBackends = async (orderIds: string[]) => {
+    const fb = getFirebaseBase(shopSettings.firebaseUrl);
+    const tasks: Promise<unknown>[] = [];
+    for (const id of orderIds) {
+      if (adminToken) {
+        tasks.push(
+          fetchWithTimeout(
+            `/api/orders/${encodeURIComponent(id)}`,
+            {
+              method: 'DELETE',
+              headers: { Authorization: `Bearer ${adminToken}` },
+            },
+            8000
+          )
+        );
+      }
+      if (fb) {
+        tasks.push(
+          fetchWithTimeout(`${fb}/orders/${encodeURIComponent(id)}.json`, { method: 'DELETE' }, 8000)
+        );
+      }
+    }
+    if (tasks.length > 0) await Promise.allSettled(tasks);
+  };
+
+  const handleDeleteOrder = async (orderId: string) => {
+    clearingOrdersRef.current = true;
+    setOrders((prev) => {
+      const next = prev.filter((o) => o.id !== orderId);
+      lastOrderCountRef.current = next.length;
+      return next;
+    });
+    prevOrderStatusesRef.current.delete(orderId);
+    try {
+      await deleteOrderFromBackends([orderId]);
+    } finally {
+      clearingOrdersRef.current = false;
+    }
+    showToast(isEn ? `Deleted order ${orderId}` : `បានលុបការកម្ម៉ង់ ${orderId} រួចរាល់!`);
   };
 
   const handleSubmitOrderFeedback = async (
@@ -1298,6 +1436,81 @@ export default function App() {
       </AnimatePresence>
 
       <AnimatePresence>
+        {liveUnpaidAlert && (
+          <motion.div
+            initial={{ opacity: 0, y: -24, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -18, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+            className="fixed top-14 sm:top-5 left-1/2 -translate-x-1/2 z-[98] w-[94vw] max-w-lg bg-red-600 text-white border-2 border-amber-300 rounded-2xl p-3.5 sm:p-4 shadow-2xl space-y-2.5"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-300 text-red-900 flex items-center justify-center shrink-0">
+                <Volume2 className="w-5 h-5 animate-pulse" />
+              </div>
+              <div className="min-w-0 flex-1 text-left">
+                <p className="text-xs sm:text-sm font-bold">
+                  {isEn
+                    ? `🚨 Payment Reminder — Order ${liveUnpaidAlert.orderId}`
+                    : `🚨 សូមមេត្តាអញ្ជើញទូទាត់ប្រាក់! (${liveUnpaidAlert.orderId})`}
+                </p>
+                <p className="text-[11px] sm:text-xs text-red-50 leading-relaxed mt-0.5">
+                  {liveUnpaidAlert.messageText}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  stopUnpaidVoiceAlert();
+                  setLiveUnpaidAlert(null);
+                }}
+                aria-label={isEn ? 'Dismiss' : 'បិទ'}
+                className="text-red-100 hover:text-white p-1 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  playUnpaidVoiceAlert({
+                    audioDataUri: shopSettings.unpaidVoiceAlertAudio,
+                    text: shopSettings.unpaidVoiceAlertText,
+                    lang,
+                    tableNum: liveUnpaidAlert.tableNum,
+                    amountUsd: liveUnpaidAlert.amountUsd,
+                    customerName: liveUnpaidAlert.customerName,
+                  })
+                }
+                className="bg-amber-300 hover:bg-amber-200 text-slate-900 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5"
+              >
+                <Volume2 className="w-3.5 h-3.5" />
+                <span>{isEn ? 'Play Voice Again' : '🔊 ស្តាប់សារសំលេង'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const targetOrd = orders.find((o) => o.id === liveUnpaidAlert.orderId);
+                  stopUnpaidVoiceAlert();
+                  setLiveUnpaidAlert(null);
+                  if (targetOrd) {
+                    setReceiptState({ order: targetOrd, tgUrl: '' });
+                  } else {
+                    setIsTrackerOpen(true);
+                  }
+                }}
+                className="bg-white hover:bg-red-50 text-red-700 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5"
+              >
+                <DollarSign className="w-3.5 h-3.5" />
+                <span>{isEn ? 'View Bill & Pay Now' : 'មើលវិក្កយបត្រ / ទូទាត់ឥឡូវ'}</span>
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {liveConfirmAlert && (
           <motion.div
             initial={{ opacity: 0, y: -24, scale: 0.96 }}
@@ -1426,6 +1639,9 @@ export default function App() {
           }}
           onUpdateOrderStatus={handleUpdateOrderStatus}
           onUpdateOrderDriverInfo={handleUpdateDriverInfo}
+          onMarkOrderPaid={handleMarkOrderPaid}
+          onSendUnpaidVoiceAlert={handleSendUnpaidVoiceAlert}
+          onDeleteOrder={handleDeleteOrder}
           onClearCompletedOrders={async () => {
             const completed = orders.filter((o) => o.status === 'Completed');
             const remaining = orders.filter((o) => o.status !== 'Completed');
@@ -1433,19 +1649,8 @@ export default function App() {
             setOrders(remaining);
             lastOrderCountRef.current = remaining.length;
             try {
-              if (adminToken && completed.length > 0) {
-                await Promise.allSettled(
-                  completed.map((o) =>
-                    fetchWithTimeout(
-                      `/api/orders/${encodeURIComponent(o.id)}`,
-                      {
-                        method: 'DELETE',
-                        headers: { Authorization: `Bearer ${adminToken}` },
-                      },
-                      8000
-                    )
-                  )
-                );
+              if (completed.length > 0) {
+                await deleteOrderFromBackends(completed.map((o) => o.id));
               }
             } finally {
               clearingOrdersRef.current = false;
@@ -1503,9 +1708,14 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setIsTrackerOpen(true)}
-                    className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
+                    className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
                   >
-                    {t.trackNav}
+                    <span>{t.trackNav}</span>
+                    {activeMyOrdersCount > 0 && (
+                      <span className="bg-amber-400 text-slate-900 font-mono-num text-[10px] font-bold px-1.5 py-0.5 rounded-full leading-none">
+                        {activeMyOrdersCount}
+                      </span>
+                    )}
                   </button>
                   <button
                     type="button"
@@ -1559,9 +1769,14 @@ export default function App() {
                     whileTap={shouldReduceMotion ? undefined : { scale: 0.9 }}
                     onClick={() => setIsTrackerOpen(true)}
                     aria-label={t.trackNav}
-                    className="md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-[#0D4A3E] bg-[#F4F8F6] hover:bg-[#E8F2EF]"
+                    className="relative md:hidden h-9 w-9 flex items-center justify-center rounded-xl border border-slate-200 text-[#0D4A3E] bg-[#F4F8F6] hover:bg-[#E8F2EF]"
                   >
                     <ReceiptText className="w-4 h-4" />
+                    {activeMyOrdersCount > 0 && (
+                      <span className="absolute -top-1 -right-1 bg-amber-400 text-slate-900 font-mono-num text-[9px] font-bold min-w-[16px] h-4 px-1 rounded-full flex items-center justify-center shadow-xs">
+                        {activeMyOrdersCount}
+                      </span>
+                    )}
                   </motion.button>
                   <motion.button
                     type="button"
@@ -1978,10 +2193,18 @@ export default function App() {
                               whileHover={shouldReduceMotion || !item.available ? undefined : { y: -5 }}
                               whileTap={shouldReduceMotion || !item.available ? undefined : { scale: 0.97 }}
                               onClick={() => {
-                                if (item.available) setCustomizingItem(item);
+                                if (item.available) {
+                                  setCustomizingItem(item);
+                                } else {
+                                  showToast(
+                                    isEn
+                                      ? 'Sorry, this item is currently sold out.'
+                                      : 'សូមអភ័យទោស! មុខទំនិញនេះអស់ស្តុកបណ្តោះអាសន្ន។'
+                                  );
+                                }
                               }}
                               className={`group bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-lg hover:border-[#0D4A3E]/25 ${
-                                item.available ? 'cursor-pointer' : 'opacity-60'
+                                item.available ? 'cursor-pointer' : 'opacity-65'
                               }`}
                             >
                               <div>
@@ -1993,13 +2216,20 @@ export default function App() {
                                     onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
                                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out"
                                   />
+                                  {!item.available && (
+                                    <div className="absolute inset-0 bg-slate-900/55 flex items-center justify-center p-2">
+                                      <span className="bg-red-600 text-white font-bold text-[11px] px-2.5 py-1 rounded-lg shadow">
+                                        {t.outOfStock}
+                                      </span>
+                                    </div>
+                                  )}
                                   {hasDisc && (
                                     <span className="absolute top-2 left-2 bg-amber-400 text-slate-900 font-bold font-mono-num text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
                                       <Sparkles className="w-3 h-3" />
                                       -{item.discount}%
                                     </span>
                                   )}
-                                  {item.featured && !hasDisc && (
+                                  {item.featured && !hasDisc && item.available && (
                                     <span className="absolute top-2 left-2 bg-[#0D4A3E]/90 text-amber-300 font-bold text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
                                       <Star className="w-2.5 h-2.5 fill-amber-300" />
                                       <span>{isEn ? 'Pick' : 'ពិសេស'}</span>
@@ -2510,6 +2740,10 @@ export default function App() {
         isOpen={isTrackerOpen}
         orders={orders}
         onClose={() => setIsTrackerOpen(false)}
+        onSelectOrder={(ord) => {
+          setIsTrackerOpen(false);
+          setReceiptState({ order: ord, tgUrl: '' });
+        }}
         onOpenLiveTrack={(id) => {
           setIsTrackerOpen(false);
           setLiveTrackOrderId(id);

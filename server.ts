@@ -1,6 +1,7 @@
 import express from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -3723,6 +3724,12 @@ app.post('/api/orders', async (req, res) => {
     order.paymentBankName = existingOrder.paymentBankName;
     order.paymentSlipHash = existingOrder.paymentSlipHash;
     order.paymentMd5 = existingOrder.paymentMd5;
+    order.unpaidAlertAt = existingOrder.unpaidAlertAt;
+    order.unpaidAlertCount = existingOrder.unpaidAlertCount;
+  }
+  if (existingOrder) {
+    if (!order.tgMessageId && existingOrder.tgMessageId) order.tgMessageId = existingOrder.tgMessageId;
+    if (!order.tgChatId && existingOrder.tgChatId) order.tgChatId = existingOrder.tgChatId;
   }
 
   if (isNew && order.payment === 'KHQR / ABA') {
@@ -3835,6 +3842,61 @@ app.post('/api/orders', async (req, res) => {
             ? '✔️ <b>ស្ថានភាព៖ បានបញ្ចប់រួចរាល់ (Website Admin)</b>'
             : undefined;
     editTelegramOrderMessage(botToken, order, footer).catch(() => {});
+  }
+
+  if (
+    !isNew &&
+    existingOrder &&
+    callerIsAdmin &&
+    botToken &&
+    !existingOrder.paymentVerified &&
+    order.paymentVerified &&
+    order.tgMessageId
+  ) {
+    editTelegramOrderMessage(
+      botToken,
+      order,
+      '💵 <b>ស្ថានភាព៖ ទទួលប្រាក់រួចរាល់ (Website Admin)</b>'
+    ).catch(() => {});
+  }
+
+  if (
+    !isNew &&
+    existingOrder &&
+    callerIsAdmin &&
+    botToken &&
+    Number(order.unpaidAlertAt || 0) > Number(existingOrder.unpaidAlertAt || 0)
+  ) {
+    const cust = (order.customer || {}) as Record<string, unknown>;
+    const locTxt =
+      order.type === 'dinein'
+        ? `🪑 តុលេខ ${cust.tableNum || 1}`
+        : `🛵 ដឹកជញ្ជូន (${String(cust.addressName || '-')})`;
+    const shopTargetChat = String(chatId || order.tgChatId || '').trim();
+    const shopBrand = getShopBrandTitle();
+    const alertText = [
+      `🚨 <b>ដាស់តឿនភ្ញៀវភ្លេចទូទាត់ប្រាក់! · ${shopBrand}</b>`,
+      `🧾 កម្ម៉ង់៖ <code>${order.id}</code>`,
+      locTxt,
+      `👤 អតិថិជន៖ ${String(cust.name || '-')} (${String(cust.phone || '-')})`,
+      `💰 ទឹកប្រាក់មិនទាន់បង់៖ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b>`,
+      `🔊 <i>បានបន្លឺសំលេងហៅនៅហាង & បញ្ជូនសារដាស់តឿនទៅភ្ញៀវរួចរាល់!</i>`,
+    ].join('\n');
+    if (shopTargetChat) {
+      sendTelegramBotMessage(botToken, shopTargetChat, alertText).catch(() => {});
+    }
+    const normPhone = typeof cust.phone === 'string' && cust.phone.trim() ? normalizePhone(cust.phone) : '';
+    const byId = cust.memberId !== undefined ? membersById.get(String(cust.memberId)) : undefined;
+    const byPhoneId = normPhone ? memberIdByPhone.get(normPhone) : undefined;
+    const linkedMember = byId || (byPhoneId ? membersById.get(byPhoneId) : undefined);
+    if (linkedMember?.telegramId) {
+      const custAlert = [
+        `🙏 <b>សូមអភ័យទោស ${String(cust.name || linkedMember.name || 'អតិថិជន')}!</b>`,
+        `ការកម្ម៉ង់លេខ <code>${order.id}</code> (${locTxt}) នៅ <b>${shopBrand}</b> មិនទាន់បានទូទាត់ប្រាក់ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b> នៅឡើយទេ។`,
+        `💳 សូមមេត្តាអញ្ជើញទូទាត់ប្រាក់នៅតុគិតលុយ ឬតាម KHQR ហាង។ សូមអរគុណ!`,
+      ].join('\n\n');
+      sendTelegramBotMessage(botToken, String(linkedMember.telegramId), custAlert).catch(() => {});
+    }
   }
 
   return res.json({ ok: true, order });
@@ -3976,10 +4038,15 @@ app.use(
 
 // ---- Vite Dev Middleware / Production Static Serving ----
 async function startServer() {
+  const httpServer = http.createServer(app);
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -3991,7 +4058,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Emerald Brew Cafe server listening on http://0.0.0.0:${PORT}`);
   });
 }

@@ -330,7 +330,7 @@ export function ItemCustomizerModal({
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder={isEn ? 'Special instructions...' : 'ចំណាំបន្ថែម...'}
-              className="w-full border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs mt-3.5 focus:outline-none focus:border-[#0D4A3E]"
+              className="w-full border border-slate-200 rounded-xl px-3.5 py-2.5 text-base sm:text-xs mt-3.5 focus:outline-none focus:border-[#0D4A3E]"
             />
 
             <div className="mt-4 flex items-center gap-3">

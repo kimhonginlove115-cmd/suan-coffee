@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
-import { Check, Download, MapPin, Phone, Search, Send, ShieldCheck, X } from 'lucide-react';
+import { Check, Download, MapPin, Phone, Printer, QrCode, ReceiptText, Search, Send, ShieldCheck, Volume2, X } from 'lucide-react';
 import type { AppLang, Order, ShopSettings } from '../types';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 import { getOrderStatusText } from '../utils/i18n';
@@ -15,6 +15,12 @@ interface ReceiptModalProps {
   onOpenLiveTrack: (orderId: string) => void;
 }
 
+const escapeHtml = (str: unknown) =>
+  String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
 export function ReceiptModal({
   lang = 'km',
   order,
@@ -25,9 +31,21 @@ export function ReceiptModal({
 }: ReceiptModalProps) {
   const isEn = lang === 'en';
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [showPayNowQr, setShowPayNowQr] = useState(false);
+
+  useEffect(() => {
+    if (!order) {
+      setShowPayNowQr(false);
+      return;
+    }
+    setShowPayNowQr(Boolean(!order.paymentVerified && (order.payment === 'KHQR / ABA' || order.unpaidAlertAt)));
+  }, [order]);
+
+  const hasKhqrSource = Boolean(shopSettings.khqrPayload || shopSettings.khqrBakongId || shopSettings.khqrImg);
 
   const dynamicKhqr = useMemo(() => {
-    if (!order || order.payment !== 'KHQR / ABA') return null;
+    if (!order || order.paymentVerified || !hasKhqrSource) return null;
+    if (!shopSettings.khqrPayload && !shopSettings.khqrBakongId) return null;
     return buildDynamicKhqr({
       basePayload: shopSettings.khqrPayload,
       bakongId: shopSettings.khqrBakongId,
@@ -38,11 +56,11 @@ export function ReceiptModal({
       billNumber: order.id,
       timestampMs: order.createdAt,
     });
-  }, [order, shopSettings]);
+  }, [order, shopSettings, hasKhqrSource]);
 
   useEffect(() => {
     const canvas = qrCanvasRef.current;
-    if (!dynamicKhqr?.isOfficialEmv || !canvas) return;
+    if (!showPayNowQr || !dynamicKhqr?.isOfficialEmv || !canvas) return;
     let cancelled = false;
     QRCode.toCanvas(canvas, dynamicKhqr.payload, {
       width: 148,
@@ -55,7 +73,7 @@ export function ReceiptModal({
     return () => {
       cancelled = true;
     };
-  }, [dynamicKhqr]);
+  }, [dynamicKhqr, showPayNowQr]);
 
   const effectiveTgUrl = useMemo(() => {
     if (tgUrl) return tgUrl;
@@ -66,6 +84,36 @@ export function ReceiptModal({
     const txt = `☕ កម្ម៉ង់ថ្មី ${order.id} (${order.type})\n${lines}\n💰 សរុប: $${Number(order.grandTotal || 0).toFixed(2)} (${order.payment})`;
     return `https://t.me/${tgClean}?text=${encodeURIComponent(txt)}`;
   }, [tgUrl, order, shopSettings.tgUsername]);
+
+  const handlePrintReceipt = () => {
+    if (!order) return;
+    const cust = order.customer || { name: '-', phone: '-' };
+    const khrTotal = Math.round(Number(order.grandTotal || 0) * (shopSettings.khqrKhrRate || 4100));
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(order.id)}</title><style>@page{size:80mm auto;margin:4mm;}body{font-family:monospace;font-size:12px;margin:0;padding:8px;color:#0f172a;max-width:76mm;}h3{margin:0;text-align:center;font-size:15px;}hr{border:0;border-top:1px dashed #64748b;margin:8px 0;}.row{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;}.bold{font-weight:bold;}.stamp{text-align:center;border:1.5px solid #0f172a;padding:4px;margin-top:8px;font-weight:bold;}</style></head><body><h3>${escapeHtml(shopSettings.brandTitle)}</h3><p style="text-align:center;font-size:11px;margin:2px 0 6px;">${escapeHtml(order.id)} · ${escapeHtml(order.timestamp)}</p><hr><p style="margin:0;">${order.type === 'dinein' ? `<strong>${isEn ? 'TABLE' : 'តុលេខ'} #${escapeHtml(cust.tableNum || 1)}</strong>` : `<strong>${isEn ? 'DELIVERY' : 'ដឹកជញ្ជូន'}</strong><br>${escapeHtml(cust.addressName || '')}`}<br>${escapeHtml(cust.name)}${cust.phone ? ` (${escapeHtml(cust.phone)})` : ''}</p><hr>${order.items.map((i) => `<div class="row"><span>${i.qty}x ${escapeHtml(i.name)}<br><small style="color:#475569">${escapeHtml(i.options)}</small></span><span class="bold">$${(i.unitPrice * i.qty).toFixed(2)}</span></div>`).join('')}<hr>${order.promoDisc > 0 ? `<div class="row"><span>Promo</span><span>-$${Number(order.promoDisc).toFixed(2)}</span></div>` : ''}${order.type === 'delivery' ? `<div class="row"><span>${isEn ? 'Delivery' : 'ថ្លៃដឹក'}</span><span>$${Number(order.fee || 0).toFixed(2)}</span></div>` : ''}<div class="row bold" style="font-size:14px;"><span>${isEn ? 'TOTAL' : 'សរុប'}</span><span>$${Number(order.grandTotal || 0).toFixed(2)}</span></div><div style="text-align:right;font-size:10px;color:#475569;">~ ${khrTotal.toLocaleString()} KHR</div><div class="stamp">${order.paymentVerified ? '✓ PAID' : 'UNPAID · ' + escapeHtml(order.payment)}</div></body></html>`;
+    try {
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+      const doc = iframe.contentWindow?.document;
+      if (doc) {
+        doc.open();
+        doc.write(html);
+        doc.close();
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+        setTimeout(() => iframe.remove(), 1500);
+      } else {
+        iframe.remove();
+      }
+    } catch {
+      // ignore print errors on restricted webviews
+    }
+  };
 
   return (
     <AnimatePresence>
@@ -110,6 +158,11 @@ export function ReceiptModal({
             </h3>
             <p className="text-xs text-slate-500 font-mono-num">
               {order.id} · {isEn ? 'Time' : 'ម៉ោង'} {order.timestamp}
+            </p>
+            <p className="text-xs font-bold text-slate-700 bg-slate-100 rounded-xl py-1.5 px-3 inline-block max-w-full truncate">
+              {order.type === 'dinein'
+                ? `🪑 ${isEn ? 'Dine-In · Table' : 'ញ៉ាំនៅហាង · តុលេខ'} ${order.customer?.tableNum || 1}`
+                : `🛵 ${isEn ? 'Delivery · ' : 'ដឹកជញ្ជូន · '}${order.customer?.addressName || (isEn ? 'Pinned Map' : 'ទីតាំងលើផែនទី')}`}
             </p>
             <div className="flex items-center justify-center">
               <span
@@ -168,7 +221,7 @@ export function ReceiptModal({
                   ${Number(order.grandTotal || 0).toFixed(2)}
                 </span>
               </div>
-              {order.paymentVerified && (
+              {order.paymentVerified ? (
                 <div className="flex items-center justify-between gap-2 pt-1 text-[11px] font-bold text-emerald-700">
                   <span className="inline-flex items-center gap-1">
                     <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
@@ -188,41 +241,72 @@ export function ReceiptModal({
                     </span>
                   )}
                 </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2 pt-1.5 text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-1.5">
+                  <span>
+                    {isEn ? 'Payment Status: Unpaid' : 'ស្ថានភាព៖ មិនទាន់ទូទាត់ប្រាក់'}
+                  </span>
+                  {hasKhqrSource && !showPayNowQr && (
+                    <button
+                      type="button"
+                      onClick={() => setShowPayNowQr(true)}
+                      className="inline-flex items-center gap-1 bg-[#E1232E] text-white px-2 py-0.5 rounded-lg text-[10px] font-bold shrink-0"
+                    >
+                      <QrCode className="w-3 h-3" />
+                      <span>{isEn ? 'Pay KHQR' : 'បង់ KHQR ឥឡូវ'}</span>
+                    </button>
+                  )}
+                </div>
               )}
             </div>
 
-            {order.payment === 'KHQR / ABA' && dynamicKhqr?.isOfficialEmv && (
+            {!order.paymentVerified && showPayNowQr && hasKhqrSource && (
               <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
-                <div className="bg-white rounded-xl border border-slate-200 overflow-hidden max-w-[195px] mx-auto">
-                  <div className="bg-[#E1232E] text-white py-1 px-2.5 flex items-center justify-between text-[10px] font-bold">
-                    <span>KHQR</span>
-                    <span>{order.id}</span>
-                  </div>
-                  <div className="p-2.5 space-y-1">
-                    <p className="text-base font-extrabold font-mono-num text-[#E1232E]">
-                      {dynamicKhqr.formattedAmount}
-                    </p>
-                    <div className="flex justify-center">
-                      <canvas ref={qrCanvasRef} className="rounded bg-white" />
+                {dynamicKhqr?.isOfficialEmv ? (
+                  <>
+                    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden max-w-[195px] mx-auto">
+                      <div className="bg-[#E1232E] text-white py-1 px-2.5 flex items-center justify-between text-[10px] font-bold">
+                        <span>KHQR</span>
+                        <span>{order.id}</span>
+                      </div>
+                      <div className="p-2.5 space-y-1">
+                        <p className="text-base font-extrabold font-mono-num text-[#E1232E]">
+                          {dynamicKhqr.formattedAmount}
+                        </p>
+                        <div className="flex justify-center">
+                          <canvas ref={qrCanvasRef} className="rounded bg-white" />
+                        </div>
+                      </div>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        downloadBrandedKhqrPng({
+                          payload: dynamicKhqr.payload,
+                          merchantDisplay: dynamicKhqr.merchantDisplay,
+                          formattedAmount: dynamicKhqr.formattedAmount,
+                          bankInfo: shopSettings.bankInfo,
+                          filename: `KHQR-${order.id}.png`,
+                        })
+                      }
+                      className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 hover:text-slate-950 underline"
+                    >
+                      <Download className="w-3 h-3 text-[#E1232E]" />
+                      <span>{isEn ? 'Save Receipt KHQR' : 'រក្សាទុករូប KHQR វិក្កយបត្រ'}</span>
+                    </button>
+                  </>
+                ) : shopSettings.khqrImg ? (
+                  <div className="space-y-1">
+                    <img
+                      src={shopSettings.khqrImg}
+                      alt="Shop KHQR"
+                      className="w-40 h-40 object-contain mx-auto rounded-xl border border-slate-200 bg-white p-1"
+                    />
+                    <p className="text-[11px] font-bold text-slate-600">
+                      {shopSettings.bankInfo}
+                    </p>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    downloadBrandedKhqrPng({
-                      payload: dynamicKhqr.payload,
-                      merchantDisplay: dynamicKhqr.merchantDisplay,
-                      formattedAmount: dynamicKhqr.formattedAmount,
-                      bankInfo: shopSettings.bankInfo,
-                      filename: `KHQR-${order.id}.png`,
-                    })
-                  }
-                  className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 hover:text-slate-950 underline"
-                >
-                  <Download className="w-3 h-3 text-[#E1232E]" />
-                  <span>{isEn ? 'Save Receipt KHQR' : 'រក្សាទុករូប KHQR វិក្កយបត្រ'}</span>
-                </button>
+                ) : null}
               </div>
             )}
 
@@ -248,13 +332,23 @@ export function ReceiptModal({
                   <span>{isEn ? 'Send Receipt to Shop Telegram' : 'ផ្ញើវិក្កយបត្រទៅ Telegram ហាង'}</span>
                 </a>
               )}
-              <button
-                type="button"
-                onClick={onClose}
-                className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-2.5 rounded-xl text-xs"
-              >
-                {isEn ? 'Close' : 'បិទ'}
-              </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={handlePrintReceipt}
+                  className="w-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Print / PDF' : 'បោះពុម្ពវិក្កយបត្រ'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-2.5 rounded-xl text-xs"
+                >
+                  {isEn ? 'Close' : 'បិទ'}
+                </button>
+              </div>
             </div>
           </motion.div>
         </motion.div>
@@ -269,6 +363,7 @@ interface OrderTrackerModalProps {
   orders: Order[];
   onClose: () => void;
   onOpenLiveTrack: (orderId: string) => void;
+  onSelectOrder?: (order: Order) => void;
 }
 
 const STATUS_BADGE_CLS: Record<string, string> = {
@@ -284,6 +379,7 @@ export function OrderTrackerModal({
   orders,
   onClose,
   onOpenLiveTrack,
+  onSelectOrder,
 }: OrderTrackerModalProps) {
   const isEn = lang === 'en';
   const [filterMode, setFilterMode] = useState<'active' | 'all'>('all');
@@ -384,8 +480,14 @@ export function OrderTrackerModal({
               ) : (
                 filteredOrders.slice(0, 12).map((o) => {
                   const statusCls = STATUS_BADGE_CLS[o.status] || STATUS_BADGE_CLS.Pending;
+                  const isUnpaidAlerted = Boolean(o.unpaidAlertAt) && !o.paymentVerified;
                   return (
-                    <div key={o.id} className="border border-slate-200 rounded-2xl p-3.5 text-xs space-y-2">
+                    <div
+                      key={o.id}
+                      className={`border rounded-2xl p-3.5 text-xs space-y-2 ${
+                        isUnpaidAlerted ? 'border-red-300 bg-red-50/40' : 'border-slate-200'
+                      }`}
+                    >
                       <div className="flex justify-between items-center gap-2 font-bold">
                         <span className="font-mono-num text-slate-900">
                           {o.id} · {o.timestamp}
@@ -408,12 +510,17 @@ export function OrderTrackerModal({
                               ? `${isEn ? 'Table' : 'តុ'} ${o.customer?.tableNum || 1} · ${o.payment}`
                               : o.payment}
                           </span>
-                          {o.paymentVerified && (
+                          {o.paymentVerified ? (
                             <span className="inline-flex items-center gap-0.5 text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded-md">
                               <ShieldCheck className="w-3 h-3 shrink-0" />
                               <span>{isEn ? 'Paid' : 'បានបង់'}</span>
                             </span>
-                          )}
+                          ) : isUnpaidAlerted ? (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-bold bg-red-100 text-red-700 border border-red-200 px-1.5 py-0.5 rounded-md animate-pulse">
+                              <Volume2 className="w-3 h-3 shrink-0" />
+                              <span>{isEn ? 'Pay Needed' : 'សូមទូទាត់ប្រាក់'}</span>
+                            </span>
+                          ) : null}
                         </span>
                         <span className="font-mono-num">${Number(o.grandTotal || 0).toFixed(2)}</span>
                       </div>
@@ -422,8 +529,26 @@ export function OrderTrackerModal({
                           Ref: {o.paymentRef}
                         </p>
                       )}
-                      {o.type === 'delivery' && (
-                        <div className="flex gap-2">
+                      <div className="flex gap-2">
+                        {onSelectOrder && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectOrder(o)}
+                            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold flex items-center justify-center gap-1 shrink-0"
+                          >
+                            <ReceiptText className="w-3.5 h-3.5" />
+                            <span>
+                              {!o.paymentVerified && o.payment === 'Cash' && isUnpaidAlerted
+                                ? isEn
+                                  ? 'Pay / Bill'
+                                  : 'ទូទាត់ / វិក្កយបត្រ'
+                                : isEn
+                                  ? 'Receipt'
+                                  : 'វិក្កយបត្រ'}
+                            </span>
+                          </button>
+                        )}
+                        {o.type === 'delivery' && (
                           <button
                             type="button"
                             onClick={() => onOpenLiveTrack(o.id)}
@@ -440,17 +565,17 @@ export function OrderTrackerModal({
                                   : 'តាមដានលើ Live Map'}
                             </span>
                           </button>
-                          {o.driverInfo?.phone && o.status !== 'Completed' && (
-                            <a
-                              href={`tel:${o.driverInfo.phone}`}
-                              className="px-3 py-2 bg-[#E8F2EF] text-[#0D4A3E] rounded-xl text-xs font-bold flex items-center gap-1 shrink-0"
-                            >
-                              <Phone className="w-3.5 h-3.5" />
-                              <span>{isEn ? 'Call' : 'តេ'}</span>
-                            </a>
-                          )}
-                        </div>
-                      )}
+                        )}
+                        {o.type === 'delivery' && o.driverInfo?.phone && o.status !== 'Completed' && (
+                          <a
+                            href={`tel:${o.driverInfo.phone}`}
+                            className="px-3 py-2 bg-[#E8F2EF] text-[#0D4A3E] rounded-xl text-xs font-bold flex items-center gap-1 shrink-0"
+                          >
+                            <Phone className="w-3.5 h-3.5" />
+                            <span>{isEn ? 'Call' : 'តេ'}</span>
+                          </a>
+                        )}
+                      </div>
                     </div>
                   );
                 })

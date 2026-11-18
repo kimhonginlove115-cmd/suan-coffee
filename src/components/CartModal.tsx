@@ -1599,7 +1599,18 @@ export function CartModal({
               </div>
             </div>
 
-            {isKhqrLocked && (
+            {shopSettings.isOpen === false && (
+              <p className="mt-2.5 text-[11px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2 flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-red-600" />
+                <span>
+                  {isEn
+                    ? 'The shop is currently closed — checkout will reopen once the shop opens.'
+                    : 'ហាងកំពុងបិទបណ្តោះអាសន្ន — មិនទាន់អាចបញ្ជាក់ការកម្ម៉ង់បានទេ។'}
+                </span>
+              </p>
+            )}
+
+            {isKhqrLocked && shopSettings.isOpen !== false && (
               <p className="mt-2.5 text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center gap-1.5">
                 <Lock className="w-3.5 h-3.5 shrink-0 text-amber-700" />
                 <span>
@@ -1613,24 +1624,28 @@ export function CartModal({
             <div className="mt-3 space-y-2">
               <button
                 type="button"
-                disabled={submitting || isKhqrLocked}
+                disabled={submitting || isKhqrLocked || shopSettings.isOpen === false}
                 onClick={() => handleSubmit(false)}
                 className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:bg-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed text-white font-bold py-3 rounded-2xl text-sm transition-colors active:scale-[0.98] flex items-center justify-center gap-1.5"
               >
                 {isKhqrLocked && <Lock className="w-3.5 h-3.5" />}
                 <span>
-                  {submitting
+                  {shopSettings.isOpen === false
                     ? isEn
-                      ? 'Submitting...'
-                      : 'កំពុងបញ្ជូន...'
-                    : isEn
-                      ? 'Confirm Order'
-                      : 'បញ្ជាក់ការកម្ម៉ង់'}
+                      ? 'Shop Closed'
+                      : 'ហាងកំពុងបិទ'
+                    : submitting
+                      ? isEn
+                        ? 'Submitting...'
+                        : 'កំពុងបញ្ជូន...'
+                      : isEn
+                        ? 'Confirm Order'
+                        : 'បញ្ជាក់ការកម្ម៉ង់'}
                 </span>
               </button>
               <button
                 type="button"
-                disabled={submitting || isKhqrLocked}
+                disabled={submitting || isKhqrLocked || shopSettings.isOpen === false}
                 onClick={() => handleSubmit(true)}
                 className="w-full bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-colors active:scale-[0.98]"
               >

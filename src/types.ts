@@ -102,6 +102,15 @@ export interface Order {
   confirmedBy?: 'website' | 'telegram';
   tgMessageId?: number;
   feedback?: OrderFeedback;
+  unpaidAlertAt?: number;
+  unpaidAlertCount?: number;
+}
+
+export interface CategoryPreset {
+  value: string;
+  valueEn: string;
+  labelKm: string;
+  labelEn: string;
 }
 
 export interface Member {
@@ -150,6 +159,11 @@ export interface ShopSettings {
   lat: number;
   lng: number;
   tableCount?: number;
+  categoryPresets?: CategoryPreset[];
+  unpaidVoiceAlertAudio?: string;
+  unpaidVoiceAlertText?: string;
+  unpaidAutoAlertEnabled?: boolean;
+  unpaidAlertMinutes?: number;
 }
 
 export interface AdminSecretsConfig {

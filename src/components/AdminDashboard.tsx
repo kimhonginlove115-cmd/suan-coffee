@@ -2,22 +2,29 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import QRCode from 'qrcode';
 import {
+  AlertCircle,
+  BellRing,
   Check,
+  CheckCircle2,
   CheckSquare,
   ClipboardList,
   Coffee,
   Copy,
   DollarSign,
+  Download,
   ExternalLink,
   Globe,
   Layers,
   Loader2,
   Lock,
   MessageSquare,
+  Mic,
   Minus,
+  Play,
   Plus,
   Printer,
   QrCode,
+  RotateCcw,
   Search,
   Send,
   Share2,
@@ -30,11 +37,14 @@ import {
   Trash2,
   Truck,
   Users,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import type {
   AdminSecretsConfig,
   AppLang,
+  CategoryPreset,
   DeliveryMode,
   DriverInfo,
   ItemType,
@@ -47,6 +57,7 @@ import type {
 } from '../types';
 import {
   CAFE_ASSETS,
+  DEFAULT_CATEGORY_PRESETS,
   compressImageFile,
   fetchWithTimeout,
   getDiscountedPrice,
@@ -68,7 +79,13 @@ import {
   extractKhqrSummary,
   isValidEmvKhqr,
 } from '../utils/khqr';
-import { playAdminAlertSound, unlockAudio } from '../utils/sound';
+import {
+  playAdminAlertSound,
+  playOrderConfirmedSound,
+  playUnpaidVoiceAlert,
+  stopUnpaidVoiceAlert,
+  unlockAudio,
+} from '../utils/sound';
 
 interface PendingKhqrSession {
   id: string;
@@ -229,6 +246,9 @@ interface AdminDashboardProps {
   onUpdateToppings: (next: Topping[]) => Promise<SyncResult | void> | void;
   onUpdateOrderStatus: (orderId: string, status: OrderStatus) => void;
   onUpdateOrderDriverInfo: (orderId: string, info: DriverInfo, nextStatus?: OrderStatus) => void;
+  onMarkOrderPaid: (orderId: string) => Promise<void> | void;
+  onSendUnpaidVoiceAlert: (order: Order) => Promise<void> | void;
+  onDeleteOrder: (orderId: string) => Promise<void> | void;
   onClearCompletedOrders: () => void;
   onOpenDriverConsole: (orderId: string) => void;
   onOpenDriverPortal: () => void;
@@ -277,6 +297,9 @@ export function AdminDashboard({
   onUpdateToppings,
   onUpdateOrderStatus,
   onUpdateOrderDriverInfo,
+  onMarkOrderPaid,
+  onSendUnpaidVoiceAlert,
+  onDeleteOrder,
   onClearCompletedOrders,
   onOpenDriverConsole,
   onOpenDriverPortal,
@@ -287,7 +310,10 @@ export function AdminDashboard({
   const isEn = lang === 'en';
   const shouldReduceMotion = useReducedMotion();
   const [activeTab, setActiveTab] = useState<AdminTab>('orders');
-  const [orderFilter, setOrderFilter] = useState<'All' | OrderStatus>('All');
+  const [orderFilter, setOrderFilter] = useState<'All' | 'Unpaid' | OrderStatus>('All');
+  const [soundPrimed, setSoundPrimed] = useState(false);
+  const [confirmDeleteOrderId, setConfirmDeleteOrderId] = useState<string | null>(null);
+  const [showChecklist, setShowChecklist] = useState(false);
 
   // Inline driver assignment draft per order
   const [driverDrafts, setDriverDrafts] = useState<Record<string, { name: string; phone: string }>>({});
@@ -349,11 +375,81 @@ export function AdminDashboard({
   const seenPendingPayIdsRef = useRef<Set<string>>(new Set());
   const menuFormRef = useRef<HTMLDivElement | null>(null);
 
+  // Customizable category presets state
+  const [newCatKm, setNewCatKm] = useState('');
+  const [newCatEn, setNewCatEn] = useState('');
+  const [savingCategoryPresets, setSavingCategoryPresets] = useState(false);
+
+  // Unpaid walk-away voice alert studio & auto watcher
+  const [showVoiceStudio, setShowVoiceStudio] = useState(false);
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [voiceTextDraft, setVoiceTextDraft] = useState(shopSettings.unpaidVoiceAlertText || '');
+  const [savingVoiceConfig, setSavingVoiceConfig] = useState(false);
+  const [alertingOrderId, setAlertingOrderId] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<number | null>(null);
+  const autoAlertedAtRef = useRef<Record<string, number>>({});
+
   useEffect(() => {
     setDraft(shopSettings);
+    setVoiceTextDraft(shopSettings.unpaidVoiceAlertText || '');
     const nextTables = Math.min(100, Math.max(1, Number(shopSettings.tableCount) || 10));
     setQrTableCount(nextTables);
   }, [shopSettings]);
+
+  useEffect(() => {
+    return () => {
+      if (recordTimerRef.current) window.clearInterval(recordTimerRef.current);
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((tr) => tr.stop());
+      }
+      stopUnpaidVoiceAlert();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!shopSettings.unpaidAutoAlertEnabled) return;
+    const thresholdMs = Math.max(1, Number(shopSettings.unpaidAlertMinutes) || 10) * 60 * 1000;
+    const checkUnpaidWalkAway = () => {
+      const now = Date.now();
+      for (const ord of orders) {
+        if (ord.paymentVerified) continue;
+        if (!ord.createdAt || now - ord.createdAt < thresholdMs) continue;
+        const lastAuto = autoAlertedAtRef.current[ord.id] || 0;
+        if (now - lastAuto < 300_000) continue; // 5 min cooldown per order
+        autoAlertedAtRef.current[ord.id] = now;
+        const tbl = ord.customer?.tableNum;
+        playUnpaidVoiceAlert({
+          audioDataUri: shopSettings.unpaidVoiceAlertAudio,
+          text: shopSettings.unpaidVoiceAlertText,
+          lang,
+          tableNum: tbl,
+          amountUsd: ord.grandTotal,
+          customerName: ord.customer?.name,
+        });
+        onToast(
+          isEn
+            ? `🔊 Unpaid reminder: ${ord.id}${tbl ? ` (Table ${tbl})` : ''} · $${Number(ord.grandTotal || 0).toFixed(2)}`
+            : `🔊 ដាស់តឿនភ្ញៀវភ្លេចគិតលុយ៖ ${ord.id}${tbl ? ` (តុលេខ ${tbl})` : ''} · $${Number(ord.grandTotal || 0).toFixed(2)}`
+        );
+        break;
+      }
+    };
+    const interval = window.setInterval(checkUnpaidWalkAway, 15000);
+    return () => window.clearInterval(interval);
+  }, [
+    shopSettings.unpaidAutoAlertEnabled,
+    shopSettings.unpaidAlertMinutes,
+    shopSettings.unpaidVoiceAlertAudio,
+    shopSettings.unpaidVoiceAlertText,
+    orders,
+    lang,
+    isEn,
+    onToast,
+  ]);
 
   const sampleDynamicKhqr = useMemo(
     () =>
@@ -516,9 +612,323 @@ export function AdminDashboard({
 
   const displayedMembers = serverMembers.length > 0 ? serverMembers : members;
   const totalRevenue = orders.reduce((s, o) => s + Number(o.grandTotal || 0), 0);
+  const todayStartMs = useMemo(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }, []);
+  const todayOrders = orders.filter((o) => Number(o.createdAt || 0) >= todayStartMs);
+  const todayRevenue = todayOrders.reduce((s, o) => s + Number(o.grandTotal || 0), 0);
+  const unpaidOrders = orders.filter((o) => !o.paymentVerified);
+  const unpaidOrdersCount = unpaidOrders.length;
+  const unpaidAmountUsd = unpaidOrders.reduce((s, o) => s + Number(o.grandTotal || 0), 0);
+  const cashRevenue = orders
+    .filter((o) => o.payment === 'Cash')
+    .reduce((s, o) => s + Number(o.grandTotal || 0), 0);
+  const khqrRevenue = orders
+    .filter((o) => o.payment !== 'Cash')
+    .reduce((s, o) => s + Number(o.grandTotal || 0), 0);
   const pendingCount = orders.filter((o) => o.status === 'Pending').length;
   const activeDeliveryCount = orders.filter((o) => o.type === 'delivery' && o.status !== 'Completed').length;
-  const filteredOrders = orderFilter === 'All' ? orders : orders.filter((o) => o.status === orderFilter);
+  const filteredOrders =
+    orderFilter === 'All'
+      ? orders
+      : orderFilter === 'Unpaid'
+        ? unpaidOrders
+        : orders.filter((o) => o.status === orderFilter);
+
+  const launchChecks = [
+    {
+      id: 'storage',
+      ok: Boolean(serverPersistent || getFirebaseBase(shopSettings.firebaseUrl)),
+      label: isEn ? 'Cloud Database (KV or Firebase)' : 'Database រក្សាទិន្នន័យ (KV ឬ Firebase)',
+      tab: 'settings' as AdminTab,
+    },
+    {
+      id: 'khqr',
+      ok: Boolean(shopSettings.khqrBakongId || shopSettings.khqrPayload || shopSettings.khqrImg),
+      label: isEn ? 'KHQR Payment Setup' : 'ប្រព័ន្ធស្កេន KHQR ធនាគារ',
+      tab: 'settings' as AdminTab,
+    },
+    {
+      id: 'telegram',
+      ok: Boolean(secrets.botToken && draft.botUsername),
+      label: isEn ? 'Telegram Bot Connected' : 'Telegram Bot ផ្ញើសារកម្ម៉ង់',
+      tab: 'settings' as AdminTab,
+    },
+    {
+      id: 'menu',
+      ok: menuItems.some((m) => m.available),
+      label: isEn ? 'Available Menu Items' : 'មុខទំនិញក្នុងម៉ឺនុយ',
+      tab: 'menu' as AdminTab,
+    },
+    {
+      id: 'tables',
+      ok: (Number(shopSettings.tableCount) || 0) >= 1,
+      label: isEn ? `Table QR (${Number(shopSettings.tableCount) || 10} tables)` : `QR តុ (${Number(shopSettings.tableCount) || 10} តុ)`,
+      tab: 'qr' as AdminTab,
+    },
+    {
+      id: 'open',
+      ok: shopSettings.isOpen !== false,
+      label: isEn ? 'Shop Open for Orders' : 'បើកទទួលការកម្ម៉ង់ (Shop Open)',
+      tab: 'orders' as AdminTab,
+    },
+  ];
+  const launchReadyCount = launchChecks.filter((c) => c.ok).length;
+
+  useEffect(() => {
+    if (!confirmDeleteOrderId) return;
+    const tmr = window.setTimeout(() => setConfirmDeleteOrderId(null), 3500);
+    return () => window.clearTimeout(tmr);
+  }, [confirmDeleteOrderId]);
+
+  const handleExportOrdersCsv = () => {
+    if (!orders.length) {
+      onToast(isEn ? 'No orders to export yet.' : 'មិនទាន់មានការកម្ម៉ង់សម្រាប់ទាញយកទេ!');
+      return;
+    }
+    const esc = (v: unknown) => {
+      const s = String(v ?? '').replace(/"/g, '""');
+      return `"${s}"`;
+    };
+    const header = [
+      'Order ID',
+      'Timestamp',
+      'Type',
+      'Table / Address',
+      'Customer',
+      'Phone',
+      'Payment',
+      'Paid',
+      'Status',
+      'Items',
+      'Subtotal ($)',
+      'Promo ($)',
+      'Delivery ($)',
+      'Grand Total ($)',
+    ];
+    const rows = orders.map((o) => {
+      const c = o.customer || { name: '', phone: '' };
+      const loc = o.type === 'dinein' ? `Table ${c.tableNum || 1}` : c.addressName || 'Delivery';
+      const itemsSummary = (o.items || []).map((i) => `${i.qty}x ${i.name} (${i.options})`).join(' | ');
+      return [
+        esc(o.id),
+        esc(o.createdAt ? new Date(o.createdAt).toLocaleString() : o.timestamp),
+        esc(o.type),
+        esc(loc),
+        esc(c.name),
+        esc(c.phone),
+        esc(o.payment),
+        esc(o.paymentVerified ? 'PAID' : 'UNPAID'),
+        esc(o.status),
+        esc(itemsSummary),
+        Number(o.subtotal || 0).toFixed(2),
+        Number(o.promoDisc || 0).toFixed(2),
+        Number(o.fee || 0).toFixed(2),
+        Number(o.grandTotal || 0).toFixed(2),
+      ].join(',');
+    });
+    const csv = `\uFEFF${[header.map(esc).join(','), ...rows].join('\r\n')}`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `emerald-brew-orders-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    onToast(isEn ? '✓ Exported CSV report!' : '✓ បានទាញយករបាយការណ៍ Excel CSV ជោគជ័យ!');
+  };
+
+  const activeCategoryPresets: CategoryPreset[] =
+    Array.isArray(shopSettings.categoryPresets) ? shopSettings.categoryPresets : CATEGORY_PRESETS;
+
+  const persistShopSettingPatch = async (patch: Partial<ShopSettings>) => {
+    const next: ShopSettings = { ...shopSettings, ...patch };
+    setDraft(next);
+    return onUpdateShopSettings(next);
+  };
+
+  const handleAddCategoryPreset = async () => {
+    const km = newCatKm.trim();
+    const en = newCatEn.trim();
+    if (!km && !en) {
+      onToast(isEn ? 'Enter a category name first' : 'សូមវាយឈ្មោះប្រភេទមុខទំនិញជាមុនសិន');
+      return;
+    }
+    const val = en || km;
+    const valEn = en || km;
+    const labelKm = km && en && km.toLowerCase() !== en.toLowerCase() ? `${km} (${en})` : km || en;
+    const labelEn = en || km;
+    if (activeCategoryPresets.some((p) => p.value.trim().toLowerCase() === val.toLowerCase())) {
+      onToast(isEn ? 'This category already exists' : 'ប្រភេទមុខទំនិញនេះមានរួចហើយ');
+      return;
+    }
+    const next = [...activeCategoryPresets, { value: val, valueEn: valEn, labelKm, labelEn }];
+    setSavingCategoryPresets(true);
+    try {
+      await persistShopSettingPatch({ categoryPresets: next });
+      setItemCat(val);
+      setItemCatEn(valEn);
+      setNewCatKm('');
+      setNewCatEn('');
+      onToast(isEn ? `✓ Added category "${labelEn}"` : `✓ បានបន្ថែមប្រភេទ "${labelKm}"`);
+    } finally {
+      setSavingCategoryPresets(false);
+    }
+  };
+
+  const handleRemoveCategoryPreset = async (valueToRemove: string) => {
+    const next = activeCategoryPresets.filter(
+      (p) => p.value.trim().toLowerCase() !== valueToRemove.trim().toLowerCase()
+    );
+    setSavingCategoryPresets(true);
+    try {
+      await persistShopSettingPatch({ categoryPresets: next });
+      onToast(isEn ? '✓ Removed category' : '✓ បានដកប្រភេទមុខទំនិញចេញហើយ');
+    } finally {
+      setSavingCategoryPresets(false);
+    }
+  };
+
+  const handleResetCategoryPresets = async () => {
+    setSavingCategoryPresets(true);
+    try {
+      await persistShopSettingPatch({ categoryPresets: DEFAULT_CATEGORY_PRESETS });
+      onToast(isEn ? '✓ Restored default categories' : '✓ បានស្តារប្រភេទមុខទំនិញដើមឡើងវិញ');
+    } finally {
+      setSavingCategoryPresets(false);
+    }
+  };
+
+  const handleStopVoiceRecording = () => {
+    if (recordTimerRef.current) {
+      window.clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // ignore
+      }
+    }
+    setIsRecordingVoice(false);
+  };
+
+  const handleStartVoiceRecording = async () => {
+    unlockAudio();
+    if (isRecordingVoice) {
+      handleStopVoiceRecording();
+      return;
+    }
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof MediaRecorder === 'undefined'
+    ) {
+      onToast(
+        isEn
+          ? 'Microphone recording is not supported on this browser — use custom voice text instead.'
+          : 'កម្មវិធីនេះមិនគាំទ្រការថតសំលេងទេ — អាចប្រើអត្ថបទអានសំលេងខាងក្រោមបាន!'
+      );
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      recordChunksRef.current = [];
+      const preferredMime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(
+        (m) => {
+          try {
+            return MediaRecorder.isTypeSupported(m);
+          } catch {
+            return false;
+          }
+        }
+      );
+      const recorder = new MediaRecorder(
+        stream,
+        preferredMime
+          ? { mimeType: preferredMime, audioBitsPerSecond: 16000 }
+          : { audioBitsPerSecond: 16000 }
+      );
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) recordChunksRef.current.push(ev.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((tr) => tr.stop());
+        mediaStreamRef.current = null;
+        if (recordTimerRef.current) {
+          window.clearInterval(recordTimerRef.current);
+          recordTimerRef.current = null;
+        }
+        setIsRecordingVoice(false);
+        const blob = new Blob(recordChunksRef.current, {
+          type: recorder.mimeType || preferredMime || 'audio/webm',
+        });
+        if (blob.size < 400) {
+          onToast(isEn ? 'Recording too short' : 'ការថតសំលេងខ្លីពេក សូមព្យាយាមម្តងទៀត');
+          return;
+        }
+        if (blob.size > 320_000) {
+          onToast(
+            isEn
+              ? 'Voice clip too large (>320KB) — keep under 12s.'
+              : 'ឯកសារសំលេងធំពេក — សូមថតខ្លីជាង 12 វិនាទី'
+          );
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const dataUri = typeof reader.result === 'string' ? reader.result : '';
+          if (!dataUri.startsWith('data:audio/')) return;
+          setSavingVoiceConfig(true);
+          try {
+            await persistShopSettingPatch({ unpaidVoiceAlertAudio: dataUri });
+            onToast(isEn ? '✓ Saved custom shop voice recording!' : '✓ បានរក្សាទុកសារសំលេងថតផ្ទាល់រួចរាល់!');
+          } finally {
+            setSavingVoiceConfig(false);
+          }
+        };
+        reader.readAsDataURL(blob);
+      };
+
+      recorder.start();
+      setIsRecordingVoice(true);
+      setRecordingSeconds(0);
+      recordTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((prev) => {
+          const next = prev + 1;
+          if (next >= 12) {
+            handleStopVoiceRecording();
+          }
+          return next;
+        });
+      }, 1000);
+    } catch {
+      setIsRecordingVoice(false);
+      onToast(
+        isEn
+          ? 'Could not access microphone — check browser permission.'
+          : 'មិនអាចបើកមីក្រូហ្វូនបានទេ — សូមអនុញ្ញាត Microphone ជាមុនសិន'
+      );
+    }
+  };
+
+  const handleSaveVoiceAlertConfig = async () => {
+    setSavingVoiceConfig(true);
+    try {
+      await persistShopSettingPatch({ unpaidVoiceAlertText: voiceTextDraft.trim() });
+      onToast(isEn ? '✓ Saved voice alert message!' : '✓ បានរក្សាទុកសារសំលេងដាស់តឿនរួចរាល់!');
+    } finally {
+      setSavingVoiceConfig(false);
+    }
+  };
 
   const feedbackOrders = useMemo(
     () =>
@@ -990,7 +1400,8 @@ export function AdminDashboard({
 
   const printOrderReceipt = (o: Order) => {
     const cust = o.customer || { name: '-', phone: '-' };
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(o.id)}</title></head><body style="font-family:monospace;padding:12px;margin:0;"><h3 style="text-align:center;margin:0;">${escapeHtml(shopSettings.brandTitle)}</h3><p style="text-align:center;font-size:11px;">${escapeHtml(o.id)} | ${escapeHtml(o.timestamp)}</p><hr><p style="font-size:12px;">${isEn ? 'Customer' : 'ភ្ញៀវ'}: ${escapeHtml(cust.name)} (${escapeHtml(cust.phone)})<br>${o.type === 'dinein' ? `${isEn ? 'Table' : 'តុលេខ'}: ` + escapeHtml(cust.tableNum || 1) : escapeHtml(cust.addressName || '')}</p><hr>${o.items.map((i) => `<div style="font-size:12px;margin-bottom:4px;">${i.qty}x ${escapeHtml(i.name)} - $${(i.unitPrice * i.qty).toFixed(2)}<br><small>${escapeHtml(i.options)}</small></div>`).join('')}<hr><p style="font-weight:bold;text-align:right;">${isEn ? 'Total' : 'សរុប'}: $${Number(o.grandTotal || 0).toFixed(2)} (${escapeHtml(o.payment)})</p></body></html>`;
+    const khrTotal = Math.round(Number(o.grandTotal || 0) * (shopSettings.khqrKhrRate || 4100));
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(o.id)}</title><style>@page{size:80mm auto;margin:4mm;}body{font-family:monospace;font-size:12px;margin:0;padding:8px;color:#0f172a;max-width:76mm;}h3{text-align:center;margin:0;font-size:15px;}p{margin:3px 0;}hr{border:0;border-top:1px dashed #64748b;margin:8px 0;}.row{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;}.bold{font-weight:bold;}.stamp{text-align:center;border:1.5px solid #0f172a;padding:5px;margin-top:8px;font-weight:bold;font-size:12px;}</style></head><body><h3>${escapeHtml(shopSettings.brandTitle)}</h3>${shopSettings.phoneHotline ? `<p style="text-align:center;font-size:11px;">Tel: ${escapeHtml(shopSettings.phoneHotline)}</p>` : ''}<p style="text-align:center;font-size:11px;">${escapeHtml(o.id)} | ${escapeHtml(o.timestamp)}</p><hr><p style="font-size:12px;">${o.type === 'dinein' ? `<strong>${isEn ? 'TABLE' : 'តុលេខ'} #${escapeHtml(cust.tableNum || 1)}</strong>` : `<strong>${isEn ? 'DELIVERY' : 'ដឹកជញ្ជូន'} (${escapeHtml(cust.distanceKm || '0')} km)</strong><br>${escapeHtml(cust.addressName || '')}`}<br>${isEn ? 'Customer' : 'ភ្ញៀវ'}: ${escapeHtml(cust.name)}${cust.phone ? ` (${escapeHtml(cust.phone)})` : ''}</p>${cust.addressNote ? `<p style="font-size:11px;background:#f1f5f9;padding:4px;">Note: ${escapeHtml(cust.addressNote)}</p>` : ''}<hr>${o.items.map((i) => `<div class="row"><span>${i.qty}x ${escapeHtml(i.name)}<br><small style="color:#475569">${escapeHtml(i.options)}</small></span><span class="bold">$${(i.unitPrice * i.qty).toFixed(2)}</span></div>`).join('')}<hr><div class="row"><span>${isEn ? 'Subtotal' : 'សរុបទំនិញ'}</span><span>$${Number(o.subtotal || o.grandTotal || 0).toFixed(2)}</span></div>${o.promoDisc > 0 ? `<div class="row"><span>Promo</span><span>-$${Number(o.promoDisc).toFixed(2)}</span></div>` : ''}${o.type === 'delivery' ? `<div class="row"><span>${isEn ? 'Delivery' : 'ថ្លៃដឹក'}</span><span>$${Number(o.fee || 0).toFixed(2)}</span></div>` : ''}<div class="row bold" style="font-size:14px;border-top:1px solid #cbd5e1;padding-top:4px;margin-top:4px;"><span>${isEn ? 'TOTAL' : 'សរុប'}</span><span>$${Number(o.grandTotal || 0).toFixed(2)}</span></div><div style="text-align:right;font-size:10px;color:#475569;">~ ${khrTotal.toLocaleString()} KHR</div><div class="stamp">${o.paymentVerified ? `✓ PAID (${escapeHtml(o.payment)})` : `UNPAID · ${escapeHtml(o.payment)}`}</div><p style="text-align:center;font-size:10px;margin-top:8px;">${isEn ? 'Thank you!' : 'សូមអរគុណ!'}</p></body></html>`;
 
     try {
       const iframe = document.createElement('iframe');
@@ -1075,7 +1486,36 @@ export function AdminDashboard({
             </span>
           </button>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              unlockAudio();
+              playOrderConfirmedSound();
+              setSoundPrimed(true);
+              onToast(
+                isEn
+                  ? '🔊 Counter audio alerts active!'
+                  : '🔊 សំលេងដាស់តឿននៅហាងបានបើកដំណើរការហើយ!'
+              );
+            }}
+            className={`px-2.5 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold inline-flex items-center gap-1.5 transition-colors ${
+              soundPrimed
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
+                : 'bg-amber-400 text-slate-900 hover:bg-amber-300'
+            }`}
+          >
+            {soundPrimed ? <BellRing className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 animate-pulse" />}
+            <span>
+              {soundPrimed
+                ? isEn
+                  ? 'Sound On'
+                  : 'សំលេងបើករួច'
+                : isEn
+                  ? 'Enable Sound'
+                  : 'បើកសំលេងហាង'}
+            </span>
+          </button>
           {onChangeLang && (
             <button
               type="button"
@@ -1127,8 +1567,64 @@ export function AdminDashboard({
         </div>
       )}
 
+      {/* Pre-Launch Shop Checklist */}
+      <div className="no-print bg-white border border-slate-200 rounded-2xl p-3 sm:px-4 space-y-2.5">
+        <button
+          type="button"
+          onClick={() => setShowChecklist((v) => !v)}
+          className="w-full flex items-center justify-between gap-2 text-left"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {launchReadyCount === launchChecks.length ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
+            )}
+            <span className="text-xs font-bold text-slate-900 truncate">
+              {isEn
+                ? `Shop Opening Readiness: ${launchReadyCount}/${launchChecks.length} Ready`
+                : `ការត្រៀមដំណើរការក្នុងហាង៖ ${launchReadyCount}/${launchChecks.length} រួចរាល់`}
+            </span>
+          </div>
+          <span className="text-[11px] font-bold text-[#0D4A3E] shrink-0">
+            {showChecklist ? (isEn ? 'Hide' : 'បិទ') : isEn ? 'Check All' : 'ពិនិត្យលម្អិត'}
+          </span>
+        </button>
+        {showChecklist && (
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1 border-t border-slate-100">
+            {launchChecks.map((chk) => (
+              <button
+                key={chk.id}
+                type="button"
+                onClick={() => {
+                  if (chk.id === 'open' && !chk.ok) {
+                    onUpdateShopSettings({ ...shopSettings, isOpen: true });
+                  } else {
+                    setActiveTab(chk.tab);
+                  }
+                }}
+                className={`p-2 rounded-xl border text-left text-[11px] font-semibold flex items-center justify-between gap-2 transition-colors ${
+                  chk.ok
+                    ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                    : 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
+                }`}
+              >
+                <span className="truncate">
+                  {chk.ok ? '✅' : '⚠️'} {chk.label}
+                </span>
+                {!chk.ok && (
+                  <span className="font-bold underline shrink-0">
+                    {chk.id === 'open' ? (isEn ? 'Open' : 'បើក') : isEn ? 'Setup' : 'កំណត់'}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* KPIs */}
-      <div className="no-print grid grid-cols-3 gap-2 sm:gap-3">
+      <div className="no-print grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
         <motion.div
           initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -1137,10 +1633,10 @@ export function AdminDashboard({
         >
           <div className="min-w-0">
             <p className="text-[11px] sm:text-xs text-slate-500 truncate">
-              {isEn ? 'Total Revenue' : 'ចំណូលសរុប'}
+              {isEn ? `Today (${todayOrders.length})` : `ថ្ងៃនេះ (${todayOrders.length} កម្ម៉ង់)`}
             </p>
             <p className="text-base sm:text-xl font-bold font-mono-num text-[#0D4A3E] mt-0.5 truncate">
-              ${totalRevenue.toFixed(2)}
+              ${todayRevenue.toFixed(2)}
             </p>
           </div>
           <div className="hidden sm:flex w-10 h-10 rounded-xl bg-[#E8F2EF] text-[#0D4A3E] items-center justify-center shrink-0">
@@ -1150,31 +1646,64 @@ export function AdminDashboard({
         <motion.div
           initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.25, delay: 0.05 }}
+          transition={{ duration: 0.25, delay: 0.04 }}
           className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2 shadow-xs"
         >
           <div className="min-w-0">
             <p className="text-[11px] sm:text-xs text-slate-500 truncate">
-              {isEn ? 'Orders' : 'ការកម្ម៉ង់'}
+              {isEn ? `All Sales (${orders.length})` : `សរុប (${orders.length} កម្ម៉ង់)`}
             </p>
-            <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5">{orders.length}</p>
+            <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5 truncate">
+              ${totalRevenue.toFixed(2)}
+            </p>
           </div>
           <div className="hidden sm:flex w-10 h-10 rounded-xl bg-amber-50 text-amber-600 items-center justify-center shrink-0">
             <ShoppingBag className="w-5 h-5" />
           </div>
         </motion.div>
+        <motion.button
+          type="button"
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, delay: 0.08 }}
+          onClick={() => {
+            setActiveTab('orders');
+            setOrderFilter('Unpaid');
+          }}
+          className={`text-left p-2.5 sm:p-4 rounded-2xl border flex items-center justify-between gap-2 shadow-xs transition-colors ${
+            unpaidOrdersCount > 0
+              ? 'bg-red-50/70 border-red-200 hover:bg-red-50'
+              : 'bg-white border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          <div className="min-w-0">
+            <p className="text-[11px] sm:text-xs text-slate-600 truncate">
+              {isEn ? `Unpaid (${unpaidOrdersCount})` : `មិនទាន់គិតលុយ (${unpaidOrdersCount})`}
+            </p>
+            <p
+              className={`text-base sm:text-xl font-bold font-mono-num mt-0.5 truncate ${
+                unpaidOrdersCount > 0 ? 'text-red-600' : 'text-slate-900'
+              }`}
+            >
+              ${unpaidAmountUsd.toFixed(2)}
+            </p>
+          </div>
+          <div className="hidden sm:flex w-10 h-10 rounded-xl bg-red-100 text-red-600 items-center justify-center shrink-0">
+            <Volume2 className="w-5 h-5" />
+          </div>
+        </motion.button>
         <motion.div
           initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.25, delay: 0.1 }}
+          transition={{ duration: 0.25, delay: 0.12 }}
           className="bg-white p-2.5 sm:p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2 shadow-xs"
         >
           <div className="min-w-0">
             <p className="text-[11px] sm:text-xs text-slate-500 truncate">
-              {isEn ? 'Members' : 'សមាជិក'}
+              {isEn ? `Members (${displayedMembers.length})` : `សមាជិក (${displayedMembers.length})`}
             </p>
-            <p className="text-base sm:text-xl font-bold font-mono-num text-slate-900 mt-0.5">
-              {displayedMembers.length}
+            <p className="text-xs sm:text-sm font-bold font-mono-num text-slate-900 mt-1 truncate">
+              💵 ${cashRevenue.toFixed(0)} · QR ${khqrRevenue.toFixed(0)}
             </p>
           </div>
           <div className="hidden sm:flex w-10 h-10 rounded-xl bg-sky-50 text-sky-600 items-center justify-center shrink-0">
@@ -1300,6 +1829,172 @@ export function AdminDashboard({
             </div>
           </div>
 
+          {/* Unpaid Walk-Away Voice Alert System Bar */}
+          <div className="bg-amber-50/90 border border-amber-200 rounded-2xl p-3 sm:p-3.5 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0">
+                  <Volume2 className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-amber-950 truncate">
+                    {isEn
+                      ? `Unpaid Walk-Away Voice Alert (${unpaidOrdersCount} unpaid)`
+                      : `សារសំលេងដាស់តឿនភ្ញៀវភ្លេចគិតលុយ (${unpaidOrdersCount} មិនទាន់បង់)`}
+                  </p>
+                  <p className="text-[11px] text-amber-800 truncate">
+                    {shopSettings.unpaidVoiceAlertAudio
+                      ? isEn
+                        ? 'Custom recorded shop voice ready · plays on counter & customer phone'
+                        : 'មានសំលេងថតផ្ទាល់រួចរាល់ · បន្លឺលើម៉ាស៊ីនហាង ទូរស័ព្ទភ្ញៀវ & Telegram'
+                      : isEn
+                        ? 'Plays loud chime + voice callout if guest forgets to pay'
+                        : 'បន្លឺសំលេងហៅ & ផ្ញើសារទៅទូរស័ព្ទភ្ញៀវ/Telegram ពេលភ្លេចគិតលុយ'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                <label className="inline-flex items-center gap-1.5 bg-white border border-amber-200 px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(shopSettings.unpaidAutoAlertEnabled)}
+                    onChange={(e) =>
+                      persistShopSettingPatch({ unpaidAutoAlertEnabled: e.target.checked })
+                    }
+                    className="rounded text-[#0D4A3E]"
+                  />
+                  <span>{isEn ? 'Auto Timer' : 'រោទ៍ស្វ័យប្រវត្តិ'}</span>
+                </label>
+                {shopSettings.unpaidAutoAlertEnabled && (
+                  <select
+                    value={shopSettings.unpaidAlertMinutes || 10}
+                    onChange={(e) =>
+                      persistShopSettingPatch({ unpaidAlertMinutes: Number(e.target.value) || 10 })
+                    }
+                    className="bg-white border border-amber-200 px-2 py-1.5 rounded-xl text-[11px] font-bold text-slate-800"
+                  >
+                    <option value={3}>3 {isEn ? 'min' : 'នាទី'}</option>
+                    <option value={5}>5 {isEn ? 'min' : 'នាទី'}</option>
+                    <option value={10}>10 {isEn ? 'min' : 'នាទី'}</option>
+                    <option value={15}>15 {isEn ? 'min' : 'នាទី'}</option>
+                  </select>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    playUnpaidVoiceAlert({
+                      audioDataUri: shopSettings.unpaidVoiceAlertAudio,
+                      text: voiceTextDraft || shopSettings.unpaidVoiceAlertText,
+                      lang,
+                      tableNum: 1,
+                      amountUsd: 3.5,
+                    });
+                    onToast(isEn ? '🔊 Playing test voice alert' : '🔊 កំពុងសាកល្បងសារសំលេង...');
+                  }}
+                  className="bg-white hover:bg-amber-100 border border-amber-300 text-amber-900 text-xs font-bold px-2.5 py-1.5 rounded-xl flex items-center gap-1"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Test' : 'សាកល្បង'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowVoiceStudio((prev) => !prev)}
+                  className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1"
+                >
+                  <Mic className="w-3.5 h-3.5" />
+                  <span>{showVoiceStudio ? (isEn ? 'Hide Setup' : 'បិទផ្ទាំង') : isEn ? 'Record / Setup' : 'ថតសំលេង / កំណត់'}</span>
+                </button>
+              </div>
+            </div>
+
+            {showVoiceStudio && (
+              <div className="bg-white border border-amber-200 rounded-xl p-3 space-y-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={savingVoiceConfig}
+                    onClick={handleStartVoiceRecording}
+                    className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors ${
+                      isRecordingVoice
+                        ? 'bg-red-600 hover:bg-red-700 text-white animate-pulse'
+                        : 'bg-[#0D4A3E] hover:bg-[#09352C] text-white'
+                    }`}
+                  >
+                    <Mic className="w-3.5 h-3.5" />
+                    <span>
+                      {isRecordingVoice
+                        ? isEn
+                          ? `Stop (${recordingSeconds}s / 12s)`
+                          : `ឈប់ថត (${recordingSeconds}s / 12s)`
+                        : isEn
+                          ? 'Record Shop Voice (12s)'
+                          : '🎙️ ថតសំលេងម្ចាស់ហាង (12s)'}
+                    </span>
+                  </button>
+                  {shopSettings.unpaidVoiceAlertAudio && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          playUnpaidVoiceAlert({
+                            audioDataUri: shopSettings.unpaidVoiceAlertAudio,
+                            speakFallback: false,
+                          })
+                        }
+                        className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        <span>{isEn ? 'Play Recording' : 'ស្តាប់សំលេងថត'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => persistShopSettingPatch({ unpaidVoiceAlertAudio: '' })}
+                        className="bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 px-2.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1"
+                      >
+                        <VolumeX className="w-3.5 h-3.5" />
+                        <span>{isEn ? 'Clear Clip' : 'លុបសំលេងថត'}</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-slate-600 block">
+                    {isEn
+                      ? 'Auto-Spoken Message Text (when no voice clip or TTS fallback):'
+                      : 'អត្ថបទអានសំលេង (ប្រើ {table} សម្រាប់តុ, {amount} សម្រាប់ទឹកប្រាក់)៖'}
+                  </label>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={voiceTextDraft}
+                      onChange={(e) => setVoiceTextDraft(e.target.value)}
+                      placeholder={
+                        isEn
+                          ? 'Excuse me Table {table}, please complete payment of ${amount}.'
+                          : 'សូមអភ័យទោស ភ្ញៀវតុលេខ {table} ភ្លេចទូទាត់ប្រាក់ {amount} ដុល្លារហើយ សូមមេត្តាគិតលុយផង!'
+                      }
+                      className="flex-1 min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                    />
+                    <button
+                      type="button"
+                      disabled={savingVoiceConfig}
+                      onClick={handleSaveVoiceAlertConfig}
+                      className="bg-[#0D4A3E] hover:bg-[#09352C] text-white px-3.5 py-2 rounded-xl text-xs font-bold shrink-0"
+                    >
+                      {savingVoiceConfig
+                        ? isEn
+                          ? 'Saving...'
+                          : 'កំពុងរក្សាទុក...'
+                        : isEn
+                          ? 'Save Text'
+                          : 'រក្សាទុក'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
           {pendingKhqrSessions.length > 0 && (
             <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3.5 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
@@ -1400,29 +2095,47 @@ export function AdminDashboard({
 
           <div className="flex flex-wrap justify-between items-center gap-2">
             <div className="flex gap-1.5 overflow-x-auto">
-              {(['All', 'Pending', 'Brewing', 'Ready', 'Completed'] as const).map((st) => (
+              {(['All', 'Unpaid', 'Pending', 'Brewing', 'Ready', 'Completed'] as const).map((st) => (
                 <button
                   key={st}
                   type="button"
                   onClick={() => setOrderFilter(st)}
                   className={`px-3.5 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap ${
                     orderFilter === st
-                      ? 'bg-[#0D4A3E] text-white'
+                      ? st === 'Unpaid'
+                        ? 'bg-red-600 text-white'
+                        : 'bg-[#0D4A3E] text-white'
                       : 'bg-white border border-slate-200 text-slate-600'
                   }`}
                 >
-                  {st === 'All' ? (isEn ? 'All' : 'ទាំងអស់') : getOrderStatusText(st, lang)}
+                  {st === 'All'
+                    ? isEn
+                      ? 'All'
+                      : 'ទាំងអស់'
+                    : st === 'Unpaid'
+                      ? `${isEn ? 'Unpaid' : 'មិនទាន់បង់'}${unpaidOrdersCount > 0 ? ` (${unpaidOrdersCount})` : ''}`
+                      : getOrderStatusText(st, lang)}
                 </button>
               ))}
             </div>
-            <button
-              type="button"
-              onClick={onClearCompletedOrders}
-              className="text-xs text-red-600 font-semibold flex items-center gap-1"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>{isEn ? 'Clear Completed' : 'សម្អាតដែលរួច'}</span>
-            </button>
+            <div className="flex items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={handleExportOrdersCsv}
+                className="text-xs text-[#0D4A3E] bg-[#E8F2EF] hover:bg-[#d5ebe4] px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{isEn ? 'Export CSV' : 'ទាញយក CSV'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={onClearCompletedOrders}
+                className="text-xs text-red-600 font-semibold flex items-center gap-1"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isEn ? 'Clear Completed' : 'សម្អាតដែលរួច'}</span>
+              </button>
+            </div>
           </div>
 
           {!filteredOrders.length ? (
@@ -1450,6 +2163,25 @@ export function AdminDashboard({
                         <p className="text-xs text-slate-500 mt-0.5">
                           {o.timestamp} · {cust.name} ({cust.phone}) · {o.payment}
                         </p>
+                        {o.payment === 'Cash' && (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            {o.paymentVerified ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-lg">
+                                <ShieldCheck className="w-3 h-3 shrink-0" />
+                                <span>{isEn ? 'Cash Paid' : '✓ ទទួលប្រាក់សុទ្ធរួច'}</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-red-50 text-red-700 border border-red-200 px-2 py-0.5 rounded-lg">
+                                <span>{isEn ? 'Unpaid (Cash)' : '💵 មិនទាន់ទូទាត់ប្រាក់'}</span>
+                              </span>
+                            )}
+                            {Boolean(o.unpaidAlertCount) && !o.paymentVerified && (
+                              <span className="text-[10px] font-bold bg-amber-100 text-amber-900 px-2 py-0.5 rounded-lg">
+                                🔊 {isEn ? `Alerted ${o.unpaidAlertCount}x` : `បានហៅសំលេង ${o.unpaidAlertCount}x`}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         {o.payment === 'KHQR / ABA' && (
                           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                             {o.paymentVerified ? (
@@ -1480,6 +2212,11 @@ export function AdminDashboard({
                             ) : (
                               <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-lg">
                                 {isEn ? 'Unverified KHQR' : 'KHQR មិនទាន់ផ្ទៀងផ្ទាត់'}
+                              </span>
+                            )}
+                            {Boolean(o.unpaidAlertCount) && !o.paymentVerified && (
+                              <span className="text-[10px] font-bold bg-amber-100 text-amber-900 px-2 py-0.5 rounded-lg">
+                                🔊 {isEn ? `Alerted ${o.unpaidAlertCount}x` : `បានហៅសំលេង ${o.unpaidAlertCount}x`}
                               </span>
                             )}
                             {o.paymentRef && (
@@ -1688,6 +2425,53 @@ export function AdminDashboard({
                                 : '✓ បញ្ជាក់លើវេបសាយ'}
                           </span>
                         )}
+                        {!o.paymentVerified && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                unlockAudio();
+                                await onMarkOrderPaid(o.id);
+                              }}
+                              className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 text-xs font-bold px-2.5 py-1.5 rounded-xl flex items-center gap-1 transition-colors"
+                            >
+                              <DollarSign className="w-3.5 h-3.5" />
+                              <span>{isEn ? 'Mark Paid' : 'ទទួលលុយរួច'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={alertingOrderId === o.id}
+                              onClick={async () => {
+                                setAlertingOrderId(o.id);
+                                try {
+                                  playUnpaidVoiceAlert({
+                                    audioDataUri: shopSettings.unpaidVoiceAlertAudio,
+                                    text: shopSettings.unpaidVoiceAlertText,
+                                    lang,
+                                    tableNum: cust.tableNum,
+                                    amountUsd: o.grandTotal,
+                                    customerName: cust.name,
+                                  });
+                                  await onSendUnpaidVoiceAlert(o);
+                                } finally {
+                                  setAlertingOrderId(null);
+                                }
+                              }}
+                              className="bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1 shadow-sm transition-colors"
+                            >
+                              <Volume2 className="w-3.5 h-3.5" />
+                              <span>
+                                {alertingOrderId === o.id
+                                  ? isEn
+                                    ? 'Alerting...'
+                                    : 'កំពុងផ្ញើសំលេង...'
+                                  : isEn
+                                    ? 'Voice Alert (Unpaid)'
+                                    : 'ហៅសំលេង (ភ្លេចគិតលុយ)'}
+                              </span>
+                            </button>
+                          </>
+                        )}
                       </div>
                       <div className="flex gap-2 items-center">
                         <button
@@ -1697,6 +2481,28 @@ export function AdminDashboard({
                         >
                           <Printer className="w-3.5 h-3.5" />
                           <span>Print</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (confirmDeleteOrderId === o.id) {
+                              setConfirmDeleteOrderId(null);
+                              await onDeleteOrder(o.id);
+                            } else {
+                              setConfirmDeleteOrderId(o.id);
+                            }
+                          }}
+                          className={`text-xs px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1 transition-colors ${
+                            confirmDeleteOrderId === o.id
+                              ? 'bg-red-600 text-white'
+                              : 'bg-red-50 hover:bg-red-100 text-red-600'
+                          }`}
+                          title={isEn ? 'Delete order' : 'លុបការកម្ម៉ង់'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          {confirmDeleteOrderId === o.id && (
+                            <span>{isEn ? 'Confirm?' : 'ច្បាស់ទេ?'}</span>
+                          )}
                         </button>
                         {cust.tg && (
                           <a
@@ -1987,7 +2793,7 @@ export function AdminDashboard({
                   <select
                     value={itemType}
                     onChange={(e) => setItemType(e.target.value as ItemType)}
-                    className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white font-semibold"
+                    className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs bg-white font-semibold"
                   >
                     <option value="drink">
                       {isEn
@@ -2010,7 +2816,7 @@ export function AdminDashboard({
                         value={itemName}
                         onChange={(e) => setItemName(e.target.value)}
                         placeholder={isEn ? 'e.g. កាហ្វេទឹកកក' : 'ឧ. កាហ្វេទឹកដោះគោទឹកកក'}
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs"
                       />
                     </div>
                     <div>
@@ -2022,7 +2828,7 @@ export function AdminDashboard({
                         value={itemNameEn}
                         onChange={(e) => setItemNameEn(e.target.value)}
                         placeholder="e.g. Iced Caramel Latte"
-                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs"
                       />
                     </div>
                   </div>
@@ -2040,7 +2846,7 @@ export function AdminDashboard({
                         value={itemPrice}
                         onChange={(e) => setItemPrice(e.target.value)}
                         placeholder="2.50"
-                        className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono-num"
+                        className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num"
                       />
                     </div>
                     <div className="min-w-0">
@@ -2054,37 +2860,97 @@ export function AdminDashboard({
                         value={itemDiscount}
                         onChange={(e) => setItemDiscount(e.target.value)}
                         placeholder="0"
-                        className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono-num"
+                        className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num"
                       />
                     </div>
                   </div>
 
-                  {/* Category quick-select + custom input */}
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold text-slate-500 block">
-                      {isEn ? 'Category (Pick or Type)' : 'ប្រភេទមុខទំនិញ (ចុចរើស ឬវាយបញ្ចូល)'}
-                    </label>
-                    <div className="flex flex-wrap gap-1">
-                      {CATEGORY_PRESETS.map((c) => {
+                  {/* Category quick-select (Owner editable: add / remove) + custom input */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-[10px] font-bold text-slate-500 block">
+                        {isEn
+                          ? 'Category (Click to pick, × to remove, or Add below)'
+                          : 'ប្រភេទមុខទំនិញ (ចុចរើស, × ដកចេញ ឬបន្ថែមថ្មី)'}
+                      </label>
+                      <button
+                        type="button"
+                        disabled={savingCategoryPresets}
+                        onClick={handleResetCategoryPresets}
+                        className="text-[10px] font-bold text-[#0D4A3E] hover:underline flex items-center gap-0.5 shrink-0"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>{isEn ? 'Reset' : 'លំនាំដើម'}</span>
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {activeCategoryPresets.map((c) => {
                         const selected = itemCat === c.value;
                         return (
-                          <button
+                          <div
                             key={c.value}
-                            type="button"
-                            onClick={() => {
-                              setItemCat(c.value);
-                              setItemCatEn(c.valueEn);
-                            }}
-                            className={`px-2 py-1 rounded-lg text-[10px] font-bold border ${
+                            className={`inline-flex items-center rounded-lg border overflow-hidden transition-colors ${
                               selected
                                 ? 'bg-[#0D4A3E] text-white border-[#0D4A3E]'
-                                : 'bg-slate-50 text-slate-600 border-slate-200'
+                                : 'bg-slate-50 text-slate-700 border-slate-200'
                             }`}
                           >
-                            {isEn ? c.labelEn : c.labelKm}
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setItemCat(c.value);
+                                setItemCatEn(c.valueEn);
+                              }}
+                              className="px-2.5 py-1.5 text-[11px] font-bold text-left"
+                            >
+                              {isEn ? c.labelEn : c.labelKm}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={savingCategoryPresets}
+                              aria-label={isEn ? `Remove ${c.labelEn}` : `ដកប្រភេទ ${c.labelKm} ចេញ`}
+                              onClick={() => handleRemoveCategoryPreset(c.value)}
+                              className={`px-1.5 py-1.5 border-l transition-colors ${
+                                selected
+                                  ? 'border-white/25 hover:bg-red-500/80 text-white/90'
+                                  : 'border-slate-200 hover:bg-red-50 hover:text-red-600 text-slate-400'
+                              }`}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
                         );
                       })}
+                      {!activeCategoryPresets.length && (
+                        <span className="text-[11px] text-slate-400 italic">
+                          {isEn ? 'No category presets yet — add one below.' : 'មិនទាន់មានប្រភេទស្រាប់ទេ — បន្ថែមខាងក្រោម!'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-1.5 bg-slate-50 p-2 rounded-xl border border-slate-200/80">
+                      <input
+                        type="text"
+                        value={newCatKm}
+                        onChange={(e) => setNewCatKm(e.target.value)}
+                        placeholder={isEn ? 'New category (Khmer/Local)' : 'បន្ថែមឈ្មោះប្រភេទ (ឧ. តែបៃតង)'}
+                        className="w-full min-w-0 bg-white px-2.5 py-1.5 border border-slate-200 rounded-lg text-base sm:text-[11px]"
+                      />
+                      <input
+                        type="text"
+                        value={newCatEn}
+                        onChange={(e) => setNewCatEn(e.target.value)}
+                        placeholder={isEn ? 'English label (optional)' : 'ឈ្មោះអង់គ្លេស (ស្រេចចិត្ត)'}
+                        className="w-full min-w-0 bg-white px-2.5 py-1.5 border border-slate-200 rounded-lg text-base sm:text-[11px]"
+                      />
+                      <button
+                        type="button"
+                        disabled={savingCategoryPresets}
+                        onClick={handleAddCategoryPreset}
+                        className="bg-[#0D4A3E] hover:bg-[#09352C] text-white px-3 py-1.5 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 shrink-0"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{isEn ? 'Add Preset' : 'បន្ថែម'}</span>
+                      </button>
                     </div>
                     <input
                       type="text"
@@ -2095,7 +2961,7 @@ export function AdminDashboard({
                         if (!itemCatEn) setItemCatEn(e.target.value);
                       }}
                       placeholder={isEn ? 'Category e.g. Coffee, Matcha...' : 'ប្រភេទ (ឧ. Coffee, Matcha, Food & Noodles)'}
-                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs"
                     />
                   </div>
 

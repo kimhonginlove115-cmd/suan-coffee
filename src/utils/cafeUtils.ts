@@ -1,5 +1,5 @@
 import type React from 'react';
-import type { MenuItem, Order, ShopSettings, Topping } from '../types';
+import type { CategoryPreset, MenuItem, Order, ShopSettings, Topping } from '../types';
 
 import heroBannerImg from '../assets/images/cafe_hero_banner_1794711441891.jpg';
 import logoEmblemImg from '../assets/images/cafe_logo_emblem_1794711441103.jpg';
@@ -126,6 +126,15 @@ export const DEFAULT_TOPPINGS: Topping[] = [
   { id: 103, name: 'បន្ថែម Espresso ១ ស៊ុត', nameEn: 'Extra Espresso Shot', price: 0.75, available: true },
 ];
 
+export const DEFAULT_CATEGORY_PRESETS: CategoryPreset[] = [
+  { value: 'Coffee', valueEn: 'Coffee', labelKm: 'កាហ្វេ (Coffee)', labelEn: 'Coffee' },
+  { value: 'Matcha', valueEn: 'Matcha', labelKm: 'ម៉ាត់ឆា (Matcha)', labelEn: 'Matcha' },
+  { value: 'Milk Tea', valueEn: 'Milk Tea', labelKm: 'តែទឹកដោះគោ (Milk Tea)', labelEn: 'Milk Tea' },
+  { value: 'Smoothie & Soda', valueEn: 'Smoothie & Soda', labelKm: 'ស្មូទី & សូដា (Smoothie & Soda)', labelEn: 'Smoothie & Soda' },
+  { value: 'Food & Noodles', valueEn: 'Food & Noodles', labelKm: 'មី & អាហារ (Food & Noodles)', labelEn: 'Food & Noodles' },
+  { value: 'Bakery & Snacks', valueEn: 'Bakery & Snacks', labelKm: 'នំ & អាហារសម្រន់ (Bakery & Snacks)', labelEn: 'Bakery & Snacks' },
+];
+
 export const DEFAULT_SETTINGS: ShopSettings = {
   brandTitle: 'EMERALD BREW CAFE',
   shopName: 'កាហ្វេពិសេស និងអាហារស្រស់ៗប្រចាំថ្ងៃ',
@@ -156,6 +165,11 @@ export const DEFAULT_SETTINGS: ShopSettings = {
   lat: 11.5564,
   lng: 104.9282,
   tableCount: 10,
+  categoryPresets: DEFAULT_CATEGORY_PRESETS,
+  unpaidVoiceAlertAudio: '',
+  unpaidVoiceAlertText: '',
+  unpaidAutoAlertEnabled: false,
+  unpaidAlertMinutes: 10,
 };
 
 const memoryFallback: Record<string, unknown> = {};
@@ -307,9 +321,31 @@ export function normalizeToppings(raw: unknown): Topping[] {
     });
 }
 
+export function normalizeCategoryPresets(raw: unknown): CategoryPreset[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const seen = new Set<string>();
+  const out: CategoryPreset[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Partial<CategoryPreset>;
+    const val = String(obj.value || '').trim().slice(0, 60);
+    if (!val) continue;
+    const key = val.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const valEn = String(obj.valueEn || val).trim().slice(0, 60) || val;
+    const labelKm = String(obj.labelKm || val).trim().slice(0, 80) || val;
+    const labelEn = String(obj.labelEn || valEn).trim().slice(0, 80) || valEn;
+    out.push({ value: val, valueEn: valEn, labelKm, labelEn });
+  }
+  return out;
+}
+
 export function normalizeShopSettings(raw: unknown, fallback: ShopSettings = DEFAULT_SETTINGS): ShopSettings {
   const obj = raw && typeof raw === 'object' ? (raw as Partial<ShopSettings>) : {};
   const merged = { ...fallback, ...obj };
+  const normalizedPresets =
+    'categoryPresets' in obj ? normalizeCategoryPresets(obj.categoryPresets) : undefined;
   return {
     ...merged,
     logoImg: resolveAssetUrl(merged.logoImg, CAFE_ASSETS.logoEmblem),
@@ -318,6 +354,18 @@ export function normalizeShopSettings(raw: unknown, fallback: ShopSettings = DEF
     lng: parseFloat(String(merged.lng)) || fallback.lng,
     khqrKhrRate: Number(merged.khqrKhrRate) > 0 ? Number(merged.khqrKhrRate) : 4100,
     tableCount: Math.min(100, Math.max(1, Math.round(Number(merged.tableCount) || fallback.tableCount || 10))),
+    categoryPresets:
+      normalizedPresets !== undefined
+        ? normalizedPresets
+        : fallback.categoryPresets || DEFAULT_CATEGORY_PRESETS,
+    unpaidVoiceAlertAudio:
+      typeof merged.unpaidVoiceAlertAudio === 'string' && merged.unpaidVoiceAlertAudio.startsWith('data:audio/')
+        ? merged.unpaidVoiceAlertAudio
+        : '',
+    unpaidVoiceAlertText:
+      typeof merged.unpaidVoiceAlertText === 'string' ? merged.unpaidVoiceAlertText.slice(0, 260) : '',
+    unpaidAutoAlertEnabled: Boolean(merged.unpaidAutoAlertEnabled),
+    unpaidAlertMinutes: Math.min(60, Math.max(1, Math.round(Number(merged.unpaidAlertMinutes) || 10))),
   };
 }
 
@@ -382,6 +430,22 @@ export function normalizeOrders(raw: unknown): Order[] {
           options: String(it?.options || ''),
         })),
         payment: o.payment === 'KHQR / ABA' ? 'KHQR / ABA' : 'Cash',
+        paymentVerified: typeof o.paymentVerified === 'boolean' ? o.paymentVerified : undefined,
+        paymentVerifiedBy:
+          o.paymentVerifiedBy === 'bakong_md5' ||
+          o.paymentVerifiedBy === 'telegram_owner' ||
+          o.paymentVerifiedBy === 'web_admin' ||
+          o.paymentVerifiedBy === 'auto_slip_ocr' ||
+          o.paymentVerifiedBy === 'slip_ref'
+            ? o.paymentVerifiedBy
+            : undefined,
+        paymentRef: typeof o.paymentRef === 'string' ? o.paymentRef : undefined,
+        paymentBankName: typeof o.paymentBankName === 'string' ? o.paymentBankName : undefined,
+        paymentSlipHash: typeof o.paymentSlipHash === 'string' ? o.paymentSlipHash : undefined,
+        paymentPaidAmount:
+          typeof o.paymentPaidAmount === 'number' ? o.paymentPaidAmount : undefined,
+        paymentCurrency: o.paymentCurrency === 'KHR' || o.paymentCurrency === 'USD' ? o.paymentCurrency : undefined,
+        paymentSlipImg: typeof o.paymentSlipImg === 'string' ? o.paymentSlipImg : undefined,
         subtotal: Number(o.subtotal) || 0,
         promoDisc: Number(o.promoDisc) || 0,
         fee: Number(o.fee) || 0,
@@ -403,7 +467,12 @@ export function normalizeOrders(raw: unknown): Order[] {
           o.status === 'Brewing' || o.status === 'Ready' || o.status === 'Completed'
             ? o.status
             : 'Pending',
+        confirmedAt: typeof o.confirmedAt === 'number' ? o.confirmedAt : undefined,
+        confirmedBy: o.confirmedBy === 'telegram' || o.confirmedBy === 'website' ? o.confirmedBy : undefined,
+        tgMessageId: typeof o.tgMessageId === 'number' ? o.tgMessageId : undefined,
         feedback,
+        unpaidAlertAt: typeof o.unpaidAlertAt === 'number' ? o.unpaidAlertAt : undefined,
+        unpaidAlertCount: typeof o.unpaidAlertCount === 'number' ? o.unpaidAlertCount : undefined,
       };
     });
 }

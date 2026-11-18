@@ -1,5 +1,5 @@
-import type { AppLang, MenuItem, OrderStatus, Topping } from '../types';
-import { CAFE_ASSETS } from './cafeUtils';
+import type { AppLang, CategoryPreset, MenuItem, OrderStatus, Topping } from '../types';
+import { CAFE_ASSETS, DEFAULT_CATEGORY_PRESETS } from './cafeUtils';
 
 export function getMenuName(item: Pick<MenuItem, 'name' | 'nameEn'>, lang: AppLang): string {
   if (lang === 'en') return (item.nameEn || '').trim() || item.name;
@@ -79,14 +79,7 @@ export function getOrderStatusText(status: OrderStatus | string, lang: AppLang):
   }
 }
 
-export const CATEGORY_PRESETS: Array<{ value: string; valueEn: string; labelKm: string; labelEn: string }> = [
-  { value: 'Coffee', valueEn: 'Coffee', labelKm: 'កាហ្វេ (Coffee)', labelEn: 'Coffee' },
-  { value: 'Matcha', valueEn: 'Matcha', labelKm: 'ម៉ាត់ឆា (Matcha)', labelEn: 'Matcha' },
-  { value: 'Milk Tea', valueEn: 'Milk Tea', labelKm: 'តែទឹកដោះគោ (Milk Tea)', labelEn: 'Milk Tea' },
-  { value: 'Smoothie & Soda', valueEn: 'Smoothie & Soda', labelKm: 'ស្មូទី & សូដា (Smoothie & Soda)', labelEn: 'Smoothie & Soda' },
-  { value: 'Food & Noodles', valueEn: 'Food & Noodles', labelKm: 'មី & អាហារ (Food & Noodles)', labelEn: 'Food & Noodles' },
-  { value: 'Bakery & Snacks', valueEn: 'Bakery & Snacks', labelKm: 'នំ & អាហារសម្រន់ (Bakery & Snacks)', labelEn: 'Bakery & Snacks' },
-];
+export const CATEGORY_PRESETS: CategoryPreset[] = DEFAULT_CATEGORY_PRESETS;
 
 export interface MenuPresetTemplate {
   presetId: string;
