@@ -3907,7 +3907,10 @@ app.post('/api/admin/bakong/test', async (req, res) => {
 });
 
 // ---- Dynamic OpenGraph Shop Image & Public Shop / Orders Sync ----
-app.get('/api/shop/og-image', (_req, res) => {
+app.all('/api/shop/og-image', (req, res) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return res.status(405).end();
+  }
   const candidates = [db.shopSettings?.bannerImg, db.shopSettings?.logoImg];
   for (const raw of candidates) {
     if (typeof raw !== 'string' || !raw.trim()) continue;
@@ -3918,12 +3921,12 @@ app.get('/api/shop/og-image', (_req, res) => {
         const buf = Buffer.from(m[2], 'base64');
         res.setHeader('Content-Type', m[1]);
         res.setHeader('Cache-Control', 'public, max-age=300');
-        return res.send(buf);
+        return req.method === 'HEAD' ? res.status(200).end() : res.send(buf);
       } catch {
         // fallback below
       }
     }
-    if (val.startsWith('https://') || val.startsWith('http://') || val.startsWith('/')) {
+    if ((val.startsWith('https://') || val.startsWith('http://') || val.startsWith('/')) && !val.startsWith('/src/')) {
       res.setHeader('Cache-Control', 'public, max-age=300');
       return res.redirect(302, val);
     }
@@ -3938,7 +3941,7 @@ app.get('/api/shop/og-image', (_req, res) => {
   </svg>`;
   res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=300');
-  return res.send(svg);
+  return req.method === 'HEAD' ? res.status(200).end() : res.send(svg);
 });
 
 app.get('/api/shop', (_req, res) => {

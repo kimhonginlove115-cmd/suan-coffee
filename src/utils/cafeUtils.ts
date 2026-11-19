@@ -402,8 +402,15 @@ export function normalizeShopSettings(raw: unknown, fallback: ShopSettings = DEF
 
 export function normalizeOrders(raw: unknown): Order[] {
   if (!Array.isArray(raw)) return [];
+  const seenIds = new Set<string>();
   return raw
-    .filter((o): o is Record<string, unknown> => Boolean(o && typeof o === 'object' && o.id))
+    .filter((o): o is Record<string, unknown> => {
+      if (!o || typeof o !== 'object' || !o.id) return false;
+      const key = String(o.id);
+      if (seenIds.has(key)) return false;
+      seenIds.add(key);
+      return true;
+    })
     .map((o) => {
       const cust = (o.customer && typeof o.customer === 'object' ? o.customer : {}) as Record<string, unknown>;
       const items = Array.isArray(o.items) ? o.items : [];

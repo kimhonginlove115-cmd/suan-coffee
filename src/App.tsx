@@ -594,7 +594,12 @@ export default function App() {
 
   const applyFetchedOrders = useCallback(
     (incoming: Order[]) => {
-      const sorted = [...incoming].sort((a, b2) => (b2.createdAt || 0) - (a.createdAt || 0));
+      const uniqueMap = new Map<string, Order>();
+      for (const ord of incoming) {
+        if (!ord?.id) continue;
+        uniqueMap.set(ord.id, ord);
+      }
+      const sorted = Array.from(uniqueMap.values()).sort((a, b2) => (b2.createdAt || 0) - (a.createdAt || 0));
       const sig = sorted
         .map(
           (o) =>
@@ -1342,7 +1347,7 @@ export default function App() {
       );
     }
 
-    setOrders((prev) => [cleanOrder, ...prev]);
+    setOrders((prev) => [cleanOrder, ...prev.filter((o) => o.id !== cleanOrder.id)]);
     setMyOrderIds((prev) => [cleanOrder.id, ...prev.filter((id) => id !== cleanOrder.id)].slice(0, 30));
     prevOrderStatusesRef.current.set(cleanOrder.id, cleanOrder.status);
     ordersInitializedRef.current = true;
@@ -3135,22 +3140,42 @@ export default function App() {
                       )}
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => setIsReviewFormOpen((v) => !v)}
-                      className="bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold text-xs px-4 py-3 rounded-xl inline-flex items-center justify-center gap-2 transition-colors shrink-0 shadow-xs"
-                    >
-                      <MessageSquare className="w-4 h-4 text-amber-300" />
-                      <span>
-                        {isReviewFormOpen
-                          ? isEn
-                            ? 'Close Form'
-                            : 'បិទទម្រង់វាយតម្លៃ'
-                          : isEn
-                            ? 'Write a Review'
-                            : 'សរសេរការវាយតម្លៃ'}
-                      </span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const shareUrl = `${window.location.origin}/?shop=suan#reviews-section`;
+                          if (navigator.clipboard?.writeText) {
+                            navigator.clipboard.writeText(shareUrl).catch(() => {});
+                          }
+                          showToast(
+                            isEn
+                              ? 'Shop & Reviews link copied!'
+                              : 'បានចម្លង Link ហាង & ការវាយតម្លៃរួចរាល់!'
+                          );
+                        }}
+                        className="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs px-3.5 py-3 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors shrink-0"
+                      >
+                        <Copy className="w-3.5 h-3.5 text-[#0D4A3E]" />
+                        <span>{isEn ? 'Copy Link' : 'ចម្លង Link'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsReviewFormOpen((v) => !v)}
+                        className="bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold text-xs px-4 py-3 rounded-xl inline-flex items-center justify-center gap-2 transition-colors shrink-0 shadow-xs"
+                      >
+                        <MessageSquare className="w-4 h-4 text-amber-300" />
+                        <span>
+                          {isReviewFormOpen
+                            ? isEn
+                              ? 'Close Form'
+                              : 'បិទទម្រង់វាយតម្លៃ'
+                            : isEn
+                              ? 'Write a Review'
+                              : 'សរសេរការវាយតម្លៃ'}
+                        </span>
+                      </button>
+                    </div>
                   </div>
 
                   <AnimatePresence initial={false}>

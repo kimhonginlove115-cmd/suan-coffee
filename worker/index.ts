@@ -4262,7 +4262,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
   }
 
   // 10. Dynamic OpenGraph Shop Image + Shop & Orders
-  if (path === '/api/shop/og-image' && method === 'GET') {
+  if (path === '/api/shop/og-image' && (method === 'GET' || method === 'HEAD')) {
     const candidates = [db.shopSettings?.bannerImg, db.shopSettings?.logoImg];
     for (const raw of candidates) {
       if (typeof raw !== 'string' || !raw.trim()) continue;
@@ -4273,7 +4273,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
           const bin = atob(m[2]);
           const bytes = new Uint8Array(bin.length);
           for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          return new Response(bytes, {
+          return new Response(method === 'HEAD' ? null : bytes, {
             status: 200,
             headers: {
               'Content-Type': m[1],
@@ -4287,7 +4287,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       if (val.startsWith('https://') || val.startsWith('http://')) {
         return Response.redirect(val, 302);
       }
-      if (val.startsWith('/')) {
+      if (val.startsWith('/') && !val.startsWith('/src/')) {
         return Response.redirect(`${url.origin}${val}`, 302);
       }
     }
@@ -4299,7 +4299,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       <text x="600" y="305" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="72" font-weight="700">${brand}</text>
       <text x="600" y="375" text-anchor="middle" fill="#FDE68A" font-family="sans-serif" font-size="30" font-weight="600">Specialty Coffee &amp; Online Ordering</text>
     </svg>`;
-    return new Response(svg, {
+    return new Response(method === 'HEAD' ? null : svg, {
       status: 200,
       headers: {
         'Content-Type': 'image/svg+xml; charset=utf-8',
@@ -5047,7 +5047,7 @@ export default {
         const transformed = injectShopMetaHtml(rawHtml, db, request.url);
         const headers = new Headers(assetRes.headers);
         headers.set('Content-Type', 'text/html; charset=utf-8');
-        headers.set('Cache-Control', 'public, max-age=60');
+        headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
         headers.delete('Content-Length');
         return new Response(transformed, { status: assetRes.status, headers });
       } catch {
