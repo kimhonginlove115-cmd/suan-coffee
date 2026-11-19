@@ -993,7 +993,13 @@ export default function App() {
     );
   }, [menuItems, selectedCategory, searchQuery]);
 
-  const featuredMenu = useMemo(() => menuItems.filter((i) => i.featured && i.available), [menuItems]);
+  const isItemInStock = (item: MenuItem) =>
+    item.available !== false && (typeof item.stockQty !== 'number' || item.stockQty > 0);
+
+  const featuredMenu = useMemo(
+    () => menuItems.filter((i) => i.featured && isItemInStock(i)),
+    [menuItems]
+  );
 
   const cartCount = useMemo(() => cart.reduce((s, i) => s + i.qty, 0), [cart]);
   const cartSubtotal = useMemo(() => cart.reduce((s, i) => s + i.unitPrice * i.qty, 0), [cart]);
@@ -1274,6 +1280,53 @@ export default function App() {
       clearingOrdersRef.current = false;
     }
     showToast(isEn ? `Deleted order ${orderId}` : `បានលុបការកម្ម៉ង់ ${orderId} រួចរាល់!`);
+  };
+
+  const handleSendOrderToTelegram = async (orderId: string): Promise<boolean> => {
+    if (!adminToken) {
+      handleRequireAdminReauth();
+      return false;
+    }
+    try {
+      const res = await fetchWithTimeout(
+        `/api/orders/${encodeURIComponent(orderId)}/send-telegram`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}` },
+        },
+        12000
+      );
+      if (res.status === 401) {
+        handleRequireAdminReauth();
+        return false;
+      }
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        showToast(
+          data?.error ||
+            (isEn
+              ? 'Could not send receipt to Telegram'
+              : 'មិនអាចផ្ញើវិក្កយបត្រទៅ Telegram បានទេ!')
+        );
+        return false;
+      }
+      if (data.order) {
+        setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...data.order } : o)));
+      }
+      showToast(
+        data.sentSlip
+          ? isEn
+            ? `✓ Sent receipt & bank slip (${orderId}) to Telegram!`
+            : `✓ បានផ្ញើវិក្កយបត្រ & រូប Slip (${orderId}) ទៅ Telegram ហាងរួចរាល់!`
+          : isEn
+            ? `✓ Sent receipt (${orderId}) to Telegram!`
+            : `✓ បានផ្ញើវិក្កយបត្រ (${orderId}) ទៅ Telegram ហាងរួចរាល់!`
+      );
+      return true;
+    } catch {
+      showToast(isEn ? 'Could not reach server' : 'មិនអាចភ្ជាប់ទៅ Server បានទេ');
+      return false;
+    }
   };
 
   const handleSubmitOrderFeedback = async (
@@ -1641,6 +1694,7 @@ export default function App() {
           onUpdateOrderDriverInfo={handleUpdateDriverInfo}
           onMarkOrderPaid={handleMarkOrderPaid}
           onSendUnpaidVoiceAlert={handleSendUnpaidVoiceAlert}
+          onSendOrderToTelegram={handleSendOrderToTelegram}
           onDeleteOrder={handleDeleteOrder}
           onClearCompletedOrders={async () => {
             const completed = orders.filter((o) => o.status === 'Completed');
@@ -2182,6 +2236,7 @@ export default function App() {
                           const displayName = getMenuName(item, lang);
                           const displayDesc = getMenuDesc(item, lang);
                           const catLabel = getMenuCategoryLabel(item.category, lang, item.categoryEn);
+                          const inStock = isItemInStock(item);
                           return (
                             <motion.article
                               key={item.id}
@@ -2190,10 +2245,10 @@ export default function App() {
                               animate={{ opacity: 1, y: 0, scale: 1 }}
                               exit={shouldReduceMotion ? undefined : { opacity: 0, scale: 0.95 }}
                               transition={{ duration: 0.26, delay: Math.min(idx * 0.03, 0.22) }}
-                              whileHover={shouldReduceMotion || !item.available ? undefined : { y: -5 }}
-                              whileTap={shouldReduceMotion || !item.available ? undefined : { scale: 0.97 }}
+                              whileHover={shouldReduceMotion || !inStock ? undefined : { y: -5 }}
+                              whileTap={shouldReduceMotion || !inStock ? undefined : { scale: 0.97 }}
                               onClick={() => {
-                                if (item.available) {
+                                if (inStock) {
                                   setCustomizingItem(item);
                                 } else {
                                   showToast(
@@ -2204,7 +2259,7 @@ export default function App() {
                                 }
                               }}
                               className={`group bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-lg hover:border-[#0D4A3E]/25 ${
-                                item.available ? 'cursor-pointer' : 'opacity-65'
+                                inStock ? 'cursor-pointer' : 'opacity-65'
                               }`}
                             >
                               <div>
@@ -2216,7 +2271,7 @@ export default function App() {
                                     onError={(e) => handleImgFallback(e, CAFE_ASSETS.icedLatte)}
                                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out"
                                   />
-                                  {!item.available && (
+                                  {!inStock && (
                                     <div className="absolute inset-0 bg-slate-900/55 flex items-center justify-center p-2">
                                       <span className="bg-red-600 text-white font-bold text-[11px] px-2.5 py-1 rounded-lg shadow">
                                         {t.outOfStock}
@@ -2229,10 +2284,15 @@ export default function App() {
                                       -{item.discount}%
                                     </span>
                                   )}
-                                  {item.featured && !hasDisc && item.available && (
+                                  {item.featured && !hasDisc && inStock && (
                                     <span className="absolute top-2 left-2 bg-[#0D4A3E]/90 text-amber-300 font-bold text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
                                       <Star className="w-2.5 h-2.5 fill-amber-300" />
                                       <span>{isEn ? 'Pick' : 'ពិសេស'}</span>
+                                    </span>
+                                  )}
+                                  {inStock && typeof item.stockQty === 'number' && item.stockQty > 0 && item.stockQty <= 5 && (
+                                    <span className="absolute bottom-2 right-2 bg-slate-900/80 text-amber-300 font-bold font-mono-num text-[10px] px-2 py-0.5 rounded-lg">
+                                      {isEn ? `${item.stockQty} left` : `នៅសល់ ${item.stockQty}`}
                                     </span>
                                   )}
                                 </div>
@@ -2244,7 +2304,7 @@ export default function App() {
                                   )}
                                   <span className="truncate">
                                     {catLabel}
-                                    {!item.available ? ` · ${t.outOfStock}` : ''}
+                                    {!inStock ? ` · ${t.outOfStock}` : ''}
                                   </span>
                                 </p>
                                 <h3 className="font-semibold text-xs sm:text-base text-slate-900 mt-0.5 line-clamp-1">
@@ -2271,7 +2331,7 @@ export default function App() {
                                 <motion.button
                                   type="button"
                                   whileTap={shouldReduceMotion ? undefined : { scale: 0.88 }}
-                                  disabled={!item.available}
+                                  disabled={!inStock}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     setCustomizingItem(item);
@@ -2724,6 +2784,7 @@ export default function App() {
         order={receiptState.order}
         tgUrl={receiptState.tgUrl}
         shopSettings={shopSettings}
+        onToast={showToast}
         onClose={() => {
           safeSessionDel('cafe_last_receipt_id_v15');
           setReceiptState({ order: null, tgUrl: '' });

@@ -209,9 +209,21 @@
   }
 }
 
+#app-print-receipt-root {
+  display: none;
+}
+
 @media print {
   .no-print {
     display: none !important;
+  }
+  html.printing-receipt-mode body > *:not(#app-print-receipt-root) {
+    display: none !important;
+  }
+  html.printing-receipt-mode #app-print-receipt-root {
+    display: block !important;
+    width: 100%;
+    background: #ffffff;
   }
   body {
     background: white;

@@ -292,6 +292,9 @@ export function normalizeMenuItems(raw: unknown): MenuItem[] {
             : presetMatch?.descEn,
         available: m.available !== false,
         featured: typeof m.featured === 'boolean' ? m.featured : Boolean(presetMatch?.featured),
+        ...(typeof m.stockQty === 'number' && Number.isFinite(m.stockQty) && m.stockQty >= 0
+          ? { stockQty: Math.round(m.stockQty) }
+          : {}),
       };
     });
 }

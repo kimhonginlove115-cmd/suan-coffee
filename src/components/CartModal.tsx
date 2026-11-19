@@ -774,7 +774,13 @@ export function CartModal({
         fee: effectiveOrderType === 'delivery' ? fee : 0,
         subtotal,
         grandTotal,
-        paymentVerification: payment === 'KHQR / ABA' ? verifiedPayment || undefined : undefined,
+        paymentVerification:
+          payment === 'KHQR / ABA' && verifiedPayment
+            ? {
+                ...verifiedPayment,
+                slipImg: verifiedPayment.slipImg || slipImgData || undefined,
+              }
+            : undefined,
         customer:
           effectiveOrderType === 'delivery'
             ? {

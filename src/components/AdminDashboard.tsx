@@ -13,17 +13,22 @@ import {
   DollarSign,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   Globe,
+  Image as ImageIcon,
   Layers,
   Loader2,
   Lock,
   MessageSquare,
   Mic,
   Minus,
+  Pencil,
   Play,
   Plus,
   Printer,
   QrCode,
+  ReceiptText,
   RotateCcw,
   Search,
   Send,
@@ -58,6 +63,7 @@ import type {
 import {
   CAFE_ASSETS,
   DEFAULT_CATEGORY_PRESETS,
+  DEFAULT_MENU,
   compressImageFile,
   fetchWithTimeout,
   getDiscountedPrice,
@@ -79,6 +85,7 @@ import {
   extractKhqrSummary,
   isValidEmvKhqr,
 } from '../utils/khqr';
+import { printReceiptDocument, saveOrShareReceiptPng } from '../utils/receiptPrint';
 import {
   playAdminAlertSound,
   playOrderConfirmedSound,
@@ -248,6 +255,7 @@ interface AdminDashboardProps {
   onUpdateOrderDriverInfo: (orderId: string, info: DriverInfo, nextStatus?: OrderStatus) => void;
   onMarkOrderPaid: (orderId: string) => Promise<void> | void;
   onSendUnpaidVoiceAlert: (order: Order) => Promise<void> | void;
+  onSendOrderToTelegram?: (orderId: string) => Promise<boolean> | void;
   onDeleteOrder: (orderId: string) => Promise<void> | void;
   onClearCompletedOrders: () => void;
   onOpenDriverConsole: (orderId: string) => void;
@@ -264,6 +272,7 @@ const EMPTY_SECRETS: AdminSecretsConfig = {
   botToken: '',
   chatId: '',
   bakongToken: '',
+  bakongProxyUrl: '',
   telegramGatewayToken: '',
   twilioAccountSid: '',
   twilioAuthToken: '',
@@ -299,6 +308,7 @@ export function AdminDashboard({
   onUpdateOrderDriverInfo,
   onMarkOrderPaid,
   onSendUnpaidVoiceAlert,
+  onSendOrderToTelegram,
   onDeleteOrder,
   onClearCompletedOrders,
   onOpenDriverConsole,
@@ -311,20 +321,26 @@ export function AdminDashboard({
   const shouldReduceMotion = useReducedMotion();
   const [activeTab, setActiveTab] = useState<AdminTab>('orders');
   const [orderFilter, setOrderFilter] = useState<'All' | 'Unpaid' | OrderStatus>('All');
+  const [orderSearch, setOrderSearch] = useState('');
   const [soundPrimed, setSoundPrimed] = useState(false);
   const [confirmDeleteOrderId, setConfirmDeleteOrderId] = useState<string | null>(null);
   const [showChecklist, setShowChecklist] = useState(false);
+  const [viewingReceiptOrderId, setViewingReceiptOrderId] = useState<string | null>(null);
+  const [receiptPngFallback, setReceiptPngFallback] = useState('');
+  const [savingReceiptPng, setSavingReceiptPng] = useState(false);
+  const [sendingTgOrderId, setSendingTgOrderId] = useState<string | null>(null);
 
   // Inline driver assignment draft per order
   const [driverDrafts, setDriverDrafts] = useState<Record<string, { name: string; phone: string }>>({});
 
-  // Menu form state (bilingual + featured + category)
+  // Menu form state (bilingual + featured + category + optional stockQty)
   const [editId, setEditId] = useState<string>('');
   const [itemType, setItemType] = useState<ItemType>('drink');
   const [itemName, setItemName] = useState('');
   const [itemNameEn, setItemNameEn] = useState('');
   const [itemPrice, setItemPrice] = useState('');
   const [itemDiscount, setItemDiscount] = useState('0');
+  const [itemStockQty, setItemStockQty] = useState('');
   const [itemCat, setItemCat] = useState('');
   const [itemCatEn, setItemCatEn] = useState('');
   const [itemImg, setItemImg] = useState('');
@@ -333,18 +349,25 @@ export function AdminDashboard({
   const [itemAvailable, setItemAvailable] = useState(true);
   const [itemFeatured, setItemFeatured] = useState(false);
 
-  // Preset menu selector & menu list filters / bulk selection
+  // Preset menu selector & menu list filters / bulk selection / delete undo
   const [showPresetPicker, setShowPresetPicker] = useState(false);
   const [selectedPresetIds, setSelectedPresetIds] = useState<string[]>([]);
   const [menuSearch, setMenuSearch] = useState('');
   const [menuTypeFilter, setMenuTypeFilter] = useState<'all' | ItemType>('all');
   const [menuCatFilter, setMenuCatFilter] = useState<string>('All');
   const [selectedMenuIds, setSelectedMenuIds] = useState<string[]>([]);
+  const [confirmDeleteMenuId, setConfirmDeleteMenuId] = useState<string | null>(null);
+  const [lastDeletedMenuItem, setLastDeletedMenuItem] = useState<{ item: MenuItem; index: number } | null>(null);
+  const [confirmRestoreDefaults, setConfirmRestoreDefaults] = useState(false);
 
-  // Topping form state (bilingual)
+  // Topping form state (bilingual + inline editing)
   const [newTopName, setNewTopName] = useState('');
   const [newTopNameEn, setNewTopNameEn] = useState('');
   const [newTopPrice, setNewTopPrice] = useState('');
+  const [editingToppingId, setEditingToppingId] = useState<string | null>(null);
+  const [editTopName, setEditTopName] = useState('');
+  const [editTopNameEn, setEditTopNameEn] = useState('');
+  const [editTopPrice, setEditTopPrice] = useState('');
 
   // QR generator state (persisted via shopSettings.tableCount)
   const [qrTableCount, setQrTableCount] = useState(() =>
@@ -365,6 +388,13 @@ export function AdminDashboard({
   const [savingSettings, setSavingSettings] = useState(false);
   const [testingTelegram, setTestingTelegram] = useState(false);
   const [tgTestResult, setTgTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testingBakong, setTestingBakong] = useState(false);
+  const [bakongTestResult, setBakongTestResult] = useState<{
+    ok: boolean;
+    geoBlocked?: boolean;
+    message: string;
+  } | null>(null);
+  const [showBakongToken, setShowBakongToken] = useState(false);
   const [khqrPreviewUrl, setKhqrPreviewUrl] = useState('');
   const [generatingQRs, setGeneratingQRs] = useState(false);
   const [confirmClearMenu, setConfirmClearMenu] = useState(false);
@@ -374,6 +404,7 @@ export function AdminDashboard({
   const [decidingSessionId, setDecidingSessionId] = useState<string | null>(null);
   const seenPendingPayIdsRef = useRef<Set<string>>(new Set());
   const menuFormRef = useRef<HTMLDivElement | null>(null);
+  const menuListRef = useRef<HTMLDivElement | null>(null);
 
   // Customizable category presets state
   const [newCatKm, setNewCatKm] = useState('');
@@ -630,12 +661,32 @@ export function AdminDashboard({
     .reduce((s, o) => s + Number(o.grandTotal || 0), 0);
   const pendingCount = orders.filter((o) => o.status === 'Pending').length;
   const activeDeliveryCount = orders.filter((o) => o.type === 'delivery' && o.status !== 'Completed').length;
-  const filteredOrders =
-    orderFilter === 'All'
-      ? orders
-      : orderFilter === 'Unpaid'
-        ? unpaidOrders
-        : orders.filter((o) => o.status === orderFilter);
+  const viewingReceiptOrder = useMemo(
+    () => (viewingReceiptOrderId ? orders.find((o) => o.id === viewingReceiptOrderId) || null : null),
+    [orders, viewingReceiptOrderId]
+  );
+  const filteredOrders = useMemo(() => {
+    const base =
+      orderFilter === 'All'
+        ? orders
+        : orderFilter === 'Unpaid'
+          ? unpaidOrders
+          : orders.filter((o) => o.status === orderFilter);
+    const q = orderSearch.trim().toLowerCase();
+    if (!q) return base;
+    return base.filter((o) => {
+      const cust = o.customer || { name: '', phone: '' };
+      return (
+        String(o.id || '').toLowerCase().includes(q) ||
+        String(cust.name || '').toLowerCase().includes(q) ||
+        String(cust.phone || '').toLowerCase().includes(q) ||
+        String(cust.tableNum || '').toLowerCase().includes(q) ||
+        String(cust.addressName || '').toLowerCase().includes(q) ||
+        String(o.paymentRef || '').toLowerCase().includes(q) ||
+        (o.items || []).some((it) => String(it.name || '').toLowerCase().includes(q))
+      );
+    });
+  }, [orderFilter, orders, unpaidOrders, orderSearch]);
 
   const launchChecks = [
     {
@@ -682,6 +733,24 @@ export function AdminDashboard({
     const tmr = window.setTimeout(() => setConfirmDeleteOrderId(null), 3500);
     return () => window.clearTimeout(tmr);
   }, [confirmDeleteOrderId]);
+
+  useEffect(() => {
+    if (!confirmDeleteMenuId) return;
+    const tmr = window.setTimeout(() => setConfirmDeleteMenuId(null), 3500);
+    return () => window.clearTimeout(tmr);
+  }, [confirmDeleteMenuId]);
+
+  useEffect(() => {
+    if (!confirmRestoreDefaults) return;
+    const tmr = window.setTimeout(() => setConfirmRestoreDefaults(false), 4000);
+    return () => window.clearTimeout(tmr);
+  }, [confirmRestoreDefaults]);
+
+  useEffect(() => {
+    if (!lastDeletedMenuItem) return;
+    const tmr = window.setTimeout(() => setLastDeletedMenuItem(null), 12000);
+    return () => window.clearTimeout(tmr);
+  }, [lastDeletedMenuItem]);
 
   const handleExportOrdersCsv = () => {
     if (!orders.length) {
@@ -1060,6 +1129,7 @@ export function AdminDashboard({
     setItemNameEn('');
     setItemPrice('');
     setItemDiscount('0');
+    setItemStockQty('');
     setItemCat('');
     setItemCatEn('');
     setItemImg('');
@@ -1093,31 +1163,34 @@ export function AdminDashboard({
     }
 
     const price = parseFloat(itemPrice) || 0;
-    const discount = parseInt(itemDiscount, 10) || 0;
+    const discount = Math.min(90, Math.max(0, parseInt(itemDiscount, 10) || 0));
+    const parsedStock = itemStockQty.trim() !== '' ? Math.max(0, Math.round(Number(itemStockQty) || 0)) : undefined;
     const category = itemCat.trim() || itemCatEn.trim() || 'Coffee';
     const categoryEn = itemCatEn.trim() || category;
 
     let nextMenu: MenuItem[];
     if (editId) {
-      nextMenu = menuItems.map((m) =>
-        String(m.id) === editId
-          ? {
-              ...m,
-              type: itemType,
-              name: cleanKm || cleanEn,
-              nameEn: cleanEn || cleanKm,
-              price,
-              discount,
-              category,
-              categoryEn,
-              desc: itemDesc.trim(),
-              descEn: itemDescEn.trim(),
-              img: itemImg || m.img,
-              available: itemAvailable,
-              featured: itemFeatured,
-            }
-          : m
-      );
+      nextMenu = menuItems.map((m) => {
+        if (String(m.id) !== editId) return m;
+        const updated: MenuItem = {
+          ...m,
+          type: itemType,
+          name: cleanKm || cleanEn,
+          nameEn: cleanEn || cleanKm,
+          price,
+          discount,
+          category,
+          categoryEn,
+          desc: itemDesc.trim(),
+          descEn: itemDescEn.trim(),
+          img: itemImg || m.img,
+          available: itemAvailable,
+          featured: itemFeatured,
+        };
+        if (parsedStock !== undefined) updated.stockQty = parsedStock;
+        else delete updated.stockQty;
+        return updated;
+      });
     } else {
       const newItem: MenuItem = {
         id: Date.now(),
@@ -1133,6 +1206,7 @@ export function AdminDashboard({
         descEn: itemDescEn.trim(),
         available: itemAvailable,
         featured: itemFeatured,
+        ...(parsedStock !== undefined ? { stockQty: parsedStock } : {}),
       };
       nextMenu = [newItem, ...menuItems];
     }
@@ -1151,6 +1225,7 @@ export function AdminDashboard({
     setItemNameEn(item.nameEn || '');
     setItemPrice(String(item.price));
     setItemDiscount(String(item.discount || 0));
+    setItemStockQty(typeof item.stockQty === 'number' ? String(item.stockQty) : '');
     setItemCat(item.category || '');
     setItemCatEn(item.categoryEn || item.category || '');
     setItemImg(item.img || '');
@@ -1172,6 +1247,59 @@ export function AdminDashboard({
     };
     const res = await onUpdateMenu([copy, ...menuItems]);
     notifyMenuSyncResult(res, isEn ? '✓ Duplicated menu item!' : '✓ បានចម្លងទំនិញថ្មី!');
+  };
+
+  const handleDeleteMenuItem = async (item: MenuItem) => {
+    const idx = menuItems.findIndex((x) => x.id === item.id);
+    const next = menuItems.filter((x) => x.id !== item.id);
+    setConfirmDeleteMenuId(null);
+    setLastDeletedMenuItem({ item, index: idx >= 0 ? idx : 0 });
+    if (editId === String(item.id)) resetMenuForm();
+    const res = await onUpdateMenu(next);
+    notifyMenuSyncResult(
+      res,
+      isEn ? `✓ Removed "${getMenuName(item, lang)}"` : `✓ បានដក «${getMenuName(item, lang)}» ចេញពីម៉ឺនុយ!`
+    );
+  };
+
+  const handleUndoDeleteMenuItem = async () => {
+    if (!lastDeletedMenuItem) return;
+    const { item, index } = lastDeletedMenuItem;
+    setLastDeletedMenuItem(null);
+    if (menuItems.some((m) => m.id === item.id)) return;
+    const next = [...menuItems];
+    next.splice(Math.min(index, next.length), 0, item);
+    const res = await onUpdateMenu(next);
+    notifyMenuSyncResult(
+      res,
+      isEn ? `↩️ Restored "${getMenuName(item, lang)}"` : `↩️ បានត្រឡប់ «${getMenuName(item, lang)}» ចូលម៉ឺនុយវិញ!`
+    );
+  };
+
+  const handleRestoreDefaultMenu = async () => {
+    const existingIds = new Set(menuItems.map((m) => String(m.id)));
+    const existingNames = new Set(
+      menuItems.flatMap((m) => [m.name, m.nameEn].filter(Boolean).map((n) => String(n).trim().toLowerCase()))
+    );
+    const missingDefaults = DEFAULT_MENU.filter(
+      (d) =>
+        !existingIds.has(String(d.id)) &&
+        !existingNames.has(d.name.trim().toLowerCase()) &&
+        (!d.nameEn || !existingNames.has(d.nameEn.trim().toLowerCase()))
+    );
+    setConfirmRestoreDefaults(false);
+    if (!missingDefaults.length) {
+      onToast(isEn ? 'All default menu items are already present!' : 'មុខទំនិញដើមទាំងអស់មាននៅក្នុងម៉ឺនុយរួចហើយ!');
+      return;
+    }
+    const next = [...menuItems, ...missingDefaults];
+    const res = await onUpdateMenu(next);
+    notifyMenuSyncResult(
+      res,
+      isEn
+        ? `✓ Restored ${missingDefaults.length} default items!`
+        : `✓ បានស្តារម៉ឺនុយដើមចំនួន ${missingDefaults.length} មុខចូលវិញ!`
+    );
   };
 
   const handleAddSelectedPresets = async () => {
@@ -1249,8 +1377,30 @@ export function AdminDashboard({
     setNewTopName('');
     setNewTopNameEn('');
     setNewTopPrice('');
-    if (res && !res.ok) return;
-    onToast(isEn ? '✓ Added topping!' : 'បានបន្ថែម Topping!');
+    notifyMenuSyncResult(res, isEn ? '✓ Added topping!' : '✓ បានបន្ថែម Topping ថ្មី!');
+  };
+
+  const handleSaveEditTopping = async (tId: string | number) => {
+    const cleanKm = editTopName.trim();
+    const cleanEn = editTopNameEn.trim();
+    if (!cleanKm && !cleanEn) {
+      onToast(isEn ? 'Enter a topping name' : 'សូមបញ្ចូលឈ្មោះ Topping');
+      return;
+    }
+    const nextPrice = Math.max(0, parseFloat(editTopPrice) || 0);
+    const next = toppings.map((x) =>
+      String(x.id) === String(tId)
+        ? {
+            ...x,
+            name: cleanKm || cleanEn,
+            nameEn: cleanEn || cleanKm,
+            price: nextPrice,
+          }
+        : x
+    );
+    setEditingToppingId(null);
+    const res = await onUpdateToppings(next);
+    notifyMenuSyncResult(res, isEn ? '✓ Updated topping!' : '✓ បានកែប្រែ Topping រួចរាល់!');
   };
 
   const handleSaveDriverAssignment = (o: Order) => {
@@ -1347,6 +1497,80 @@ export function AdminDashboard({
     }
   };
 
+  const handleTestBakong = async () => {
+    if (!adminToken || testingBakong) return;
+    const cleanToken = (secrets.bakongToken || '').replace(/\s+/g, '');
+    if (!cleanToken) {
+      const msg = isEn ? 'Please paste your Bakong Open API Token first.' : 'សូមបិទភ្ជាប់ Bakong Open API Token ជាមុនសិន!';
+      setBakongTestResult({ ok: false, message: msg });
+      onToast(msg);
+      return;
+    }
+    setTestingBakong(true);
+    setBakongTestResult(null);
+    try {
+      const res = await fetchWithTimeout(
+        '/api/admin/bakong/test',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            bakongToken: cleanToken,
+            bakongProxyUrl: (secrets.bakongProxyUrl || '').trim(),
+          }),
+        },
+        10000
+      );
+      if (res.status === 401) {
+        onRequireReauth();
+        return;
+      }
+      const data = (await res.json()) as {
+        ok?: boolean;
+        apiConnected?: boolean;
+        geoBlocked?: boolean;
+        error?: string;
+        expiresAt?: string;
+        responseMessage?: string;
+      };
+      if (!res.ok || !data?.ok) {
+        const errMsg = data?.error || (isEn ? 'Bakong API verification failed.' : 'ការភ្ជាប់ Bakong API បរាជ័យ');
+        setBakongTestResult({ ok: false, message: errMsg });
+        onToast(errMsg);
+        return;
+      }
+      const expNote = data.expiresAt
+        ? ` (${isEn ? 'Expires' : 'ផុតកំណត់'}: ${data.expiresAt.replace(' GMT', ' UTC')})`
+        : '';
+      if (data.geoBlocked) {
+        const geoMsg = isEn
+          ? `✓ Token is VALID${expNote} — however this Server IP is outside Cambodia and blocked by Bakong CloudFront (403 Geo-Block). Deploy from a Cambodia IP / Cloudflare PoP or enter a Cambodia Bakong Relay URL below; Auto Slip OCR & Telegram verification continue working normally.`
+          : `✓ Token របស់អ្នកត្រឹមត្រូវ${expNote} — ប៉ុន្តែ IP Server នេះនៅក្រៅប្រទេសកម្ពុជា (ត្រូវ CloudFront របស់ Bakong បិទ 403 Geo-Block)។ ប្រើ Server/Cloudflare PoP នៅកម្ពុជា ឬដាក់ Bakong Relay URL ខាងក្រោម (បច្ចុប្បន្នអាចប្រើស្កេនវិក្កយបត្រ Auto OCR & Telegram បានធម្មតា)។`;
+        setBakongTestResult({ ok: true, geoBlocked: true, message: geoMsg });
+        onToast(
+          isEn
+            ? `✓ Bakong JWT Token valid${expNote} (Server IP geo-blocked by NBC)`
+            : `✓ Token ត្រឹមត្រូវ${expNote} (IP ក្រៅកម្ពុជាត្រូវ CloudFront បិទ)`
+        );
+        return;
+      }
+      const okMsg = isEn
+        ? `✅ Bakong Open API connected & active${expNote} — click Save Settings below!`
+        : `✅ ភ្ជាប់ Bakong Open API ជោគជ័យ${expNote} — កុំភ្លេចចុច «រក្សាទុក» ខាងក្រោម!`;
+      setBakongTestResult({ ok: true, geoBlocked: false, message: okMsg });
+      onToast(okMsg);
+    } catch {
+      const netErr = isEn ? 'Could not reach server to test Bakong API.' : 'មិនអាចភ្ជាប់ទៅ Server ដើម្បីតេស្ត Bakong API បានទេ';
+      setBakongTestResult({ ok: false, message: netErr });
+      onToast(netErr);
+    } finally {
+      setTestingBakong(false);
+    }
+  };
+
   const handleSaveAllSettings = async () => {
     if (savingSettings) return;
     setSavingSettings(true);
@@ -1392,41 +1616,52 @@ export function AdminDashboard({
     }
   };
 
-  const escapeHtml = (str: unknown) =>
-    String(str ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+  const openOrderReceiptModal = (o: Order) => {
+    setReceiptPngFallback('');
+    setViewingReceiptOrderId(o.id);
+  };
 
-  const printOrderReceipt = (o: Order) => {
-    const cust = o.customer || { name: '-', phone: '-' };
-    const khrTotal = Math.round(Number(o.grandTotal || 0) * (shopSettings.khqrKhrRate || 4100));
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(o.id)}</title><style>@page{size:80mm auto;margin:4mm;}body{font-family:monospace;font-size:12px;margin:0;padding:8px;color:#0f172a;max-width:76mm;}h3{text-align:center;margin:0;font-size:15px;}p{margin:3px 0;}hr{border:0;border-top:1px dashed #64748b;margin:8px 0;}.row{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;}.bold{font-weight:bold;}.stamp{text-align:center;border:1.5px solid #0f172a;padding:5px;margin-top:8px;font-weight:bold;font-size:12px;}</style></head><body><h3>${escapeHtml(shopSettings.brandTitle)}</h3>${shopSettings.phoneHotline ? `<p style="text-align:center;font-size:11px;">Tel: ${escapeHtml(shopSettings.phoneHotline)}</p>` : ''}<p style="text-align:center;font-size:11px;">${escapeHtml(o.id)} | ${escapeHtml(o.timestamp)}</p><hr><p style="font-size:12px;">${o.type === 'dinein' ? `<strong>${isEn ? 'TABLE' : 'តុលេខ'} #${escapeHtml(cust.tableNum || 1)}</strong>` : `<strong>${isEn ? 'DELIVERY' : 'ដឹកជញ្ជូន'} (${escapeHtml(cust.distanceKm || '0')} km)</strong><br>${escapeHtml(cust.addressName || '')}`}<br>${isEn ? 'Customer' : 'ភ្ញៀវ'}: ${escapeHtml(cust.name)}${cust.phone ? ` (${escapeHtml(cust.phone)})` : ''}</p>${cust.addressNote ? `<p style="font-size:11px;background:#f1f5f9;padding:4px;">Note: ${escapeHtml(cust.addressNote)}</p>` : ''}<hr>${o.items.map((i) => `<div class="row"><span>${i.qty}x ${escapeHtml(i.name)}<br><small style="color:#475569">${escapeHtml(i.options)}</small></span><span class="bold">$${(i.unitPrice * i.qty).toFixed(2)}</span></div>`).join('')}<hr><div class="row"><span>${isEn ? 'Subtotal' : 'សរុបទំនិញ'}</span><span>$${Number(o.subtotal || o.grandTotal || 0).toFixed(2)}</span></div>${o.promoDisc > 0 ? `<div class="row"><span>Promo</span><span>-$${Number(o.promoDisc).toFixed(2)}</span></div>` : ''}${o.type === 'delivery' ? `<div class="row"><span>${isEn ? 'Delivery' : 'ថ្លៃដឹក'}</span><span>$${Number(o.fee || 0).toFixed(2)}</span></div>` : ''}<div class="row bold" style="font-size:14px;border-top:1px solid #cbd5e1;padding-top:4px;margin-top:4px;"><span>${isEn ? 'TOTAL' : 'សរុប'}</span><span>$${Number(o.grandTotal || 0).toFixed(2)}</span></div><div style="text-align:right;font-size:10px;color:#475569;">~ ${khrTotal.toLocaleString()} KHR</div><div class="stamp">${o.paymentVerified ? `✓ PAID (${escapeHtml(o.payment)})` : `UNPAID · ${escapeHtml(o.payment)}`}</div><p style="text-align:center;font-size:10px;margin-top:8px;">${isEn ? 'Thank you!' : 'សូមអរគុណ!'}</p></body></html>`;
-
-    try {
-      const iframe = document.createElement('iframe');
-      iframe.style.position = 'fixed';
-      iframe.style.right = '0';
-      iframe.style.bottom = '0';
-      iframe.style.width = '0';
-      iframe.style.height = '0';
-      iframe.style.border = '0';
-      document.body.appendChild(iframe);
-      const doc = iframe.contentWindow?.document;
-      if (doc) {
-        doc.open();
-        doc.write(html);
-        doc.close();
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-        setTimeout(() => iframe.remove(), 1500);
-        return;
-      }
-      iframe.remove();
-    } catch {
-      // ignore and notify user
+  const printOrderReceipt = async (o: Order) => {
+    const res = await printReceiptDocument(o, shopSettings, lang);
+    if (!res.printed && res.fallbackDataUrl) {
+      setReceiptPngFallback(res.fallbackDataUrl);
+      setViewingReceiptOrderId(o.id);
+      onToast(
+        isEn
+          ? 'Direct print blocked — save or share the receipt image below!'
+          : 'កម្មវិធីនេះបិទ Print ផ្ទាល់ — សូមរក្សាទុក ឬ Print រូបវិក្កយបត្រខាងក្រោម!'
+      );
     }
-    onToast(isEn ? 'Cannot open print dialog on this device' : 'មិនអាចបើកផ្ទាំង Print លើឧបករណ៍នេះបានទេ');
+  };
+
+  const handleSaveAdminReceiptPng = async (o: Order) => {
+    if (savingReceiptPng) return;
+    setSavingReceiptPng(true);
+    try {
+      const saved = await saveOrShareReceiptPng(o, shopSettings, lang);
+      if (saved.method === 'download') {
+        onToast(isEn ? '✓ Receipt PNG downloaded!' : '✓ បានទាញយករូបវិក្កយបត្រជោគជ័យ!');
+      } else if (saved.method === 'preview' && saved.dataUrl) {
+        setReceiptPngFallback(saved.dataUrl);
+        onToast(
+          isEn
+            ? 'Long-press the receipt image to Save or Print!'
+            : 'ចុចឱ្យជាប់លើរូបវិក្កយបត្រ ដើម្បី Save ឬ Print!'
+        );
+      }
+    } finally {
+      setSavingReceiptPng(false);
+    }
+  };
+
+  const handleResendOrderToTelegram = async (orderId: string) => {
+    if (!onSendOrderToTelegram || sendingTgOrderId) return;
+    setSendingTgOrderId(orderId);
+    try {
+      await onSendOrderToTelegram(orderId);
+    } finally {
+      setSendingTgOrderId(null);
+    }
   };
 
   const deliveryPreview = (() => {
@@ -2093,54 +2328,87 @@ export function AdminDashboard({
             </div>
           )}
 
-          <div className="flex flex-wrap justify-between items-center gap-2">
-            <div className="flex gap-1.5 overflow-x-auto">
-              {(['All', 'Unpaid', 'Pending', 'Brewing', 'Ready', 'Completed'] as const).map((st) => (
+          <div className="space-y-2.5">
+            <div className="flex flex-wrap justify-between items-center gap-2">
+              <div className="flex gap-1.5 overflow-x-auto">
+                {(['All', 'Unpaid', 'Pending', 'Brewing', 'Ready', 'Completed'] as const).map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => setOrderFilter(st)}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap ${
+                      orderFilter === st
+                        ? st === 'Unpaid'
+                          ? 'bg-red-600 text-white'
+                          : 'bg-[#0D4A3E] text-white'
+                        : 'bg-white border border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    {st === 'All'
+                      ? isEn
+                        ? 'All'
+                        : 'ទាំងអស់'
+                      : st === 'Unpaid'
+                        ? `${isEn ? 'Unpaid' : 'មិនទាន់បង់'}${unpaidOrdersCount > 0 ? ` (${unpaidOrdersCount})` : ''}`
+                        : getOrderStatusText(st, lang)}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
                 <button
-                  key={st}
                   type="button"
-                  onClick={() => setOrderFilter(st)}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap ${
-                    orderFilter === st
-                      ? st === 'Unpaid'
-                        ? 'bg-red-600 text-white'
-                        : 'bg-[#0D4A3E] text-white'
-                      : 'bg-white border border-slate-200 text-slate-600'
-                  }`}
+                  onClick={handleExportOrdersCsv}
+                  className="text-xs text-[#0D4A3E] bg-[#E8F2EF] hover:bg-[#d5ebe4] px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1"
                 >
-                  {st === 'All'
-                    ? isEn
-                      ? 'All'
-                      : 'ទាំងអស់'
-                    : st === 'Unpaid'
-                      ? `${isEn ? 'Unpaid' : 'មិនទាន់បង់'}${unpaidOrdersCount > 0 ? ` (${unpaidOrdersCount})` : ''}`
-                      : getOrderStatusText(st, lang)}
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Export CSV' : 'ទាញយក CSV'}</span>
                 </button>
-              ))}
+                <button
+                  type="button"
+                  onClick={onClearCompletedOrders}
+                  className="text-xs text-red-600 font-semibold flex items-center gap-1"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Clear Completed' : 'សម្អាតដែលរួច'}</span>
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-3 shrink-0">
-              <button
-                type="button"
-                onClick={handleExportOrdersCsv}
-                className="text-xs text-[#0D4A3E] bg-[#E8F2EF] hover:bg-[#d5ebe4] px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>{isEn ? 'Export CSV' : 'ទាញយក CSV'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={onClearCompletedOrders}
-                className="text-xs text-red-600 font-semibold flex items-center gap-1"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>{isEn ? 'Clear Completed' : 'សម្អាតដែលរួច'}</span>
-              </button>
+
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={orderSearch}
+                onChange={(e) => setOrderSearch(e.target.value)}
+                placeholder={
+                  isEn
+                    ? 'Search receipt / Order ID, customer name, phone, table, or item...'
+                    : 'ស្វែងរកវិក្កយបត្រ (លេខកម្ម៉ង់, ឈ្មោះភ្ញៀវ, លេខទូរស័ព្ទ, តុ, ឈ្មោះទំនិញ)...'
+                }
+                className="w-full pl-9 pr-8 py-2 bg-white border border-slate-200 rounded-xl text-xs outline-none focus:border-[#0D4A3E]"
+              />
+              {orderSearch && (
+                <button
+                  type="button"
+                  onClick={() => setOrderSearch('')}
+                  aria-label={isEn ? 'Clear search' : 'សម្អាត'}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
             </div>
           </div>
 
           {!filteredOrders.length ? (
             <div className="bg-white p-12 rounded-2xl border border-slate-200 text-center text-slate-400 text-sm">
-              {isEn ? 'No orders yet' : 'មិនមានការកម្ម៉ង់ទេ'}
+              {orderSearch.trim()
+                ? isEn
+                  ? 'No orders match your search.'
+                  : 'រកមិនឃើញវិក្កយបត្រដែលត្រូវនឹងការស្វែងរកទេ'
+                : isEn
+                  ? 'No orders yet'
+                  : 'មិនមានការកម្ម៉ង់ទេ'}
             </div>
           ) : (
             <div className="grid md:grid-cols-2 gap-4">
@@ -2224,15 +2492,18 @@ export function AdminDashboard({
                                 Ref: {o.paymentRef}
                               </span>
                             )}
-                            {o.paymentSlipImg && (
-                              <button
-                                type="button"
-                                onClick={() => setPreviewSlipUrl(o.paymentSlipImg || null)}
-                                className="inline-flex items-center gap-1 text-[10px] font-bold text-[#0D4A3E] bg-[#E8F2EF] hover:bg-[#d5ebe4] px-2 py-0.5 rounded-lg transition-colors"
-                              >
-                                <span>{isEn ? 'View Slip' : 'មើល Slip'}</span>
-                              </button>
-                            )}
+                          </div>
+                        )}
+                        {o.paymentSlipImg && (
+                          <div className="mt-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setPreviewSlipUrl(o.paymentSlipImg || null)}
+                              className="inline-flex items-center gap-1 text-[10px] font-bold text-[#0D4A3E] bg-[#E8F2EF] hover:bg-[#d5ebe4] border border-[#0D4A3E]/20 px-2 py-0.5 rounded-lg transition-colors"
+                            >
+                              <ImageIcon className="w-3 h-3 shrink-0" />
+                              <span>{isEn ? 'View Bank Slip Screenshot' : 'មើលរូបវិក្កយបត្រធនាគារ (Slip)'}</span>
+                            </button>
                           </div>
                         )}
                       </div>
@@ -2473,11 +2744,35 @@ export function AdminDashboard({
                           </>
                         )}
                       </div>
-                      <div className="flex gap-2 items-center">
+                      <div className="flex flex-wrap gap-1.5 items-center">
+                        <button
+                          type="button"
+                          onClick={() => openOrderReceiptModal(o)}
+                          className="text-xs bg-[#E8F2EF] hover:bg-[#d5ebe4] text-[#0D4A3E] px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1 transition-colors"
+                        >
+                          <ReceiptText className="w-3.5 h-3.5" />
+                          <span>{isEn ? 'Receipt' : 'មើលវិក្កយបត្រ'}</span>
+                        </button>
+                        {onSendOrderToTelegram && (
+                          <button
+                            type="button"
+                            disabled={sendingTgOrderId === o.id}
+                            onClick={() => handleResendOrderToTelegram(o.id)}
+                            title={isEn ? 'Send receipt to Shop Telegram' : 'ផ្ញើវិក្កយបត្រទៅ Telegram ហាង'}
+                            className="text-xs bg-sky-50 hover:bg-sky-100 disabled:opacity-60 text-sky-700 border border-sky-200 px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1 transition-colors"
+                          >
+                            {sendingTgOrderId === o.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Send className="w-3.5 h-3.5" />
+                            )}
+                            <span>{isEn ? 'Telegram' : 'ផ្ញើ TG'}</span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => printOrderReceipt(o)}
-                          className="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg font-bold flex items-center gap-1"
+                          className="text-xs bg-slate-100 hover:bg-slate-200 px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1"
                         >
                           <Printer className="w-3.5 h-3.5" />
                           <span>Print</span>
@@ -2644,7 +2939,7 @@ export function AdminDashboard({
           transition={{ duration: 0.2 }}
           className="space-y-4"
         >
-          {/* Top Bar for Quick Menu Selection (Presets) */}
+          {/* Top Quick Action Bar for Self-Service Menu Management */}
           <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex items-center gap-2.5">
               <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
@@ -2653,32 +2948,82 @@ export function AdminDashboard({
               <div>
                 <h3 className="font-bold text-xs sm:text-sm text-slate-900">
                   {isEn
-                    ? 'Quick Select Ready-Made Menu Items'
-                    : 'ជ្រើសរើសម៉ឺនុយស្រាប់បន្ថែមចូលហាងលឿន'}
+                    ? 'Self-Service Menu & Toppings Manager'
+                    : 'គ្រប់គ្រងម៉ឺនុយ (បន្ថែម លុប កែប្រែ និងស្តារម៉ឺនុយដើម)'}
                 </h3>
                 <p className="text-[11px] text-slate-500">
                   {isEn
-                    ? 'Pick drinks or foods with bilingual KM/EN names & add in one click'
-                    : 'ធីកជ្រើសរើសភេសជ្ជៈ ឬអាហារដែលមានស្រាប់ (ខ្មែរ/អង់គ្លេស) ដាក់ចូលម៉ឺនុយភ្លាមៗ'}
+                    ? 'Add custom drinks/food, pick presets, edit prices/stock, or remove items anytime'
+                    : 'បន្ថែមភេសជ្ជៈ/អាហារថ្មី រើសម៉ឺនុយស្រាប់ កែតម្លៃ/ស្តុក ឬដកចេញភ្លាមៗដោយខ្លួនឯង'}
                 </p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowPresetPicker((prev) => !prev)}
-              className="bg-[#0D4A3E] hover:bg-[#09352C] text-white text-xs font-bold px-3.5 py-2 rounded-xl flex items-center gap-1.5"
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span>
-                {showPresetPicker
-                  ? isEn
-                    ? 'Hide Presets'
-                    : 'បិទបញ្ជីម៉ឺនុយស្រាប់'
-                  : isEn
-                    ? 'Browse & Select Presets'
-                    : 'ជ្រើសរើសម៉ឺនុយស្រាប់'}
-              </span>
-            </button>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  resetMenuForm();
+                  menuFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{isEn ? 'Add New Item' : 'ថែមម៉ឺនុយថ្មី'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => menuListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                className="lg:hidden bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1"
+              >
+                <ClipboardList className="w-3.5 h-3.5 text-[#0D4A3E]" />
+                <span>
+                  {isEn ? `Items (${menuItems.length})` : `បញ្ជីម៉ឺនុយ (${menuItems.length})`}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPresetPicker((prev) => !prev)}
+                className="bg-[#0D4A3E] hover:bg-[#09352C] text-white text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1.5"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>
+                  {showPresetPicker
+                    ? isEn
+                      ? 'Hide Presets'
+                      : 'បិទម៉ឺនុយស្រាប់'
+                    : isEn
+                      ? 'Ready Presets'
+                      : 'រើសម៉ឺនុយស្រាប់'}
+                </span>
+              </button>
+              {confirmRestoreDefaults ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={handleRestoreDefaultMenu}
+                    className="bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold px-2.5 py-2 rounded-xl"
+                  >
+                    {isEn ? 'Confirm Restore' : 'បញ្ជាក់ស្តារដើម'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmRestoreDefaults(false)}
+                    className="bg-slate-100 text-slate-600 text-xs font-bold px-2 py-2 rounded-xl"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmRestoreDefaults(true)}
+                  className="bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Restore Defaults' : 'ស្តារម៉ឺនុយដើម'}</span>
+                </button>
+              )}
+            </div>
           </div>
 
           {showPresetPicker && (
@@ -2833,7 +3178,7 @@ export function AdminDashboard({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     <div className="min-w-0">
                       <label className="text-[10px] font-bold text-slate-500 block mb-0.5 truncate">
                         {isEn ? 'Price ($) *' : 'តម្លៃ ($) *'}
@@ -2846,7 +3191,7 @@ export function AdminDashboard({
                         value={itemPrice}
                         onChange={(e) => setItemPrice(e.target.value)}
                         placeholder="2.50"
-                        className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num"
+                        className="w-full min-w-0 px-2.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num"
                       />
                     </div>
                     <div className="min-w-0">
@@ -2860,7 +3205,20 @@ export function AdminDashboard({
                         value={itemDiscount}
                         onChange={(e) => setItemDiscount(e.target.value)}
                         placeholder="0"
-                        className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num"
+                        className="w-full min-w-0 px-2.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num"
+                      />
+                    </div>
+                    <div className="min-w-0">
+                      <label className="text-[10px] font-bold text-slate-500 block mb-0.5 truncate">
+                        {isEn ? 'Stock Qty' : 'ស្តុក (ទុកទំនេរ=គ្មានកំណត់)'}
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={itemStockQty}
+                        onChange={(e) => setItemStockQty(e.target.value)}
+                        placeholder={isEn ? 'Unlimited' : 'គ្មានកំណត់'}
+                        className="w-full min-w-0 px-2.5 py-2 border border-slate-200 rounded-xl text-base sm:text-xs font-mono-num"
                       />
                     </div>
                   </div>
@@ -3130,50 +3488,133 @@ export function AdminDashboard({
                   </div>
                 </form>
                 <div className="space-y-1.5">
-                  {toppings.map((t) => (
-                    <div
-                      key={t.id}
-                      className="flex items-center justify-between bg-slate-50 px-3 py-1.5 rounded-xl text-xs"
-                    >
-                      <span className="truncate">
-                        <strong>{getToppingName(t, lang)}</strong>{' '}
-                        {t.nameEn && t.name && t.name !== t.nameEn && (
-                          <span className="text-[10px] text-slate-400">
-                            ({isEn ? t.name : t.nameEn})
-                          </span>
-                        )}{' '}
-                        <span className="font-mono-num">(+${Number(t.price).toFixed(2)})</span>
-                      </span>
-                      <div className="flex gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onUpdateToppings(
-                              toppings.map((x) => (x.id === t.id ? { ...x, available: !x.available } : x))
-                            )
-                          }
-                          className={`px-2 py-0.5 rounded font-bold ${
-                            t.available ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
-                          }`}
+                  {toppings.map((t) => {
+                    const isEditingTop = editingToppingId === String(t.id);
+                    if (isEditingTop) {
+                      return (
+                        <div
+                          key={t.id}
+                          className="bg-amber-50/70 border border-amber-200 p-2 rounded-xl space-y-1.5 text-xs"
                         >
-                          {t.available ? (isEn ? 'In Stock' : 'មាន') : isEn ? 'Out' : 'អស់'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onUpdateToppings(toppings.filter((x) => x.id !== t.id))}
-                          className="text-red-500 font-bold"
-                        >
-                          ✕
-                        </button>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <input
+                              type="text"
+                              value={editTopName}
+                              onChange={(e) => setEditTopName(e.target.value)}
+                              placeholder={isEn ? 'Name (KM)' : 'ឈ្មោះ (ខ្មែរ)'}
+                              className="w-full min-w-0 bg-white px-2 py-1 border border-slate-200 rounded-lg text-xs"
+                            />
+                            <input
+                              type="text"
+                              value={editTopNameEn}
+                              onChange={(e) => setEditTopNameEn(e.target.value)}
+                              placeholder={isEn ? 'Name (EN)' : 'ឈ្មោះ (EN)'}
+                              className="w-full min-w-0 bg-white px-2 py-1 border border-slate-200 rounded-lg text-xs"
+                            />
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              step="0.05"
+                              min="0"
+                              value={editTopPrice}
+                              onChange={(e) => setEditTopPrice(e.target.value)}
+                              placeholder="0.50"
+                              className="min-w-0 flex-1 bg-white px-2 py-1 border border-slate-200 rounded-lg text-xs font-mono-num"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveEditTopping(t.id)}
+                              className="bg-[#0D4A3E] text-white px-2.5 py-1 rounded-lg font-bold"
+                            >
+                              ✓ {isEn ? 'Save' : 'រក្សាទុក'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingToppingId(null)}
+                              className="bg-slate-200 text-slate-700 px-2 py-1 rounded-lg font-bold"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        key={t.id}
+                        className="flex items-center justify-between gap-2 bg-slate-50 px-3 py-1.5 rounded-xl text-xs"
+                      >
+                        <span className="truncate min-w-0">
+                          <strong>{getToppingName(t, lang)}</strong>{' '}
+                          {t.nameEn && t.name && t.name !== t.nameEn && (
+                            <span className="text-[10px] text-slate-400">
+                              ({isEn ? t.name : t.nameEn})
+                            </span>
+                          )}{' '}
+                          <span className="font-mono-num">(+${Number(t.price).toFixed(2)})</span>
+                        </span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            title={isEn ? 'Edit topping' : 'កែប្រែ Topping'}
+                            onClick={() => {
+                              setEditingToppingId(String(t.id));
+                              setEditTopName(t.name || '');
+                              setEditTopNameEn(t.nameEn || '');
+                              setEditTopPrice(String(t.price ?? 0));
+                            }}
+                            className="p-1 rounded bg-amber-100 text-amber-800 hover:bg-amber-200"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const res = await onUpdateToppings(
+                                toppings.map((x) => (x.id === t.id ? { ...x, available: !x.available } : x))
+                              );
+                              notifyMenuSyncResult(
+                                res,
+                                t.available
+                                  ? isEn
+                                    ? 'Marked topping out of stock'
+                                    : 'បានដាក់ Topping អស់ស្តុក'
+                                  : isEn
+                                    ? 'Marked topping in stock'
+                                    : 'បានដាក់ Topping មានក្នុងស្តុក'
+                              );
+                            }}
+                            className={`px-2 py-0.5 rounded font-bold ${
+                              t.available ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
+                            }`}
+                          >
+                            {t.available ? (isEn ? 'In Stock' : 'មាន') : isEn ? 'Out' : 'អស់'}
+                          </button>
+                          <button
+                            type="button"
+                            title={isEn ? 'Remove topping' : 'ដក Topping ចេញ'}
+                            onClick={async () => {
+                              const res = await onUpdateToppings(toppings.filter((x) => x.id !== t.id));
+                              notifyMenuSyncResult(
+                                res,
+                                isEn ? '✓ Removed topping' : '✓ បានដក Topping ចេញហើយ'
+                              );
+                            }}
+                            className="p-1 rounded bg-red-50 hover:bg-red-100 text-red-600 font-bold"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>
 
-            {/* Right Column: Menu List with Search, Filters, and Multi-Select Bulk Controls */}
-            <div className="lg:col-span-2 min-w-0 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 h-fit space-y-3">
+            {/* Right Column: Menu List with Search, Filters, Undo, and Multi-Select Bulk Controls */}
+            <div ref={menuListRef} className="lg:col-span-2 min-w-0 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 h-fit space-y-3">
               <div className="flex flex-wrap justify-between items-center gap-2">
                 <h3 className="font-bold text-sm">
                   {isEn ? `All Menu Items (${menuItems.length})` : `បញ្ជីទំនិញទាំងអស់ (${menuItems.length})`}
@@ -3182,11 +3623,14 @@ export function AdminDashboard({
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
-                      onClick={() => {
-                        onUpdateMenu([]);
+                      onClick={async () => {
                         setConfirmClearMenu(false);
                         setSelectedMenuIds([]);
-                        onToast(isEn ? 'Cleared all menu items!' : 'បានលុបម៉ឺនុយទាំងអស់!');
+                        const res = await onUpdateMenu([]);
+                        notifyMenuSyncResult(
+                          res,
+                          isEn ? 'Cleared all menu items!' : 'បានលុបម៉ឺនុយទាំងអស់!'
+                        );
                       }}
                       className="text-xs bg-red-600 text-white font-bold px-3 py-1 rounded-xl whitespace-nowrap"
                     >
@@ -3210,6 +3654,24 @@ export function AdminDashboard({
                   </button>
                 )}
               </div>
+
+              {lastDeletedMenuItem && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-amber-950 font-semibold truncate">
+                    {isEn
+                      ? `Removed "${getMenuName(lastDeletedMenuItem.item, lang)}"`
+                      : `បានដក «${getMenuName(lastDeletedMenuItem.item, lang)}» ចេញ`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleUndoDeleteMenuItem}
+                    className="bg-[#0D4A3E] text-white font-bold px-2.5 py-1 rounded-lg inline-flex items-center gap-1 shrink-0"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>{isEn ? 'Undo' : 'ត្រឡប់វិញ'}</span>
+                  </button>
+                </div>
+              )}
 
               {/* Search & Filters */}
               <div className="space-y-2">
@@ -3385,6 +3847,19 @@ export function AdminDashboard({
                               <span className="font-bold font-mono-num text-[#0D4A3E]">
                                 ${getDiscountedPrice(i).toFixed(2)}
                               </span>
+                              {typeof i.stockQty === 'number' && (
+                                <span
+                                  className={`ml-1.5 inline-block px-1.5 py-0.2 rounded font-mono-num text-[10px] font-bold ${
+                                    i.stockQty <= 0
+                                      ? 'bg-red-100 text-red-700'
+                                      : i.stockQty <= 5
+                                        ? 'bg-amber-100 text-amber-800'
+                                        : 'bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  {isEn ? `Stock: ${i.stockQty}` : `ស្តុក: ${i.stockQty}`}
+                                </span>
+                              )}
                             </p>
                           </div>
                         </div>
@@ -3393,11 +3868,22 @@ export function AdminDashboard({
                           <button
                             type="button"
                             title={isEn ? 'Toggle Featured' : 'ដាក់/ដក ណែនាំពិសេស'}
-                            onClick={() =>
-                              onUpdateMenu(
-                                menuItems.map((x) => (x.id === i.id ? { ...x, featured: !x.featured } : x))
-                              )
-                            }
+                            onClick={async () => {
+                              const nextVal = !i.featured;
+                              const res = await onUpdateMenu(
+                                menuItems.map((x) => (x.id === i.id ? { ...x, featured: nextVal } : x))
+                              );
+                              notifyMenuSyncResult(
+                                res,
+                                nextVal
+                                  ? isEn
+                                    ? '★ Added to Featured'
+                                    : '★ បានដាក់ជាមុខណែនាំពិសេស'
+                                  : isEn
+                                    ? 'Removed from Featured'
+                                    : 'បានដកចេញពីមុខណែនាំពិសេស'
+                              );
+                            }}
                             className={`p-1.5 rounded-lg border ${
                               i.featured
                                 ? 'bg-amber-50 border-amber-300 text-amber-500'
@@ -3423,11 +3909,22 @@ export function AdminDashboard({
                           </button>
                           <button
                             type="button"
-                            onClick={() =>
-                              onUpdateMenu(
-                                menuItems.map((x) => (x.id === i.id ? { ...x, available: !x.available } : x))
-                              )
-                            }
+                            onClick={async () => {
+                              const nextAvail = !i.available;
+                              const res = await onUpdateMenu(
+                                menuItems.map((x) => (x.id === i.id ? { ...x, available: nextAvail } : x))
+                              );
+                              notifyMenuSyncResult(
+                                res,
+                                nextAvail
+                                  ? isEn
+                                    ? '✓ Marked In Stock'
+                                    : '✓ បានប្តូរជា «មានក្នុងស្តុក»'
+                                  : isEn
+                                    ? 'Marked Sold Out'
+                                    : 'បានប្តូរជា «អស់ស្តុក»'
+                              );
+                            }}
                             className={`px-2.5 py-1 rounded-lg text-xs font-bold whitespace-nowrap ${
                               i.available ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
                             }`}
@@ -3436,10 +3933,30 @@ export function AdminDashboard({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onUpdateMenu(menuItems.filter((x) => x.id !== i.id))}
-                            className="px-2 py-1 text-red-600 font-bold"
+                            onClick={async () => {
+                              if (confirmDeleteMenuId === String(i.id)) {
+                                await handleDeleteMenuItem(i);
+                              } else {
+                                setConfirmDeleteMenuId(String(i.id));
+                              }
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1 transition-colors whitespace-nowrap ${
+                              confirmDeleteMenuId === String(i.id)
+                                ? 'bg-red-600 text-white'
+                                : 'bg-red-50 hover:bg-red-100 text-red-600'
+                            }`}
+                            title={isEn ? 'Remove item' : 'ដកទំនិញចេញ'}
                           >
-                            ✕
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>
+                              {confirmDeleteMenuId === String(i.id)
+                                ? isEn
+                                  ? 'Confirm?'
+                                  : 'ច្បាស់ទេ?'
+                                : isEn
+                                  ? 'Remove'
+                                  : 'ដកចេញ'}
+                            </span>
                           </button>
                         </div>
                       </div>
@@ -4000,41 +4517,130 @@ export function AdminDashboard({
                   </div>
 
                   <div>
-                    <label className="text-[11px] font-semibold text-slate-600 block mb-0.5">
-                      {isEn ? 'Raw KHQR Payload (000201...)' : 'កូដ KHQR ដើម (000201...)'}
-                    </label>
+                    <div className="flex items-center justify-between gap-2 mb-0.5">
+                      <label className="text-[11px] font-semibold text-slate-600 block">
+                        {isEn ? 'Raw KHQR Payload (000201...)' : 'កូដ KHQR ដើម (000201...)'}
+                      </label>
+                      {Boolean(draft.khqrPayload) && !isValidEmvKhqr(draft.khqrPayload || '') && (
+                        <button
+                          type="button"
+                          onClick={() => setDraft((prev) => ({ ...prev, khqrPayload: '' }))}
+                          className="text-[10px] font-bold text-amber-700 hover:text-amber-900 underline"
+                        >
+                          {isEn ? 'Clear invalid payload' : 'សម្អាតកូដខុស'}
+                        </button>
+                      )}
+                    </div>
                     <input
                       type="text"
+                      autoComplete="off"
+                      spellCheck={false}
                       value={draft.khqrPayload || ''}
                       onChange={(e) => {
                         const val = e.target.value.trim();
                         setDraft((prev) => ({ ...prev, khqrPayload: val }));
                       }}
                       placeholder="000201010211..."
-                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-[11px] font-mono-num bg-white"
+                      className={`w-full px-2.5 py-1.5 border rounded-lg text-[11px] font-mono-num bg-white ${
+                        draft.khqrPayload && !isValidEmvKhqr(draft.khqrPayload)
+                          ? 'border-amber-300 bg-amber-50/40'
+                          : 'border-slate-200'
+                      }`}
                     />
+                    {draft.khqrPayload && !isValidEmvKhqr(draft.khqrPayload) && (
+                      <p className="text-[10px] font-semibold text-amber-700 mt-0.5">
+                        {isEn
+                          ? 'Invalid raw KHQR string (must start with 000201... and pass CRC). Upload a KHQR image above or clear this field to use Bakong ID.'
+                          : 'កូដ KHQR ដើមនេះមិនត្រឹមត្រូវទេ (ត្រូវផ្តើមដោយ 000201...) — សូមចុច «សម្អាតកូដខុស» ឬ Upload រូប KHQR ខាងលើ។'}
+                      </p>
+                    )}
                   </div>
 
-                  <div className="pt-2 border-t border-slate-200/80">
-                    <label className="text-[11px] font-bold text-[#0D4A3E] block mb-0.5">
+                  <div className="pt-2 border-t border-slate-200/80 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label className="text-[11px] font-bold text-[#0D4A3E]">
+                        {isEn
+                          ? 'Bakong Open API Token (Auto Verify Paid Amount via MD5)'
+                          : 'Bakong Open API Token (ផ្ទៀងផ្ទាត់ប្រាក់ចូល & ចំនួនទឹកប្រាក់ Auto តាម MD5)'}
+                      </label>
+                      {secrets.bakongToken && (
+                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-lg">
+                          ✓ {isEn ? 'Token entered' : 'បានបញ្ចូល Token'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex gap-1.5 items-center">
+                      <div className="relative flex-1 min-w-0">
+                        <input
+                          type={showBakongToken ? 'text' : 'password'}
+                          autoComplete="off"
+                          value={secrets.bakongToken || ''}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/\s+/g, '');
+                            setSecrets((prev) => ({ ...prev, bakongToken: val }));
+                            if (bakongTestResult) setBakongTestResult(null);
+                          }}
+                          placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                          className="w-full pl-2.5 pr-9 py-1.5 border border-emerald-200 rounded-lg text-base sm:text-xs font-mono-num bg-white focus:outline-none focus:border-[#0D4A3E]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowBakongToken((v) => !v)}
+                          aria-label={showBakongToken ? 'Hide token' : 'Show token'}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-1"
+                        >
+                          {showBakongToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={testingBakong}
+                        onClick={handleTestBakong}
+                        className="px-3 py-1.5 bg-[#0D4A3E] hover:bg-[#09352C] disabled:opacity-60 text-white font-bold rounded-lg text-xs inline-flex items-center gap-1.5 shrink-0"
+                      >
+                        {testingBakong ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <ShieldCheck className="w-3.5 h-3.5 text-amber-300" />
+                        )}
+                        <span>{isEn ? 'Test Bakong API' : 'តេស្ត Bakong API'}</span>
+                      </button>
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                        {isEn
+                          ? 'Optional Cambodia Bakong Relay / Proxy URL (only if your host IP is geo-blocked)'
+                          : 'Bakong Relay / Proxy URL (ជម្រើសបន្ថែម — ដាក់បើ Server IP ក្រៅកម្ពុជាត្រូវ CloudFront បិទ 403)'}
+                      </label>
+                      <input
+                        type="url"
+                        autoComplete="off"
+                        value={secrets.bakongProxyUrl || ''}
+                        onChange={(e) => {
+                          setSecrets((prev) => ({ ...prev, bakongProxyUrl: e.target.value.trim() }));
+                          if (bakongTestResult) setBakongTestResult(null);
+                        }}
+                        placeholder="https://bakong-relay.yourdomain.com"
+                        className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-mono-num bg-white"
+                      />
+                    </div>
+                    {bakongTestResult && (
+                      <div
+                        className={`text-xs font-semibold px-3 py-2 rounded-lg border leading-relaxed ${
+                          bakongTestResult.geoBlocked
+                            ? 'bg-amber-50 border-amber-200 text-amber-900'
+                            : bakongTestResult.ok
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                              : 'bg-red-50 border-red-200 text-red-700'
+                        }`}
+                      >
+                        {bakongTestResult.message}
+                      </div>
+                    )}
+                    <p className="text-[10px] text-slate-500 leading-relaxed">
                       {isEn
-                        ? 'Bakong Open API Token (Auto Verify Paid Amount via MD5)'
-                        : 'Bakong Open API Token (ផ្ទៀងផ្ទាត់ប្រាក់ចូល & ចំនួនទឹកប្រាក់ Auto តាម MD5)'}
-                    </label>
-                    <input
-                      type="password"
-                      value={secrets.bakongToken || ''}
-                      onChange={(e) => {
-                        const val = e.target.value.trim();
-                        setSecrets((prev) => ({ ...prev, bakongToken: val }));
-                      }}
-                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                      className="w-full px-2.5 py-1.5 border border-emerald-200 rounded-lg text-base sm:text-xs font-mono-num bg-white focus:outline-none focus:border-[#0D4A3E]"
-                    />
-                    <p className="text-[10px] text-slate-500 mt-1 leading-relaxed">
-                      {isEn
-                        ? 'Stored safely on server only. Checks Bakong NBC transaction MD5 + exact amount automatically every 2.5s; works alongside Telegram Bot approval.'
-                        : 'រក្សាទុកសុវត្ថិភាពលើ Server តែប៉ុណ្ណោះ។ ប្រព័ន្ធនឹងឆែកប្រតិបត្តិការ Bakong NBC & ចំនួនប្រាក់ពិតស្វ័យប្រវត្តិរៀងរាល់ 2.5 វិនាទី និងធ្វើការរួមជាមួយការអនុម័តតាម Telegram Bot។'}
+                        ? 'Stored safely on server only. Spaces/line-breaks are auto-cleaned when pasting. Checks Bakong NBC transaction MD5 + exact amount automatically every 2.5s.'
+                        : 'រក្សាទុកសុវត្ថិភាពលើ Server តែប៉ុណ្ណោះ (ដកចន្លោះ/បន្ទាត់ខូចស្វ័យប្រវត្តិពេល Paste)។ ប្រព័ន្ធនឹងឆែកប្រតិបត្តិការ Bakong NBC & ចំនួនប្រាក់ពិតស្វ័យប្រវត្តិរៀងរាល់ 2.5 វិនាទី។'}
                     </p>
                   </div>
                 </div>
@@ -4415,6 +5021,245 @@ export function AdminDashboard({
           </div>
         </motion.div>
       )}
+      </AnimatePresence>
+
+      {/* Owner Receipt & Bank Slip Viewer Modal */}
+      <AnimatePresence>
+        {viewingReceiptOrder && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="fixed inset-0 bg-slate-950/75 backdrop-blur-sm z-[85] flex items-center justify-center p-3 sm:p-4"
+            onClick={() => setViewingReceiptOrderId(null)}
+          >
+            <motion.div
+              initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.94, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={shouldReduceMotion ? undefined : { opacity: 0, scale: 0.94, y: 10 }}
+              transition={{ type: 'spring', damping: 28, stiffness: 360 }}
+              className="bg-white rounded-3xl p-4 sm:p-5 max-w-md w-full space-y-3 shadow-2xl max-h-[90vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {(() => {
+                const o = viewingReceiptOrder;
+                const cust = o.customer || { name: '-', phone: '-' };
+                const khrTotal = Math.round(Number(o.grandTotal || 0) * (shopSettings.khqrKhrRate || 4100));
+                return (
+                  <>
+                    <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-8 h-8 rounded-xl bg-[#E8F2EF] text-[#0D4A3E] flex items-center justify-center shrink-0">
+                          <ReceiptText className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="text-sm font-bold text-[#0D4A3E] truncate">
+                            {isEn ? 'Order Receipt' : 'វិក្កយបត្រកម្ម៉ង់'} · {o.id}
+                          </h3>
+                          <p className="text-[11px] text-slate-500 font-mono-num">{o.timestamp}</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setViewingReceiptOrderId(null)}
+                        className="p-1.5 rounded-full bg-slate-100 hover:bg-slate-200 shrink-0"
+                        aria-label={isEn ? 'Close' : 'បិទ'}
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Formatted Thermal-style Receipt Box */}
+                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-2.5 text-xs">
+                      <div className="text-center border-b border-dashed border-slate-300 pb-2">
+                        <p className="font-extrabold text-sm text-[#0D4A3E]">{shopSettings.brandTitle}</p>
+                        {shopSettings.phoneHotline && (
+                          <p className="text-[10px] text-slate-500 font-mono-num">
+                            Tel: {shopSettings.phoneHotline}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="space-y-0.5 text-slate-700 border-b border-dashed border-slate-300 pb-2">
+                        <p className="font-bold text-slate-900">
+                          {o.type === 'dinein'
+                            ? `🪑 ${isEn ? 'Dine-In · Table' : 'ញ៉ាំនៅហាង · តុលេខ'} #${cust.tableNum || 1}`
+                            : `🛵 ${isEn ? 'Delivery' : 'ដឹកជញ្ជូន'}${cust.distanceKm ? ` (${cust.distanceKm} km)` : ''}`}
+                        </p>
+                        {o.type === 'delivery' && cust.addressName && (
+                          <p className="text-[11px] text-slate-600">{cust.addressName}</p>
+                        )}
+                        <p>
+                          {isEn ? 'Customer' : 'ភ្ញៀវ'}៖ <strong>{cust.name || '-'}</strong>
+                          {cust.phone ? ` (${cust.phone})` : ''}
+                        </p>
+                        {cust.addressNote && (
+                          <p className="text-[11px] text-amber-800 bg-amber-50 px-2 py-1 rounded-lg mt-1">
+                            📝 {cust.addressNote}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5 border-b border-dashed border-slate-300 pb-2">
+                        {(o.items || []).map((item, idx) => (
+                          <div key={idx} className="flex justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="font-bold text-slate-900">
+                                {item.qty}x {item.name}
+                              </p>
+                              {item.options && <p className="text-[10px] text-slate-500">{item.options}</p>}
+                            </div>
+                            <span className="font-bold font-mono-num shrink-0">
+                              ${(Number(item.unitPrice || 0) * Number(item.qty || 1)).toFixed(2)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-slate-600">
+                          <span>{isEn ? 'Subtotal' : 'សរុបទំនិញ'}</span>
+                          <span className="font-mono-num">${Number(o.subtotal ?? o.grandTotal ?? 0).toFixed(2)}</span>
+                        </div>
+                        {Number(o.promoDisc || 0) > 0 && (
+                          <div className="flex justify-between text-red-600">
+                            <span>{isEn ? 'Promo Discount' : 'បញ្ចុះតម្លៃ Promo'}</span>
+                            <span className="font-mono-num">-${Number(o.promoDisc).toFixed(2)}</span>
+                          </div>
+                        )}
+                        {o.type === 'delivery' && (
+                          <div className="flex justify-between text-slate-600">
+                            <span>{isEn ? 'Delivery Fee' : 'ថ្លៃដឹកជញ្ជូន'}</span>
+                            <span className="font-mono-num">${Number(o.fee || 0).toFixed(2)}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between font-extrabold text-sm text-[#0D4A3E] pt-1 border-t border-slate-200">
+                          <span>{isEn ? 'GRAND TOTAL' : 'សរុបរួម'}</span>
+                          <span className="font-mono-num">
+                            ${Number(o.grandTotal || 0).toFixed(2)} (~{khrTotal.toLocaleString('en-US')} ៛)
+                          </span>
+                        </div>
+                      </div>
+
+                      <div
+                        className={`rounded-xl px-3 py-2 text-center font-bold border ${
+                          o.paymentVerified
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : 'bg-amber-50 text-amber-800 border-amber-200'
+                        }`}
+                      >
+                        {o.paymentVerified
+                          ? `✓ ${isEn ? 'PAID' : 'ទូទាត់រួច'} (${o.payment})${o.paymentRef ? ` · Ref: ${o.paymentRef}` : ''}`
+                          : `⚠️ ${isEn ? 'UNPAID' : 'មិនទាន់ទូទាត់'} · ${o.payment}`}
+                      </div>
+                    </div>
+
+                    {/* Customer Bank Slip Screenshot if attached */}
+                    {o.paymentSlipImg && (
+                      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-[#0D4A3E] flex items-center gap-1.5">
+                            <ImageIcon className="w-3.5 h-3.5" />
+                            <span>
+                              {isEn ? 'Customer Bank Slip Screenshot' : 'រូបវិក្កយបត្រវេរប្រាក់ពីធនាគារ (Slip)'}
+                            </span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setPreviewSlipUrl(o.paymentSlipImg || null)}
+                            className="text-[11px] font-bold text-sky-700 underline"
+                          >
+                            {isEn ? 'Zoom' : 'ពង្រីក'}
+                          </button>
+                        </div>
+                        <img
+                          src={o.paymentSlipImg}
+                          alt="Customer bank slip"
+                          onClick={() => setPreviewSlipUrl(o.paymentSlipImg || null)}
+                          className="w-full max-h-64 object-contain rounded-xl border border-slate-200 bg-white cursor-zoom-in"
+                        />
+                      </div>
+                    )}
+
+                    {/* Fallback rendered receipt image for WebViews */}
+                    {receiptPngFallback && (
+                      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-1.5 text-center">
+                        <p className="text-[11px] font-bold text-[#0D4A3E]">
+                          {isEn
+                            ? 'Long-press receipt image to Save / Print'
+                            : 'ចុចឱ្យជាប់លើរូបវិក្កយបត្រ ដើម្បី Save ឬ Print'}
+                        </p>
+                        <img
+                          src={receiptPngFallback}
+                          alt={`Receipt ${o.id}`}
+                          className="w-full max-w-[260px] mx-auto rounded-xl border border-slate-200 bg-white"
+                        />
+                      </div>
+                    )}
+
+                    {/* Action buttons */}
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => printOrderReceipt(o)}
+                        className="bg-slate-100 hover:bg-slate-200 text-slate-900 font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>{isEn ? 'Print Receipt' : 'Print វិក្កយបត្រ'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={savingReceiptPng}
+                        onClick={() => handleSaveAdminReceiptPng(o)}
+                        className="bg-[#E8F2EF] hover:bg-[#d5ebe4] disabled:opacity-60 text-[#0D4A3E] font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>{savingReceiptPng ? '...' : isEn ? 'Save / Share PNG' : 'រក្សាទុក PNG'}</span>
+                      </button>
+                      {onSendOrderToTelegram && (
+                        <button
+                          type="button"
+                          disabled={sendingTgOrderId === o.id}
+                          onClick={() => handleResendOrderToTelegram(o.id)}
+                          className="col-span-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
+                        >
+                          {sendingTgOrderId === o.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Send className="w-3.5 h-3.5" />
+                          )}
+                          <span>
+                            {o.paymentSlipImg
+                              ? isEn
+                                ? 'Send Receipt & Slip to Telegram Bot'
+                                : 'ផ្ញើវិក្កយបត្រ & រូប Slip ទៅ Telegram ហាង'
+                              : isEn
+                                ? 'Send Receipt to Telegram Bot'
+                                : 'ផ្ញើវិក្កយបត្រទៅ Telegram ហាង'}
+                          </span>
+                        </button>
+                      )}
+                      {!o.paymentVerified && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            unlockAudio();
+                            await onMarkOrderPaid(o.id);
+                          }}
+                          className="col-span-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
+                        >
+                          <DollarSign className="w-3.5 h-3.5" />
+                          <span>{isEn ? 'Mark Order as Paid' : 'បញ្ជាក់ទទួលប្រាក់រួចរាល់'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+            </motion.div>
+          </motion.div>
+        )}
       </AnimatePresence>
 
       <AnimatePresence>

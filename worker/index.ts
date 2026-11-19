@@ -23,6 +23,7 @@ export interface Env {
   TELEGRAM_BOT_USERNAME?: string;
   TELEGRAM_CHAT_ID?: string;
   BAKONG_API_TOKEN?: string;
+  BAKONG_PROXY_URL?: string;
   TELEGRAM_GATEWAY_TOKEN?: string;
   TWILIO_ACCOUNT_SID?: string;
   TWILIO_AUTH_TOKEN?: string;
@@ -54,6 +55,7 @@ interface AdminSecrets {
   botToken: string;
   chatId: string;
   bakongToken: string;
+  bakongProxyUrl: string;
   telegramGatewayToken: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
@@ -420,6 +422,7 @@ async function loadDb(env: Env): Promise<PersistedDatabase> {
       botToken: env.TELEGRAM_BOT_TOKEN || '',
       chatId: env.TELEGRAM_CHAT_ID || '',
       bakongToken: env.BAKONG_API_TOKEN || '',
+      bakongProxyUrl: env.BAKONG_PROXY_URL || '',
       telegramGatewayToken: env.TELEGRAM_GATEWAY_TOKEN || '',
       twilioAccountSid: env.TWILIO_ACCOUNT_SID || '',
       twilioAuthToken: env.TWILIO_AUTH_TOKEN || '',
@@ -575,7 +578,26 @@ function getEffectiveChatId(env: Env, db: PersistedDatabase): string {
 }
 
 function getEffectiveBakongToken(env: Env, db: PersistedDatabase): string {
-  return (db.secrets.bakongToken || env.BAKONG_API_TOKEN || '').trim();
+  return (db.secrets.bakongToken || env.BAKONG_API_TOKEN || '').replace(/\s+/g, '');
+}
+
+function getEffectiveBakongProxyUrl(env: Env, db: PersistedDatabase): string {
+  return (db.secrets.bakongProxyUrl || env.BAKONG_PROXY_URL || '').trim();
+}
+
+function resolveBakongCheckUrl(env: Env, db: PersistedDatabase, overrideUrl?: string): string {
+  const raw = String(overrideUrl ?? getEffectiveBakongProxyUrl(env, db)).trim().replace(/\/+$/, '');
+  if (!raw) return 'https://api-bakong.nbc.gov.kh/v1/check_transaction_by_md5';
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+      return 'https://api-bakong.nbc.gov.kh/v1/check_transaction_by_md5';
+    }
+    const clean = u.toString().replace(/\/+$/, '');
+    return clean.endsWith('/check_transaction_by_md5') ? clean : `${clean}/v1/check_transaction_by_md5`;
+  } catch {
+    return 'https://api-bakong.nbc.gov.kh/v1/check_transaction_by_md5';
+  }
 }
 
 function getEffectiveBotUsername(env: Env, db: PersistedDatabase): string {
@@ -1770,6 +1792,13 @@ function getShopBrandTitle(db: PersistedDatabase): string {
   );
 }
 
+function escapeTgHtml(val: unknown): string {
+  return String(val ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 async function editTelegramPaymentMessage(
   botToken: string,
   db: PersistedDatabase,
@@ -1783,11 +1812,13 @@ async function editTelegramPaymentMessage(
       ? `${Math.round(sess.expectedAmount).toLocaleString()} ៛ ($${sess.expectedAmountUsd.toFixed(2)})`
       : `$${sess.expectedAmountUsd.toFixed(2)}`;
   const nextText = [
-    `💳 <b>${shopBrand} · ផ្ទៀងផ្ទាត់ការទូទាត់ KHQR</b>`,
-    `🧾 វិក្កយបត្រ៖ <code>${sess.billNumber}</code>`,
-    `💰 ចំនួនទឹកប្រាក់៖ <b>${amtText}</b>`,
-    sess.customerName ? `👤 អតិថិជន៖ ${sess.customerName} (${sess.customerPhone || '-'})` : '',
-    sess.transactionRef ? `🔖 លេខយោង៖ <code>${sess.transactionRef}</code>` : '',
+    `💳 <b>${escapeTgHtml(shopBrand)} · ផ្ទៀងផ្ទាត់ការទូទាត់ KHQR</b>`,
+    `🧾 វិក្កយបត្រ៖ <code>${escapeTgHtml(sess.billNumber)}</code>`,
+    `💰 ចំនួនទឹកប្រាក់៖ <b>${escapeTgHtml(amtText)}</b>`,
+    sess.customerName
+      ? `👤 អតិថិជន៖ ${escapeTgHtml(sess.customerName)} (${escapeTgHtml(sess.customerPhone || '-')})`
+      : '',
+    sess.transactionRef ? `🔖 លេខយោង៖ <code>${escapeTgHtml(sess.transactionRef)}</code>` : '',
     '',
     statusFooterHtml,
   ]
@@ -1838,51 +1869,69 @@ async function addPayIndexId(env: Env, sid: string): Promise<void> {
   await kvPut(env, 'pay_index', JSON.stringify(next), 900);
 }
 
-function getOrderTelegramKeyboard(orderId: string, status: unknown): Record<string, unknown> {
+function getOrderTelegramKeyboard(
+  orderId: string,
+  status: unknown,
+  paymentVerified?: boolean
+): Record<string, unknown> {
   const st = String(status || 'Pending');
-  if (st === 'Completed') return { inline_keyboard: [] };
-  if (st === 'Ready') {
-    return {
-      inline_keyboard: [[{ text: '✔️ បញ្ចប់ដល់ដៃ (Completed)', callback_data: `ord_done:${orderId}` }]],
-    };
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  if (st === 'Pending') {
+    rows.push([
+      { text: '✅ បញ្ជាក់ទទួលកម្ម៉ង់ (Confirm)', callback_data: `ord_ok:${orderId}` },
+      { text: '🚀 រួចរាល់ (Ready)', callback_data: `ord_rdy:${orderId}` },
+    ]);
+    rows.push([{ text: '✔️ បញ្ចប់ (Done)', callback_data: `ord_done:${orderId}` }]);
+  } else if (st === 'Brewing') {
+    rows.push([
+      { text: '🚀 រួចរាល់ / កំពុងដឹក (Ready)', callback_data: `ord_rdy:${orderId}` },
+      { text: '✔️ បញ្ចប់ (Done)', callback_data: `ord_done:${orderId}` },
+    ]);
+  } else if (st === 'Ready') {
+    rows.push([{ text: '✔️ បញ្ចប់ដល់ដៃ (Completed)', callback_data: `ord_done:${orderId}` }]);
   }
-  if (st === 'Brewing') {
-    return {
-      inline_keyboard: [
-        [
-          { text: '🚀 រួចរាល់ / កំពុងដឹក (Ready)', callback_data: `ord_rdy:${orderId}` },
-          { text: '✔️ បញ្ចប់ (Done)', callback_data: `ord_done:${orderId}` },
-        ],
-      ],
-    };
+  if (!paymentVerified) {
+    rows.push([{ text: '💵 ទទួលប្រាក់រួច (Mark Paid)', callback_data: `ord_paid:${orderId}` }]);
   }
-  return {
-    inline_keyboard: [
-      [
-        { text: '✅ បញ្ជាក់ទទួលកម្ម៉ង់ (Confirm)', callback_data: `ord_ok:${orderId}` },
-        { text: '🚀 រួចរាល់ (Ready)', callback_data: `ord_rdy:${orderId}` },
-      ],
-      [{ text: '✔️ បញ្ចប់ (Done)', callback_data: `ord_done:${orderId}` }],
-    ],
-  };
+  return { inline_keyboard: rows };
 }
 
-function buildOrderTelegramMessageText(order: Record<string, unknown>, statusFooterHtml?: string): string {
+function buildOrderTelegramMessageText(
+  db: PersistedDatabase,
+  order: Record<string, unknown>,
+  statusFooterHtml?: string
+): string {
   const cust = (order.customer || {}) as Record<string, unknown>;
   const items = Array.isArray(order.items) ? (order.items as Array<Record<string, unknown>>) : [];
+  const shopBrand = getShopBrandTitle(db);
+  const khrRate = Number((db.shopSettings && db.shopSettings.khqrKhrRate) || 4100) || 4100;
+  const grandTotalNum = Number(order.grandTotal || 0);
+  const subtotalNum = Number(order.subtotal ?? grandTotalNum);
+  const promoDiscNum = Number(order.promoDisc || 0);
+  const feeNum = Number(order.fee || 0);
+  const khrTotal = Math.round(grandTotalNum * khrRate);
+
   const itemsTxt = items
-    .map((i) => `• ${i.qty}x ${i.name} (${i.options}) = $${(Number(i.unitPrice) * Number(i.qty)).toFixed(2)}`)
+    .map((i) => {
+      const qty = Math.max(1, Number(i.qty || 1));
+      const lineTotal = (Number(i.unitPrice || 0) * qty).toFixed(2);
+      const opts = i.options ? ` (${escapeTgHtml(i.options)})` : '';
+      return `• ${qty}x <b>${escapeTgHtml(i.name)}</b>${opts} — <b>$${lineTotal}</b>`;
+    })
     .join('\n');
   const coords = cust.coords as { lat?: number; lng?: number } | undefined;
   const locTxt =
     order.type === 'dinein'
-      ? `🪑 តុលេខ ${cust.tableNum || 1}`
-      : `📍 ${cust.addressName || '-'}${
-          coords ? `\n🗺 https://maps.google.com/?q=${coords.lat},${coords.lng}` : ''
-        }`;
-  const payStatusLine =
-    order.payment === 'KHQR / ABA' && order.paymentVerified
-      ? `✅ <b>ទូទាត់ KHQR បានផ្ទៀងផ្ទាត់</b> (${
+      ? `🪑 <b>ញ៉ាំនៅហាង · តុលេខ ${escapeTgHtml(cust.tableNum || 1)}</b>`
+      : `📍 ដឹកជញ្ជូន៖ ${escapeTgHtml(cust.addressName || '-')}${
+          cust.distanceKm ? ` (${escapeTgHtml(cust.distanceKm)} km)` : ''
+        }${coords ? `\n🗺 https://maps.google.com/?q=${coords.lat},${coords.lng}` : ''}`;
+  const noteLine = cust.addressNote ? `📝 កំណត់ចំណាំ៖ <i>${escapeTgHtml(cust.addressNote)}</i>` : '';
+
+  const payMethodLabel = escapeTgHtml(order.payment || 'Cash');
+  const payStatusLine = order.paymentVerified
+    ? order.payment === 'KHQR / ABA'
+      ? `✅ <b>ទូទាត់ KHQR រួចរាល់</b> (${
           order.paymentVerifiedBy === 'bakong_md5'
             ? 'Bakong Auto'
             : order.paymentVerifiedBy === 'telegram_owner'
@@ -1890,14 +1939,18 @@ function buildOrderTelegramMessageText(order: Record<string, unknown>, statusFoo
               : order.paymentVerifiedBy === 'web_admin'
                 ? 'Website Approved'
                 : order.paymentVerifiedBy === 'auto_slip_ocr'
-                  ? `Auto Slip Verified${order.paymentBankName ? ` · ${order.paymentBankName}` : ''}`
+                  ? `Auto Slip Verified${order.paymentBankName ? ` · ${escapeTgHtml(order.paymentBankName)}` : ''}`
                   : 'Slip Verified'
-        })${order.paymentRef ? ` · Ref: <code>${order.paymentRef}</code>` : ''}`
-      : `💵 ទូទាត់៖ ${order.payment}`;
+        })${order.paymentRef ? ` · Ref: <code>${escapeTgHtml(order.paymentRef)}</code>` : ''}`
+      : `✅ <b>ទូទាត់ប្រាក់រួច (${payMethodLabel})</b>${
+          order.paymentVerifiedBy === 'telegram_owner' ? ' · Telegram' : ''
+        }`
+    : `💵 ទូទាត់៖ ${payMethodLabel} · ⚠️ <i>មិនទាន់បញ្ជាក់ទទួលប្រាក់</i>`;
+
   const st = String(order.status || 'Pending');
   const stLabel =
     st === 'Brewing'
-      ? '✅ <b>ស្ថានភាព៖ ហាងបានបញ្ជាក់ & កំពុងរៀបចំ (Confirmed)</b>'
+      ? '✅ <b>ស្ថានភាព៖ ហាងបានបញ្ជាក់ &amp; កំពុងរៀបចំ (Confirmed)</b>'
       : st === 'Ready'
         ? '🚀 <b>ស្ថានភាព៖ រួចរាល់ / កំពុងដឹកជញ្ជូន (Ready)</b>'
         : st === 'Completed'
@@ -1910,18 +1963,29 @@ function buildOrderTelegramMessageText(order: Record<string, unknown>, statusFoo
         ? ' 🔐 Member'
         : ' ⚠️ មិនទាន់ផ្ទៀងផ្ទាត់'
     : '';
+
+  const summaryLines = [
+    `💵 សរុបទំនិញ៖ $${subtotalNum.toFixed(2)}`,
+    promoDiscNum > 0 ? `🎟️ បញ្ចុះតម្លៃ Promo៖ -$${promoDiscNum.toFixed(2)}` : '',
+    order.type === 'delivery' ? `🛵 ថ្លៃដឹកជញ្ជូន៖ $${feeNum.toFixed(2)}` : '',
+    `💰 <b>សរុបរួម៖ $${grandTotalNum.toFixed(2)}</b> (~ ${khrTotal.toLocaleString('en-US')} ៛)`,
+  ].filter(Boolean);
+
   return [
-    `🔔 <b>កម្ម៉ង់ ${order.id}</b> (${order.timestamp})`,
-    `👤 ${cust.name || '-'} (${cust.phone || '-'}${phoneBadge})`,
+    `🧾 <b>វិក្កយបត្រកម្ម៉ង់ · ${escapeTgHtml(shopBrand)}</b>`,
+    `🔖 លេខ៖ <code>${escapeTgHtml(order.id)}</code> · 🕒 ${escapeTgHtml(order.timestamp || '')}`,
+    `👤 ${escapeTgHtml(cust.name || '-')} (${escapeTgHtml(cust.phone || '-')}${phoneBadge})`,
     locTxt,
-    '',
-    itemsTxt,
-    '',
-    `💰 សរុប៖ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b>`,
+    noteLine,
+    '────────────────────',
+    itemsTxt || '• (គ្មានទំនិញ)',
+    '────────────────────',
+    ...summaryLines,
     payStatusLine,
+    order.paymentSlipImg ? '🖼️ <i>មានភ្ជាប់រូបវិក្កយបត្រវេរប្រាក់ (Slip) ខាងក្រោម</i>' : '',
     statusFooterHtml || stLabel,
   ]
-    .filter((v) => v !== undefined)
+    .filter((v) => v !== '')
     .join('\n');
 }
 
@@ -1944,9 +2008,13 @@ async function editTelegramOrderMessage(
         body: JSON.stringify({
           chat_id: chatId,
           message_id: msgId,
-          text: buildOrderTelegramMessageText(order, statusFooterHtml),
+          text: buildOrderTelegramMessageText(db, order, statusFooterHtml),
           parse_mode: 'HTML',
-          reply_markup: getOrderTelegramKeyboard(String(order.id), order.status),
+          reply_markup: getOrderTelegramKeyboard(
+            String(order.id),
+            order.status,
+            Boolean(order.paymentVerified)
+          ),
         }),
       },
       5000
@@ -2065,7 +2133,7 @@ async function processTelegramUpdates(
           continue;
         }
 
-        if (action === 'ord_ok' || action === 'ord_rdy' || action === 'ord_done') {
+        if (action === 'ord_ok' || action === 'ord_rdy' || action === 'ord_done' || action === 'ord_paid') {
           const ordIdx = targetId ? db.orders.findIndex((o) => String(o.id) === targetId) : -1;
           if (ordIdx === -1) {
             await answerTelegramCallback(botToken, cb.id, 'រកមិនឃើញការកម្ម៉ង់នេះទេ');
@@ -2077,6 +2145,24 @@ async function processTelegramUpdates(
           }
           if (!ord.tgChatId && cb.message?.chat?.id !== undefined) {
             ord.tgChatId = String(cb.message.chat.id);
+          }
+
+          if (action === 'ord_paid') {
+            ord.paymentVerified = true;
+            ord.paymentVerifiedBy = 'telegram_owner';
+            ord.paymentPaidAmount = Number(ord.grandTotal || 0);
+            ord.paymentCurrency = 'USD';
+            db.orders[ordIdx] = ord;
+            dirty = true;
+            await answerTelegramCallback(botToken, cb.id, `💵 បានបញ្ជាក់ទទួលប្រាក់ ${targetId}!`);
+            await editTelegramOrderMessage(
+              env,
+              botToken,
+              db,
+              ord,
+              `💵 <b>ស្ថានភាព៖ ទទួលប្រាក់រួចរាល់ដោយ ${escapeTgHtml(reviewerName)} (Telegram)</b>`
+            );
+            continue;
           }
 
           const nextStatus =
@@ -2095,10 +2181,10 @@ async function processTelegramUpdates(
                 : `✔️ កម្ម៉ង់ ${targetId} បានបញ្ចប់!`;
           const footerHtml =
             nextStatus === 'Brewing'
-              ? `✅ <b>ស្ថានភាព៖ បានបញ្ជាក់ & កំពុងរៀបចំដោយ ${reviewerName} (Telegram)</b>`
+              ? `✅ <b>ស្ថានភាព៖ បានបញ្ជាក់ &amp; កំពុងរៀបចំដោយ ${escapeTgHtml(reviewerName)} (Telegram)</b>`
               : nextStatus === 'Ready'
-                ? `🚀 <b>ស្ថានភាព៖ រួចរាល់ / កំពុងដឹកជញ្ជូន (${reviewerName})</b>`
-                : `✔️ <b>ស្ថានភាព៖ បានបញ្ចប់រួចរាល់ (${reviewerName})</b>`;
+                ? `🚀 <b>ស្ថានភាព៖ រួចរាល់ / កំពុងដឹកជញ្ជូន (${escapeTgHtml(reviewerName)})</b>`
+                : `✔️ <b>ស្ថានភាព៖ បានបញ្ចប់រួចរាល់ (${escapeTgHtml(reviewerName)})</b>`;
           await answerTelegramCallback(botToken, cb.id, answerText);
           await editTelegramOrderMessage(env, botToken, db, ord, footerHtml);
           continue;
@@ -3072,7 +3158,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     if (bakongToken && sess.hasOfficialKhqr && sess.md5) {
       try {
         const bRes = await fetchWithTimeout(
-          'https://api-bakong.nbc.gov.kh/v1/check_transaction_by_md5',
+          resolveBakongCheckUrl(env, db),
           {
             method: 'POST',
             headers: {
@@ -3239,12 +3325,12 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
         ? `${Math.round(sess.expectedAmount).toLocaleString()} ៛ ($${sess.expectedAmountUsd.toFixed(2)})`
         : `$${sess.expectedAmountUsd.toFixed(2)}`;
     const caption = [
-      `💳 <b>${shopBrand} · ស្នើផ្ទៀងផ្ទាត់ការទូទាត់ KHQR</b>`,
-      `🧾 វិក្កយបត្រ៖ <code>${sess.billNumber}</code>`,
-      `💰 ត្រូវបង់គ្រប់៖ <b>${amtText}</b>`,
-      `👤 អតិថិជន៖ ${custName} (${custPhone})`,
-      enteredRef ? `🔖 លេខយោង៖ <code>${enteredRef}</code>` : '',
-      orderSummary ? `☕ មុខទំនិញ៖ ${orderSummary}` : '',
+      `💳 <b>${escapeTgHtml(shopBrand)} · ស្នើផ្ទៀងផ្ទាត់ការទូទាត់ KHQR</b>`,
+      `🧾 វិក្កយបត្រ៖ <code>${escapeTgHtml(sess.billNumber)}</code>`,
+      `💰 ត្រូវបង់គ្រប់៖ <b>${escapeTgHtml(amtText)}</b>`,
+      `👤 អតិថិជន៖ ${escapeTgHtml(custName)} (${escapeTgHtml(custPhone)})`,
+      enteredRef ? `🔖 លេខយោង៖ <code>${escapeTgHtml(enteredRef)}</code>` : '',
+      orderSummary ? `☕ មុខទំនិញ៖ ${escapeTgHtml(orderSummary)}` : '',
       '',
       '👇 <i>សូមម្ចាស់ហាងពិនិត្យលុយចូលធនាគារ រួចចុចប៊ូតុងខាងក្រោម៖</i>',
     ]
@@ -3830,7 +3916,8 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       adminPin: String(incoming.adminPin ?? db.secrets.adminPin).trim() || '1234',
       botToken: String(incoming.botToken ?? db.secrets.botToken).trim(),
       chatId: String(incoming.chatId ?? db.secrets.chatId).trim(),
-      bakongToken: String(incoming.bakongToken ?? db.secrets.bakongToken).trim(),
+      bakongToken: String(incoming.bakongToken ?? db.secrets.bakongToken).replace(/\s+/g, ''),
+      bakongProxyUrl: String(incoming.bakongProxyUrl ?? db.secrets.bakongProxyUrl ?? '').trim(),
       telegramGatewayToken: String(incoming.telegramGatewayToken ?? db.secrets.telegramGatewayToken).trim(),
       twilioAccountSid: String(incoming.twilioAccountSid ?? db.secrets.twilioAccountSid).trim(),
       twilioAuthToken: String(incoming.twilioAuthToken ?? db.secrets.twilioAuthToken).trim(),
@@ -3941,6 +4028,139 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       detectedChatTitle,
       gatewayConfigured: Boolean(candidateGateway),
     });
+  }
+
+  if (path === '/api/admin/bakong/test' && method === 'POST') {
+    if (!(await requireAdmin(req, env, db))) {
+      return jsonResponse({ ok: false, error: 'ទាមទារការអនុញ្ញាតពីម្ចាស់ហាង' }, 401);
+    }
+    const body = await readJsonBody(req);
+    const candidateToken = String(body.bakongToken ?? getEffectiveBakongToken(env, db))
+      .replace(/\s+/g, '')
+      .replace(/^Bearer/i, '');
+    if (!candidateToken) {
+      return jsonResponse({ ok: false, error: 'សូមបិទភ្ជាប់ Bakong Open API Token ជាមុនសិន!' }, 400);
+    }
+
+    const parts = candidateToken.split('.');
+    if (parts.length !== 3) {
+      return jsonResponse(
+        { ok: false, error: 'ទម្រង់ Bakong JWT Token មិនត្រឹមត្រូវទេ (ត្រូវមាន 3 ផ្នែកបំបែកដោយចំណុច .)' },
+        400
+      );
+    }
+
+    let expiresAt = '';
+    let expired = false;
+    try {
+      const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+      const bin = atob(padded);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const payload = JSON.parse(new TextDecoder().decode(bytes)) as { exp?: number };
+      if (typeof payload.exp === 'number' && Number.isFinite(payload.exp)) {
+        const expMs = payload.exp * 1000;
+        expiresAt = new Date(expMs).toUTCString();
+        if (Date.now() > expMs) expired = true;
+      }
+    } catch {
+      return jsonResponse(
+        { ok: false, error: 'មិនអាចអានទិន្នន័យ JWT Token បានទេ — សូមពិនិត្យការ Copy ម្តងទៀត' },
+        400
+      );
+    }
+
+    if (expired) {
+      return jsonResponse(
+        { ok: false, error: `Bakong Token នេះផុតកំណត់ហើយ (${expiresAt})`, expiresAt },
+        400
+      );
+    }
+
+    try {
+      const checkEndpoint = resolveBakongCheckUrl(
+        env,
+        db,
+        typeof body.bakongProxyUrl === 'string' ? body.bakongProxyUrl : undefined
+      );
+      const bRes = await fetchWithTimeout(
+        checkEndpoint,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${candidateToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ md5: '00000000000000000000000000000000' }),
+        },
+        7000
+      );
+
+      if (bRes.status === 401) {
+        return jsonResponse(
+          { ok: false, error: 'Bakong Token មិនត្រឹមត្រូវ ឬត្រូវបានបិទ (401 Unauthorized)', expiresAt },
+          400
+        );
+      }
+      if (bRes.status === 403) {
+        const bodyText = await bRes.text().catch(() => '');
+        const cfServer = (bRes.headers.get('server') || '').toLowerCase();
+        const isCloudFrontGeoBlock =
+          cfServer.includes('cloudfront') ||
+          bodyText.toLowerCase().includes('cloudfront') ||
+          bodyText.includes('Request blocked');
+        if (isCloudFrontGeoBlock) {
+          return jsonResponse({
+            ok: true,
+            apiConnected: false,
+            jwtValid: true,
+            geoBlocked: true,
+            expiresAt,
+            responseMessage: 'AWS CloudFront Geo-Block (Non-Cambodia Server IP)',
+          });
+        }
+        return jsonResponse(
+          { ok: false, error: 'Bakong API បានបដិសេធការចូល (403 Forbidden) — ពិនិត្យ Token ឬ IP Server', expiresAt },
+          400
+        );
+      }
+
+      const bData = (await bRes.json().catch(() => null)) as {
+        responseCode?: number;
+        responseMessage?: string;
+      } | null;
+
+      if (bRes.ok && bData && (bData.responseCode === 0 || bData.responseCode === 1)) {
+        return jsonResponse({
+          ok: true,
+          apiConnected: true,
+          jwtValid: true,
+          expiresAt,
+          responseCode: bData.responseCode,
+          responseMessage: bData.responseMessage || 'Authenticated',
+        });
+      }
+
+      return jsonResponse(
+        {
+          ok: false,
+          error: `Bakong API ឆ្លើយតប HTTP ${bRes.status}${bData?.responseMessage ? `: ${bData.responseMessage}` : ''}`,
+          expiresAt,
+        },
+        400
+      );
+    } catch {
+      return jsonResponse(
+        {
+          ok: false,
+          jwtValid: true,
+          expiresAt,
+          error: `Token ត្រឹមត្រូវ (ផុតកំណត់ ${expiresAt || 'មិនដឹង'}) ប៉ុន្តែ Worker មិនអាចភ្ជាប់ទៅ api-bakong.nbc.gov.kh បានពេលនេះទេ`,
+        },
+        502
+      );
+    }
   }
 
   // 10. Shop & Orders
@@ -4065,6 +4285,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       order.paymentRef = existingOrder.paymentRef;
       order.paymentBankName = existingOrder.paymentBankName;
       order.paymentSlipHash = existingOrder.paymentSlipHash;
+      order.paymentSlipImg = existingOrder.paymentSlipImg;
       order.paymentMd5 = existingOrder.paymentMd5;
       order.unpaidAlertAt = existingOrder.unpaidAlertAt;
       order.unpaidAlertCount = existingOrder.unpaidAlertCount;
@@ -4072,6 +4293,13 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     if (existingOrder) {
       if (!order.tgMessageId && existingOrder.tgMessageId) order.tgMessageId = existingOrder.tgMessageId;
       if (!order.tgChatId && existingOrder.tgChatId) order.tgChatId = existingOrder.tgChatId;
+      if (!order.paymentSlipImg && existingOrder.paymentSlipImg) order.paymentSlipImg = existingOrder.paymentSlipImg;
+    }
+
+    if (typeof order.paymentSlipImg === 'string') {
+      order.paymentSlipImg = order.paymentSlipImg.startsWith('data:image/')
+        ? order.paymentSlipImg.slice(0, 750_000)
+        : undefined;
     }
 
     if (isNew && order.payment === 'KHQR / ABA') {
@@ -4099,6 +4327,10 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
           { ok: false, error: 'ការទូទាត់ / វិក្កយបត្រ / លេខយោងប្រតិបត្តិការណ៍នេះត្រូវបានប្រើសម្រាប់ការកម្ម៉ង់មុនរួចហើយ!' },
           409
         );
+      }
+      const paySessBeforeDelete = safeJsonParse<PaymentVerifySession>(await kvGet(env, `pay:${proof.sid}`));
+      if (!order.paymentSlipImg && typeof paySessBeforeDelete?.slipImg === 'string' && paySessBeforeDelete.slipImg.startsWith('data:image/')) {
+        order.paymentSlipImg = paySessBeforeDelete.slipImg.slice(0, 750_000);
       }
       markPaymentRefUsed(db, [md5Key, refKey, slipKey]);
       await kvDelete(env, `pay:${proof.sid}`);
@@ -4164,17 +4396,33 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     const chatId = getEffectiveChatId(env, db);
 
     if (isNew && botToken && chatId) {
-      const msg = buildOrderTelegramMessageText(order);
-      const markup = getOrderTelegramKeyboard(String(order.id), order.status);
+      const msg = buildOrderTelegramMessageText(db, order);
+      const markup = getOrderTelegramKeyboard(
+        String(order.id),
+        order.status,
+        Boolean(order.paymentVerified)
+      );
       const sent = await sendTelegramBotMessage(botToken, chatId, msg, markup);
       if (sent.ok && sent.messageId) {
         order.tgMessageId = sent.messageId;
         order.tgChatId = chatId;
       }
+      if (typeof order.paymentSlipImg === 'string' && order.paymentSlipImg.startsWith('data:image/')) {
+        const custObj = (order.customer || {}) as Record<string, unknown>;
+        const slipCaption = [
+          `🖼️ <b>រូបវិក្កយបត្រវេរប្រាក់ (Bank Slip)</b>`,
+          `🧾 លេខកម្ម៉ង់៖ <code>${escapeTgHtml(order.id)}</code>`,
+          `👤 ${escapeTgHtml(custObj.name || '-')} · 💰 <b>$${Number(order.grandTotal || 0).toFixed(2)}</b>`,
+          order.paymentRef ? `🔖 Ref: <code>${escapeTgHtml(order.paymentRef)}</code>` : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+        await sendTelegramBotPhoto(botToken, chatId, order.paymentSlipImg, slipCaption);
+      }
     } else if (!isNew && existingOrder && existingOrder.status !== order.status && botToken && order.tgMessageId) {
       const footer =
         order.status === 'Brewing'
-          ? '✅ <b>ស្ថានភាព៖ បានបញ្ជាក់ & កំពុងរៀបចំ (Website Admin)</b>'
+          ? '✅ <b>ស្ថានភាព៖ បានបញ្ជាក់ &amp; កំពុងរៀបចំ (Website Admin)</b>'
           : order.status === 'Ready'
             ? '🚀 <b>ស្ថានភាព៖ រួចរាល់ / កំពុងដឹកជញ្ជូន (Website Admin)</b>'
             : order.status === 'Completed'
@@ -4211,17 +4459,17 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       const cust = (order.customer || {}) as Record<string, unknown>;
       const locTxt =
         order.type === 'dinein'
-          ? `🪑 តុលេខ ${cust.tableNum || 1}`
-          : `🛵 ដឹកជញ្ជូន (${String(cust.addressName || '-')})`;
+          ? `🪑 តុលេខ ${escapeTgHtml(cust.tableNum || 1)}`
+          : `🛵 ដឹកជញ្ជូន (${escapeTgHtml(cust.addressName || '-')})`;
       const shopTargetChat = String(chatId || order.tgChatId || '').trim();
       const shopBrand = getShopBrandTitle(db);
       const alertText = [
-        `🚨 <b>ដាស់តឿនភ្ញៀវភ្លេចទូទាត់ប្រាក់! · ${shopBrand}</b>`,
-        `🧾 កម្ម៉ង់៖ <code>${order.id}</code>`,
+        `🚨 <b>ដាស់តឿនភ្ញៀវភ្លេចទូទាត់ប្រាក់! · ${escapeTgHtml(shopBrand)}</b>`,
+        `🧾 កម្ម៉ង់៖ <code>${escapeTgHtml(order.id)}</code>`,
         locTxt,
-        `👤 អតិថិជន៖ ${String(cust.name || '-')} (${String(cust.phone || '-')})`,
+        `👤 អតិថិជន៖ ${escapeTgHtml(cust.name || '-')} (${escapeTgHtml(cust.phone || '-')})`,
         `💰 ទឹកប្រាក់មិនទាន់បង់៖ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b>`,
-        `🔊 <i>បានបន្លឺសំលេងហៅនៅហាង & បញ្ជូនសារដាស់តឿនទៅភ្ញៀវរួចរាល់!</i>`,
+        `🔊 <i>បានបន្លឺសំលេងហៅនៅហាង &amp; បញ្ជូនសារដាស់តឿនទៅភ្ញៀវរួចរាល់!</i>`,
       ].join('\n');
       if (shopTargetChat) {
         await sendTelegramBotMessage(botToken, shopTargetChat, alertText);
@@ -4234,8 +4482,8 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       );
       if (linkedMember?.telegramId) {
         const custAlert = [
-          `🙏 <b>សូមអភ័យទោស ${String(cust.name || linkedMember.name || 'អតិថិជន')}!</b>`,
-          `ការកម្ម៉ង់លេខ <code>${order.id}</code> (${locTxt}) នៅ <b>${shopBrand}</b> មិនទាន់បានទូទាត់ប្រាក់ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b> នៅឡើយទេ។`,
+          `🙏 <b>សូមអភ័យទោស ${escapeTgHtml(cust.name || linkedMember.name || 'អតិថិជន')}!</b>`,
+          `ការកម្ម៉ង់លេខ <code>${escapeTgHtml(order.id)}</code> (${locTxt}) នៅ <b>${escapeTgHtml(shopBrand)}</b> មិនទាន់បានទូទាត់ប្រាក់ <b>$${Number(order.grandTotal || 0).toFixed(2)}</b> នៅឡើយទេ។`,
           `💳 សូមមេត្តាអញ្ជើញទូទាត់ប្រាក់នៅតុគិតលុយ ឬតាម KHQR ហាង។ សូមអរគុណ!`,
         ].join('\n\n');
         await sendTelegramBotMessage(botToken, String(linkedMember.telegramId), custAlert);
@@ -4244,6 +4492,65 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
 
     await saveDb(env, db);
     return jsonResponse({ ok: true, order });
+  }
+
+  if (path.startsWith('/api/orders/') && path.endsWith('/send-telegram') && method === 'POST') {
+    if (!(await requireAdmin(req, env, db))) {
+      return jsonResponse({ ok: false, error: 'ទាមទារការអនុញ្ញាតពីម្ចាស់ហាង' }, 401);
+    }
+    const orderId = decodeURIComponent(
+      path.slice('/api/orders/'.length, path.length - '/send-telegram'.length)
+    ).trim();
+    const idx = db.orders.findIndex((o) => o.id === orderId);
+    if (idx === -1) {
+      return jsonResponse({ ok: false, error: 'រកមិនឃើញការកម្ម៉ង់នេះទេ' }, 404);
+    }
+    const order = { ...db.orders[idx] };
+    const botToken = getEffectiveBotToken(env, db);
+    const chatId = getEffectiveChatId(env, db);
+    if (!botToken || !chatId) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: 'មិនទាន់បានកំណត់ Telegram Bot Token និង Group Chat ID ក្នុងការកំណត់ហាងទេ!',
+        },
+        400
+      );
+    }
+    const msg = buildOrderTelegramMessageText(db, order);
+    const markup = getOrderTelegramKeyboard(
+      String(order.id),
+      order.status,
+      Boolean(order.paymentVerified)
+    );
+    const sent = await sendTelegramBotMessage(botToken, chatId, msg, markup);
+    if (!sent.ok) {
+      return jsonResponse(
+        { ok: false, error: 'មិនអាចផ្ញើវិក្កយបត្រទៅ Telegram បានទេ! សូមពិនិត្យ Bot Token & Chat ID' },
+        502
+      );
+    }
+    if (sent.messageId) {
+      order.tgMessageId = sent.messageId;
+      order.tgChatId = chatId;
+      db.orders[idx] = order;
+      await saveDb(env, db);
+    }
+    let sentSlip = false;
+    if (typeof order.paymentSlipImg === 'string' && order.paymentSlipImg.startsWith('data:image/')) {
+      const custObj = (order.customer || {}) as Record<string, unknown>;
+      const slipCaption = [
+        `🖼️ <b>រូបវិក្កយបត្រវេរប្រាក់ (Bank Slip)</b>`,
+        `🧾 លេខកម្ម៉ង់៖ <code>${escapeTgHtml(order.id)}</code>`,
+        `👤 ${escapeTgHtml(custObj.name || '-')} · 💰 <b>$${Number(order.grandTotal || 0).toFixed(2)}</b>`,
+        order.paymentRef ? `🔖 Ref: <code>${escapeTgHtml(order.paymentRef)}</code>` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      const photoSent = await sendTelegramBotPhoto(botToken, chatId, order.paymentSlipImg, slipCaption);
+      sentSlip = photoSent.ok;
+    }
+    return jsonResponse({ ok: true, order, sentSlip });
   }
 
   if (path.startsWith('/api/orders/') && path.endsWith('/feedback') && method === 'POST') {

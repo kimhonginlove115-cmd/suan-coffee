@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
-import { Check, Download, MapPin, Phone, Printer, QrCode, ReceiptText, Search, Send, ShieldCheck, Volume2, X } from 'lucide-react';
+import { Check, Download, Image as ImageIcon, MapPin, Phone, Printer, QrCode, ReceiptText, Search, Send, ShieldCheck, Volume2, X } from 'lucide-react';
 import type { AppLang, Order, ShopSettings } from '../types';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 import { getOrderStatusText } from '../utils/i18n';
+import { printReceiptDocument, saveOrShareReceiptPng } from '../utils/receiptPrint';
 
 interface ReceiptModalProps {
   lang?: AppLang;
@@ -13,13 +14,8 @@ interface ReceiptModalProps {
   shopSettings: ShopSettings;
   onClose: () => void;
   onOpenLiveTrack: (orderId: string) => void;
+  onToast?: (msg: string) => void;
 }
-
-const escapeHtml = (str: unknown) =>
-  String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 
 export function ReceiptModal({
   lang = 'km',
@@ -28,12 +24,16 @@ export function ReceiptModal({
   shopSettings,
   onClose,
   onOpenLiveTrack,
+  onToast,
 }: ReceiptModalProps) {
   const isEn = lang === 'en';
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [showPayNowQr, setShowPayNowQr] = useState(false);
+  const [receiptPngPreview, setReceiptPngPreview] = useState('');
+  const [savingReceiptPng, setSavingReceiptPng] = useState(false);
 
   useEffect(() => {
+    setReceiptPngPreview('');
     if (!order) {
       setShowPayNowQr(false);
       return;
@@ -85,33 +85,36 @@ export function ReceiptModal({
     return `https://t.me/${tgClean}?text=${encodeURIComponent(txt)}`;
   }, [tgUrl, order, shopSettings.tgUsername]);
 
-  const handlePrintReceipt = () => {
+  const handlePrintReceipt = async () => {
     if (!order) return;
-    const cust = order.customer || { name: '-', phone: '-' };
-    const khrTotal = Math.round(Number(order.grandTotal || 0) * (shopSettings.khqrKhrRate || 4100));
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(order.id)}</title><style>@page{size:80mm auto;margin:4mm;}body{font-family:monospace;font-size:12px;margin:0;padding:8px;color:#0f172a;max-width:76mm;}h3{margin:0;text-align:center;font-size:15px;}hr{border:0;border-top:1px dashed #64748b;margin:8px 0;}.row{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;}.bold{font-weight:bold;}.stamp{text-align:center;border:1.5px solid #0f172a;padding:4px;margin-top:8px;font-weight:bold;}</style></head><body><h3>${escapeHtml(shopSettings.brandTitle)}</h3><p style="text-align:center;font-size:11px;margin:2px 0 6px;">${escapeHtml(order.id)} · ${escapeHtml(order.timestamp)}</p><hr><p style="margin:0;">${order.type === 'dinein' ? `<strong>${isEn ? 'TABLE' : 'តុលេខ'} #${escapeHtml(cust.tableNum || 1)}</strong>` : `<strong>${isEn ? 'DELIVERY' : 'ដឹកជញ្ជូន'}</strong><br>${escapeHtml(cust.addressName || '')}`}<br>${escapeHtml(cust.name)}${cust.phone ? ` (${escapeHtml(cust.phone)})` : ''}</p><hr>${order.items.map((i) => `<div class="row"><span>${i.qty}x ${escapeHtml(i.name)}<br><small style="color:#475569">${escapeHtml(i.options)}</small></span><span class="bold">$${(i.unitPrice * i.qty).toFixed(2)}</span></div>`).join('')}<hr>${order.promoDisc > 0 ? `<div class="row"><span>Promo</span><span>-$${Number(order.promoDisc).toFixed(2)}</span></div>` : ''}${order.type === 'delivery' ? `<div class="row"><span>${isEn ? 'Delivery' : 'ថ្លៃដឹក'}</span><span>$${Number(order.fee || 0).toFixed(2)}</span></div>` : ''}<div class="row bold" style="font-size:14px;"><span>${isEn ? 'TOTAL' : 'សរុប'}</span><span>$${Number(order.grandTotal || 0).toFixed(2)}</span></div><div style="text-align:right;font-size:10px;color:#475569;">~ ${khrTotal.toLocaleString()} KHR</div><div class="stamp">${order.paymentVerified ? '✓ PAID' : 'UNPAID · ' + escapeHtml(order.payment)}</div></body></html>`;
+    const res = await printReceiptDocument(order, shopSettings, lang);
+    if (!res.printed && res.fallbackDataUrl) {
+      setReceiptPngPreview(res.fallbackDataUrl);
+      onToast?.(
+        isEn
+          ? 'Print dialog is blocked in this in-app browser — save or share the receipt image below!'
+          : 'កម្មវិធីនេះបិទផ្ទាំង Print ផ្ទាល់ — សូមរក្សាទុក ឬចែករំលែករូបវិក្កយបត្រខាងក្រោម (ចុចជាប់លើរូប ដើម្បី Save/Print)!'
+      );
+    }
+  };
+
+  const handleSaveReceiptImage = async () => {
+    if (!order || savingReceiptPng) return;
+    setSavingReceiptPng(true);
     try {
-      const iframe = document.createElement('iframe');
-      iframe.style.position = 'fixed';
-      iframe.style.right = '0';
-      iframe.style.bottom = '0';
-      iframe.style.width = '0';
-      iframe.style.height = '0';
-      iframe.style.border = '0';
-      document.body.appendChild(iframe);
-      const doc = iframe.contentWindow?.document;
-      if (doc) {
-        doc.open();
-        doc.write(html);
-        doc.close();
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-        setTimeout(() => iframe.remove(), 1500);
-      } else {
-        iframe.remove();
+      const res = await saveOrShareReceiptPng(order, shopSettings, lang);
+      if (res.method === 'download') {
+        onToast?.(isEn ? '✓ Receipt image downloaded!' : '✓ បានទាញយករូបវិក្កយបត្រជោគជ័យ!');
+      } else if (res.method === 'preview' && res.dataUrl) {
+        setReceiptPngPreview(res.dataUrl);
+        onToast?.(
+          isEn
+            ? 'Long-press the receipt image below to Save or Print!'
+            : 'ចុចឱ្យជាប់លើរូបវិក្កយបត្រខាងក្រោម ដើម្បី Save ចូលទូរស័ព្ទ ឬ Print!'
+        );
       }
-    } catch {
-      // ignore print errors on restricted webviews
+    } finally {
+      setSavingReceiptPng(false);
     }
   };
 
@@ -332,10 +335,42 @@ export function ReceiptModal({
                   <span>{isEn ? 'Send Receipt to Shop Telegram' : 'ផ្ញើវិក្កយបត្រទៅ Telegram ហាង'}</span>
                 </a>
               )}
+              {receiptPngPreview && (
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-2.5 space-y-2 text-center">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-[#0D4A3E] px-1">
+                    <span>
+                      {isEn
+                        ? 'Receipt Image (Long-press to Save / Print)'
+                        : 'រូបភាពវិក្កយបត្រ (ចុចជាប់លើរូប ដើម្បី Save / Print)'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setReceiptPngPreview('')}
+                      className="text-slate-400 hover:text-slate-700 p-0.5"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <img
+                    src={receiptPngPreview}
+                    alt={`Receipt ${order.id}`}
+                    className="w-full max-w-[260px] mx-auto rounded-xl border border-slate-200 shadow-sm bg-white"
+                  />
+                  <a
+                    href={receiptPngPreview}
+                    download={`Receipt-${order.id}.png`}
+                    className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#0D4A3E] underline"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{isEn ? 'Download PNG' : 'ទាញយក PNG'}</span>
+                  </a>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={handlePrintReceipt}
+                  onClick={() => void handlePrintReceipt()}
                   className="w-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
                 >
                   <Printer className="w-3.5 h-3.5" />
@@ -343,12 +378,21 @@ export function ReceiptModal({
                 </button>
                 <button
                   type="button"
-                  onClick={onClose}
-                  className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-2.5 rounded-xl text-xs"
+                  disabled={savingReceiptPng}
+                  onClick={() => void handleSaveReceiptImage()}
+                  className="w-full bg-[#E8F2EF] hover:bg-[#d5e8e2] text-[#0D4A3E] font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 disabled:opacity-60"
                 >
-                  {isEn ? 'Close' : 'បិទ'}
+                  <ImageIcon className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Save / Share' : 'រក្សាទុកវិក្កយបត្រ'}</span>
                 </button>
               </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-2.5 rounded-xl text-xs"
+              >
+                {isEn ? 'Close' : 'បិទ'}
+              </button>
             </div>
           </motion.div>
         </motion.div>

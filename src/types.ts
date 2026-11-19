@@ -24,6 +24,7 @@ export interface MenuItem {
   descEn?: string;
   available: boolean;
   featured?: boolean;
+  stockQty?: number;
 }
 
 export interface Topping {
@@ -171,6 +172,7 @@ export interface AdminSecretsConfig {
   botToken: string;
   chatId: string;
   bakongToken: string;
+  bakongProxyUrl?: string;
   telegramGatewayToken: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
