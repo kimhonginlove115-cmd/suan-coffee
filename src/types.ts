@@ -65,6 +65,16 @@ export interface OrderFeedback {
   customerName?: string;
 }
 
+export interface ShopReview {
+  id: string;
+  rating: number;
+  comment: string;
+  customerName: string;
+  orderId?: string;
+  tags?: string[];
+  submittedAt: number;
+}
+
 export interface DriverInfo {
   name?: string;
   phone?: string;
@@ -93,6 +103,8 @@ export interface Order {
   paymentProofToken?: string;
   subtotal: number;
   promoDisc: number;
+  loyaltyPointsUsed?: number;
+  loyaltyDisc?: number;
   fee: number;
   grandTotal: number;
   customer: OrderCustomer;
@@ -165,6 +177,13 @@ export interface ShopSettings {
   unpaidVoiceAlertText?: string;
   unpaidAutoAlertEnabled?: boolean;
   unpaidAlertMinutes?: number;
+  autoScheduleEnabled?: boolean;
+  openTime?: string;
+  closeTime?: string;
+  closedDays?: number[];
+  loyaltyEnabled?: boolean;
+  loyaltyRewardPoints?: number;
+  loyaltyRewardAmountUsd?: number;
 }
 
 export interface AdminSecretsConfig {

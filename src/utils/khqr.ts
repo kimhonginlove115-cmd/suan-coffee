@@ -138,7 +138,7 @@ export function buildDynamicKhqr(opts: {
 
   const cleanBase = (opts.basePayload || '').trim();
   const cleanBakongId = toAsciiMerchantText(opts.bakongId, '', 60).replace(/\s+/g, '');
-  const fallbackMerchant = toAsciiMerchantText(opts.merchantName, 'EMERALD BREW CAFE', 25);
+  const fallbackMerchant = toAsciiMerchantText(opts.merchantName, 'SUAN COFFEE', 25);
   const cleanBill = toAsciiMerchantText(opts.billNumber, '', 20);
   const tsPart =
     typeof opts.timestampMs === 'number' && Number.isFinite(opts.timestampMs) && opts.timestampMs > 0

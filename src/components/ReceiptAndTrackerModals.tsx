@@ -1,39 +1,40 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import QRCode from 'qrcode';
-import { Check, Download, Image as ImageIcon, MapPin, Phone, Printer, QrCode, ReceiptText, Search, Send, ShieldCheck, Volume2, X } from 'lucide-react';
+import { Check, Download, MapPin, Phone, QrCode, ReceiptText, Search, ShieldCheck, Star, Volume2, X } from 'lucide-react';
 import type { AppLang, Order, ShopSettings } from '../types';
 import { buildDynamicKhqr, downloadBrandedKhqrPng } from '../utils/khqr';
 import { getOrderStatusText } from '../utils/i18n';
-import { printReceiptDocument, saveOrShareReceiptPng } from '../utils/receiptPrint';
 
 interface ReceiptModalProps {
   lang?: AppLang;
   order: Order | null;
-  tgUrl: string;
+  tgUrl?: string;
   shopSettings: ShopSettings;
   onClose: () => void;
   onOpenLiveTrack: (orderId: string) => void;
+  onSubmitFeedback?: (orderId: string, rating: number, comment: string) => Promise<boolean> | Promise<void> | void;
   onToast?: (msg: string) => void;
 }
 
 export function ReceiptModal({
   lang = 'km',
   order,
-  tgUrl,
   shopSettings,
   onClose,
   onOpenLiveTrack,
-  onToast,
+  onSubmitFeedback,
 }: ReceiptModalProps) {
   const isEn = lang === 'en';
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [showPayNowQr, setShowPayNowQr] = useState(false);
-  const [receiptPngPreview, setReceiptPngPreview] = useState('');
-  const [savingReceiptPng, setSavingReceiptPng] = useState(false);
+  const [ratingVal, setRatingVal] = useState(5);
+  const [ratingComment, setRatingComment] = useState('');
+  const [submittingRating, setSubmittingRating] = useState(false);
 
   useEffect(() => {
-    setReceiptPngPreview('');
+    setRatingVal(5);
+    setRatingComment('');
     if (!order) {
       setShowPayNowQr(false);
       return;
@@ -74,49 +75,6 @@ export function ReceiptModal({
       cancelled = true;
     };
   }, [dynamicKhqr, showPayNowQr]);
-
-  const effectiveTgUrl = useMemo(() => {
-    if (tgUrl) return tgUrl;
-    if (!order || !shopSettings.tgUsername) return '';
-    const tgClean = shopSettings.tgUsername.replace('@', '').trim();
-    if (!tgClean) return '';
-    const lines = (order.items || []).map((i) => `• ${i.qty}x ${i.name} (${i.options})`).join('\n');
-    const txt = `☕ កម្ម៉ង់ថ្មី ${order.id} (${order.type})\n${lines}\n💰 សរុប: $${Number(order.grandTotal || 0).toFixed(2)} (${order.payment})`;
-    return `https://t.me/${tgClean}?text=${encodeURIComponent(txt)}`;
-  }, [tgUrl, order, shopSettings.tgUsername]);
-
-  const handlePrintReceipt = async () => {
-    if (!order) return;
-    const res = await printReceiptDocument(order, shopSettings, lang);
-    if (!res.printed && res.fallbackDataUrl) {
-      setReceiptPngPreview(res.fallbackDataUrl);
-      onToast?.(
-        isEn
-          ? 'Print dialog is blocked in this in-app browser — save or share the receipt image below!'
-          : 'កម្មវិធីនេះបិទផ្ទាំង Print ផ្ទាល់ — សូមរក្សាទុក ឬចែករំលែករូបវិក្កយបត្រខាងក្រោម (ចុចជាប់លើរូប ដើម្បី Save/Print)!'
-      );
-    }
-  };
-
-  const handleSaveReceiptImage = async () => {
-    if (!order || savingReceiptPng) return;
-    setSavingReceiptPng(true);
-    try {
-      const res = await saveOrShareReceiptPng(order, shopSettings, lang);
-      if (res.method === 'download') {
-        onToast?.(isEn ? '✓ Receipt image downloaded!' : '✓ បានទាញយករូបវិក្កយបត្រជោគជ័យ!');
-      } else if (res.method === 'preview' && res.dataUrl) {
-        setReceiptPngPreview(res.dataUrl);
-        onToast?.(
-          isEn
-            ? 'Long-press the receipt image below to Save or Print!'
-            : 'ចុចឱ្យជាប់លើរូបវិក្កយបត្រខាងក្រោម ដើម្បី Save ចូលទូរស័ព្ទ ឬ Print!'
-        );
-      }
-    } finally {
-      setSavingReceiptPng(false);
-    }
-  };
 
   return (
     <AnimatePresence>
@@ -208,6 +166,16 @@ export function ReceiptModal({
                 <div className="flex justify-between text-red-600">
                   <span>{isEn ? 'Promo Discount:' : 'បញ្ចុះតម្លៃ Promo៖'}</span>
                   <span className="font-mono-num">-${Number(order.promoDisc).toFixed(2)}</span>
+                </div>
+              )}
+              {Number(order.loyaltyDisc) > 0 && (
+                <div className="flex justify-between text-amber-700 font-semibold">
+                  <span>
+                    {isEn
+                      ? `Loyalty Redeem (${order.loyaltyPointsUsed || 0} ★):`
+                      : `ប្តូរពិន្ទុ (${order.loyaltyPointsUsed || 0} ★)៖`}
+                  </span>
+                  <span className="font-mono-num">-${Number(order.loyaltyDisc).toFixed(2)}</span>
                 </div>
               )}
               {order.type === 'delivery' && (
@@ -313,6 +281,77 @@ export function ReceiptModal({
               </div>
             )}
 
+            {order.feedback ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-left space-y-1">
+                <div className="flex items-center justify-between text-xs font-bold text-amber-900">
+                  <span>{isEn ? 'Your Rating' : 'ការវាយតម្លៃរបស់អ្នក'}</span>
+                  <span className="inline-flex items-center gap-0.5">
+                    {[1, 2, 3, 4, 5].map((s) => (
+                      <Star
+                        key={s}
+                        className={`w-3.5 h-3.5 ${
+                          s <= order.feedback!.rating ? 'fill-amber-400 text-amber-500' : 'text-slate-300'
+                        }`}
+                      />
+                    ))}
+                  </span>
+                </div>
+                {order.feedback.comment && (
+                  <p className="text-[11px] text-slate-700">“{order.feedback.comment}”</p>
+                )}
+              </div>
+            ) : (order.status === 'Completed' || order.paymentVerified) && onSubmitFeedback ? (
+              <div className="bg-amber-50/70 border border-amber-200 rounded-2xl p-3 text-left space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-bold text-slate-900">
+                    {isEn ? 'Rate this order' : 'វាយតម្លៃការកម្ម៉ង់នេះ'}
+                  </p>
+                  <div className="flex items-center gap-0.5">
+                    {[1, 2, 3, 4, 5].map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setRatingVal(s)}
+                        aria-label={`Rate ${s} stars`}
+                        className="p-0.5"
+                      >
+                        <Star
+                          className={`w-5 h-5 transition-transform ${
+                            s <= ratingVal ? 'fill-amber-400 text-amber-500 scale-105' : 'text-slate-300'
+                          }`}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={ratingComment}
+                    onChange={(e) => setRatingComment(e.target.value)}
+                    placeholder={isEn ? 'Share quick feedback...' : 'សរសេរមតិយោបល់ (ស្រេចចិត្ត)...'}
+                    className="flex-1 bg-white border border-amber-200 rounded-xl px-2.5 py-1.5 text-base sm:text-xs focus:outline-none focus:border-[#0D4A3E]"
+                  />
+                  <button
+                    type="button"
+                    disabled={submittingRating}
+                    onClick={async () => {
+                      if (!order || submittingRating) return;
+                      setSubmittingRating(true);
+                      try {
+                        await onSubmitFeedback(order.id, ratingVal, ratingComment.trim());
+                      } finally {
+                        setSubmittingRating(false);
+                      }
+                    }}
+                    className="bg-[#0D4A3E] hover:bg-[#09352C] text-white px-3 py-1.5 rounded-xl text-xs font-bold shrink-0 disabled:opacity-60"
+                  >
+                    {submittingRating ? '...' : isEn ? 'Send' : 'ផ្ញើ'}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
             <div className="space-y-2 pt-2">
               {order.type === 'delivery' && (
                 <button
@@ -324,68 +363,6 @@ export function ReceiptModal({
                   <span>{isEn ? 'Track Driver on Live Map' : 'មើលទីតាំងអ្នកដឹក Live Map'}</span>
                 </button>
               )}
-              {effectiveTgUrl && (
-                <a
-                  href={effectiveTgUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="w-full bg-sky-600 hover:bg-sky-700 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{isEn ? 'Send Receipt to Shop Telegram' : 'ផ្ញើវិក្កយបត្រទៅ Telegram ហាង'}</span>
-                </a>
-              )}
-              {receiptPngPreview && (
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-2.5 space-y-2 text-center">
-                  <div className="flex items-center justify-between text-[11px] font-bold text-[#0D4A3E] px-1">
-                    <span>
-                      {isEn
-                        ? 'Receipt Image (Long-press to Save / Print)'
-                        : 'រូបភាពវិក្កយបត្រ (ចុចជាប់លើរូប ដើម្បី Save / Print)'}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setReceiptPngPreview('')}
-                      className="text-slate-400 hover:text-slate-700 p-0.5"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                  <img
-                    src={receiptPngPreview}
-                    alt={`Receipt ${order.id}`}
-                    className="w-full max-w-[260px] mx-auto rounded-xl border border-slate-200 shadow-sm bg-white"
-                  />
-                  <a
-                    href={receiptPngPreview}
-                    download={`Receipt-${order.id}.png`}
-                    className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#0D4A3E] underline"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>{isEn ? 'Download PNG' : 'ទាញយក PNG'}</span>
-                  </a>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handlePrintReceipt()}
-                  className="w-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5"
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  <span>{isEn ? 'Print / PDF' : 'បោះពុម្ពវិក្កយបត្រ'}</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={savingReceiptPng}
-                  onClick={() => void handleSaveReceiptImage()}
-                  className="w-full bg-[#E8F2EF] hover:bg-[#d5e8e2] text-[#0D4A3E] font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 disabled:opacity-60"
-                >
-                  <ImageIcon className="w-3.5 h-3.5" />
-                  <span>{isEn ? 'Save / Share' : 'រក្សាទុកវិក្កយបត្រ'}</span>
-                </button>
-              </div>
               <button
                 type="button"
                 onClick={onClose}

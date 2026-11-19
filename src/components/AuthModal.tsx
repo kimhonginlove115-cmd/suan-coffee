@@ -7,6 +7,7 @@ import {
   Copy,
   Edit3,
   ExternalLink,
+  Gift,
   KeyRound,
   Loader2,
   LogOut,
@@ -1980,6 +1981,46 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </p>
                   </div>
                 </div>
+
+                {shopSettings.loyaltyEnabled !== false && (() => {
+                  const reqPts = Math.max(1, Number(shopSettings.loyaltyRewardPoints) || 10);
+                  const rewardUsd = Math.max(0.25, Number(shopSettings.loyaltyRewardAmountUsd) || 2.5);
+                  const pts = Math.max(0, Number(currentMember.points) || 0);
+                  const readyCount = Math.floor(pts / reqPts);
+                  const progressInCycle = pts >= reqPts ? reqPts : pts % reqPts;
+                  const pct = Math.min(100, Math.round((progressInCycle / reqPts) * 100));
+                  const remaining = Math.max(0, reqPts - pts);
+                  return (
+                    <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-xl p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-bold text-[#0D4A3E] flex items-center gap-1.5">
+                          <Gift className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                          <span>
+                            {isEn ? 'Loyalty Stamp Card' : 'កាតសន្សំពិន្ទុប្តូររង្វាន់'}
+                          </span>
+                        </span>
+                        <span className="font-mono-num font-bold text-[#0D4A3E]">
+                          {pts} / {reqPts} ★
+                        </span>
+                      </div>
+                      <div className="h-2 w-full bg-white rounded-full overflow-hidden border border-emerald-100">
+                        <div
+                          className="h-full bg-[#0D4A3E] rounded-full transition-all"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                      <p className="text-[11px] text-emerald-900 leading-relaxed">
+                        {readyCount > 0
+                          ? isEn
+                            ? `You have ${readyCount} reward${readyCount > 1 ? 's' : ''} ready! Redeem ${reqPts} ★ for $${rewardUsd.toFixed(2)} off at checkout.`
+                            : `អបអរសាទរ! អ្នកមានពិន្ទុគ្រប់អាចប្តូររង្វាន់ ${readyCount} ដង — ប្រើ ${reqPts} ★ ដើម្បីបញ្ចុះតម្លៃ $${rewardUsd.toFixed(2)} ពេលកម្ម៉ង់!`
+                          : isEn
+                            ? `${remaining} more ★ (1 ★ per item) to unlock a $${rewardUsd.toFixed(2)} free drink reward.`
+                            : `សល់ ${remaining} ★ ទៀត (១ កែវ = ១ ★) ដើម្បីទទួលបានកាហ្វេហ្វ្រី / បញ្ចុះ $${rewardUsd.toFixed(2)}!`}
+                      </p>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Orders Header + Refresh + Status Filter Tabs */}
@@ -2097,7 +2138,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                               <span>{isEn ? 'Order Again' : 'កម្ម៉ង់ម្តងទៀត'}</span>
                             </button>
 
-                            {o.status === 'Completed' && !o.feedback && (
+                            {(o.status === 'Completed' || o.paymentVerified) && !o.feedback && (
                               <button
                                 type="button"
                                 onClick={() => {

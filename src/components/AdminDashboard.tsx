@@ -3,11 +3,13 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import QRCode from 'qrcode';
 import {
   AlertCircle,
+  BarChart3,
   BellRing,
   Check,
   CheckCircle2,
   CheckSquare,
   ClipboardList,
+  Clock,
   Coffee,
   Copy,
   DollarSign,
@@ -15,6 +17,7 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  Gift,
   Globe,
   Image as ImageIcon,
   Layers,
@@ -57,6 +60,7 @@ import type {
   MenuItem,
   Order,
   OrderStatus,
+  ShopReview,
   ShopSettings,
   Topping,
 } from '../types';
@@ -68,6 +72,7 @@ import {
   fetchWithTimeout,
   getDiscountedPrice,
   getFirebaseBase,
+  getShopScheduleStatus,
   handleImgFallback,
   resolveAssetUrl,
 } from '../utils/cafeUtils';
@@ -244,6 +249,7 @@ interface AdminDashboardProps {
   menuItems: MenuItem[];
   toppings: Topping[];
   orders: Order[];
+  shopReviews?: ShopReview[];
   members: Member[];
   shopSettings: ShopSettings;
   onExit: () => void;
@@ -257,6 +263,7 @@ interface AdminDashboardProps {
   onSendUnpaidVoiceAlert: (order: Order) => Promise<void> | void;
   onSendOrderToTelegram?: (orderId: string) => Promise<boolean> | void;
   onDeleteOrder: (orderId: string) => Promise<void> | void;
+  onDeleteReview?: (reviewId: string) => Promise<void> | void;
   onClearCompletedOrders: () => void;
   onOpenDriverConsole: (orderId: string) => void;
   onOpenDriverPortal: () => void;
@@ -297,6 +304,7 @@ export function AdminDashboard({
   menuItems,
   toppings,
   orders,
+  shopReviews = [],
   members,
   shopSettings,
   onExit,
@@ -310,6 +318,7 @@ export function AdminDashboard({
   onSendUnpaidVoiceAlert,
   onSendOrderToTelegram,
   onDeleteOrder,
+  onDeleteReview,
   onClearCompletedOrders,
   onOpenDriverConsole,
   onOpenDriverPortal,
@@ -376,7 +385,7 @@ export function AdminDashboard({
   const [qrBaseUrl, setQrBaseUrl] = useState(() =>
     typeof window !== 'undefined' && window.location.href.startsWith('http')
       ? window.location.href.split('?')[0]
-      : 'https://emerald-brew.cafe'
+      : ''
   );
   const [qrWifiText, setQrWifiText] = useState('Free Wi-Fi: 12345678');
   const [qrDataUrls, setQrDataUrls] = useState<Record<number, string>>({});
@@ -402,6 +411,9 @@ export function AdminDashboard({
   const [previewSlipUrl, setPreviewSlipUrl] = useState<string | null>(null);
   const [pendingKhqrSessions, setPendingKhqrSessions] = useState<PendingKhqrSession[]>([]);
   const [decidingSessionId, setDecidingSessionId] = useState<string | null>(null);
+  const [reportRange, setReportRange] = useState<'today' | '7d' | '30d' | 'all'>('today');
+  const [showSalesReport, setShowSalesReport] = useState(false);
+  const [adjustingMemberId, setAdjustingMemberId] = useState<string | null>(null);
   const seenPendingPayIdsRef = useRef<Set<string>>(new Set());
   const menuFormRef = useRef<HTMLDivElement | null>(null);
   const menuListRef = useRef<HTMLDivElement | null>(null);
@@ -752,9 +764,88 @@ export function AdminDashboard({
     return () => window.clearTimeout(tmr);
   }, [lastDeletedMenuItem]);
 
-  const handleExportOrdersCsv = () => {
-    if (!orders.length) {
-      onToast(isEn ? 'No orders to export yet.' : 'មិនទាន់មានការកម្ម៉ង់សម្រាប់ទាញយកទេ!');
+  const reportOrders = useMemo(() => {
+    if (reportRange === 'all') return orders;
+    const now = new Date();
+    let cutoffMs = 0;
+    if (reportRange === 'today') {
+      const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      cutoffMs = startToday;
+    } else if (reportRange === '7d') {
+      cutoffMs = now.getTime() - 7 * 24 * 60 * 60 * 1000;
+    } else if (reportRange === '30d') {
+      cutoffMs = now.getTime() - 30 * 24 * 60 * 60 * 1000;
+    }
+    return orders.filter((o) => {
+      if (o.createdAt) return o.createdAt >= cutoffMs;
+      return reportRange !== 'today';
+    });
+  }, [orders, reportRange]);
+
+  const salesReportSummary = useMemo(() => {
+    let revenue = 0;
+    let paidRevenue = 0;
+    let cashTotal = 0;
+    let khqrTotal = 0;
+    let discountTotal = 0;
+    let totalCups = 0;
+    const itemMap = new Map<string, { name: string; qty: number; sales: number }>();
+
+    for (const o of reportOrders) {
+      const gt = Number(o.grandTotal || 0);
+      revenue += gt;
+      if (o.paymentVerified) paidRevenue += gt;
+      if (o.payment === 'KHQR / ABA') khqrTotal += gt;
+      else cashTotal += gt;
+      discountTotal += Number(o.promoDisc || 0) + Number(o.loyaltyDisc || 0);
+
+      for (const it of o.items || []) {
+        const qty = Math.max(1, Number(it.qty) || 1);
+        totalCups += qty;
+        const name = String(it.name || 'Item').trim();
+        const key = name.toLowerCase();
+        const cur = itemMap.get(key) || { name, qty: 0, sales: 0 };
+        cur.qty += qty;
+        cur.sales += Number(it.unitPrice || 0) * qty;
+        itemMap.set(key, cur);
+      }
+    }
+
+    const topItems = Array.from(itemMap.values()).sort((a, b) => b.qty - a.qty || b.sales - a.sales);
+    const avgTicket = reportOrders.length > 0 ? revenue / reportOrders.length : 0;
+    return {
+      count: reportOrders.length,
+      revenue,
+      paidRevenue,
+      cashTotal,
+      khqrTotal,
+      discountTotal,
+      totalCups,
+      avgTicket,
+      topItems,
+    };
+  }, [reportOrders]);
+
+  const downloadCsvFile = (csvContent: string, suffix: string) => {
+    const blob = new Blob([`\uFEFF${csvContent}`], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const fileSlug =
+      (shopSettings.brandTitle || 'shop')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '') || 'shop';
+    a.download = `${fileSlug}-${suffix}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportOrdersCsv = (sourceOrders: Order[] = reportOrders) => {
+    if (!sourceOrders.length) {
+      onToast(isEn ? 'No orders in this range to export.' : 'មិនទាន់មានការកម្ម៉ង់ក្នុងរយៈពេលនេះសម្រាប់ទាញយកទេ!');
       return;
     }
     const esc = (v: unknown) => {
@@ -774,13 +865,29 @@ export function AdminDashboard({
       'Items',
       'Subtotal ($)',
       'Promo ($)',
+      'Loyalty ($)',
       'Delivery ($)',
       'Grand Total ($)',
     ];
-    const rows = orders.map((o) => {
+    let sumSubtotal = 0;
+    let sumPromo = 0;
+    let sumLoyalty = 0;
+    let sumFee = 0;
+    let sumGrand = 0;
+    const rows = sourceOrders.map((o) => {
       const c = o.customer || { name: '', phone: '' };
       const loc = o.type === 'dinein' ? `Table ${c.tableNum || 1}` : c.addressName || 'Delivery';
       const itemsSummary = (o.items || []).map((i) => `${i.qty}x ${i.name} (${i.options})`).join(' | ');
+      const sub = Number(o.subtotal || 0);
+      const promo = Number(o.promoDisc || 0);
+      const loy = Number(o.loyaltyDisc || 0);
+      const fee = Number(o.fee || 0);
+      const gt = Number(o.grandTotal || 0);
+      sumSubtotal += sub;
+      sumPromo += promo;
+      sumLoyalty += loy;
+      sumFee += fee;
+      sumGrand += gt;
       return [
         esc(o.id),
         esc(o.createdAt ? new Date(o.createdAt).toLocaleString() : o.timestamp),
@@ -792,23 +899,107 @@ export function AdminDashboard({
         esc(o.paymentVerified ? 'PAID' : 'UNPAID'),
         esc(o.status),
         esc(itemsSummary),
-        Number(o.subtotal || 0).toFixed(2),
-        Number(o.promoDisc || 0).toFixed(2),
-        Number(o.fee || 0).toFixed(2),
-        Number(o.grandTotal || 0).toFixed(2),
+        sub.toFixed(2),
+        promo.toFixed(2),
+        loy.toFixed(2),
+        fee.toFixed(2),
+        gt.toFixed(2),
       ].join(',');
     });
-    const csv = `\uFEFF${[header.map(esc).join(','), ...rows].join('\r\n')}`;
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `emerald-brew-orders-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    onToast(isEn ? '✓ Exported CSV report!' : '✓ បានទាញយករបាយការណ៍ Excel CSV ជោគជ័យ!');
+    const summaryRow = [
+      esc(`TOTAL (${sourceOrders.length} orders)`),
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      sumSubtotal.toFixed(2),
+      sumPromo.toFixed(2),
+      sumLoyalty.toFixed(2),
+      sumFee.toFixed(2),
+      sumGrand.toFixed(2),
+    ].join(',');
+    downloadCsvFile([header.map(esc).join(','), ...rows, '', summaryRow].join('\r\n'), `orders-${reportRange}`);
+    onToast(isEn ? '✓ Exported Excel CSV report!' : '✓ បានទាញយករបាយការណ៍ Excel CSV ជោគជ័យ!');
+  };
+
+  const handleExportItemsCsv = () => {
+    if (!salesReportSummary.topItems.length) {
+      onToast(isEn ? 'No sold items in this range.' : 'មិនទាន់មានទិន្នន័យលក់ក្នុងរយៈពេលនេះទេ!');
+      return;
+    }
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = ['Rank', 'Menu Item', 'Quantity Sold', 'Gross Sales ($)'];
+    const rows = salesReportSummary.topItems.map((it, idx) =>
+      [idx + 1, esc(it.name), it.qty, it.sales.toFixed(2)].join(',')
+    );
+    downloadCsvFile([header.map(esc).join(','), ...rows].join('\r\n'), `top-items-${reportRange}`);
+    onToast(isEn ? '✓ Exported Best Sellers CSV!' : '✓ បានទាញយករបាយការណ៍មុខទំនិញលក់ដាច់ CSV!');
+  };
+
+  const handleExportMembersCsv = () => {
+    if (!displayedMembers.length) {
+      onToast(isEn ? 'No members to export.' : 'មិនទាន់មានសមាជិកសម្រាប់ទាញយកទេ!');
+      return;
+    }
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = ['Member ID', 'Name', 'Phone', 'Phone Verified', 'Telegram', 'Points'];
+    const rows = displayedMembers.map((m) =>
+      [
+        esc(m.id),
+        esc(m.name),
+        esc(m.phone || ''),
+        esc(m.phoneVerified ? 'YES' : 'NO'),
+        esc(m.telegramUsername || m.tg || (m.telegramId ? `#${m.telegramId}` : '')),
+        Number(m.points || 0),
+      ].join(',')
+    );
+    downloadCsvFile([header.map(esc).join(','), ...rows].join('\r\n'), 'members');
+    onToast(isEn ? '✓ Exported Members CSV!' : '✓ បានទាញយកបញ្ជីសមាជិក CSV!');
+  };
+
+  const handleAdjustMemberPoints = async (memberId: string | number, delta: number) => {
+    if (!adminToken || adjustingMemberId) return;
+    setAdjustingMemberId(String(memberId));
+    try {
+      const res = await fetchWithTimeout(
+        `/api/admin/members/${encodeURIComponent(String(memberId))}/points`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ delta }),
+        },
+        8000
+      );
+      if (res.status === 401) {
+        onRequireReauth();
+        return;
+      }
+      const data = (await res.json()) as { ok?: boolean; member?: Member; error?: string };
+      if (!res.ok || !data.ok || !data.member) {
+        onToast(data.error || (isEn ? 'Could not update points' : 'មិនអាចកែពិន្ទុបានទេ'));
+        return;
+      }
+      setServerMembers((prev) =>
+        prev.map((m) => (String(m.id) === String(memberId) ? { ...m, points: data.member!.points } : m))
+      );
+      onToast(
+        isEn
+          ? `Updated points: ${data.member.points} ★`
+          : `បានកែពិន្ទុសមាជិក៖ ${data.member.points} ★`
+      );
+    } catch {
+      onToast(isEn ? 'Could not reach server' : 'មិនអាចភ្ជាប់ទៅ Server បានទេ');
+    } finally {
+      setAdjustingMemberId(null);
+    }
   };
 
   const activeCategoryPresets: CategoryPreset[] =
@@ -999,18 +1190,59 @@ export function AdminDashboard({
     }
   };
 
-  const feedbackOrders = useMemo(
-    () =>
-      orders
-        .filter((o) => Boolean(o.feedback && o.feedback.rating >= 1))
-        .sort((a, b) => Number(b.feedback?.submittedAt || 0) - Number(a.feedback?.submittedAt || 0)),
-    [orders]
-  );
+  const feedbackEntries = useMemo(() => {
+    const orderEntries = orders
+      .filter((o) => Boolean(o.feedback && o.feedback.rating >= 1))
+      .map((o) => ({
+        key: `ord-${o.id}`,
+        source: 'order' as const,
+        reviewId: undefined as string | undefined,
+        orderId: o.id,
+        customerName: o.feedback!.customerName || o.customer?.name || (isEn ? 'Customer' : 'ភ្ញៀវ'),
+        rating: Number(o.feedback!.rating || 0),
+        comment: o.feedback!.comment || '',
+        tags: [] as string[],
+        submittedAt: Number(o.feedback!.submittedAt || o.createdAt || 0),
+        dateLabel: o.feedback!.submittedAt
+          ? new Date(o.feedback!.submittedAt).toLocaleString(isEn ? 'en-US' : 'km-KH', {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+          : o.timestamp,
+        itemsSummary: o.items.map((it) => `${it.qty}x ${it.name}`).join(', '),
+      }));
+    const storeEntries = shopReviews
+      .filter((r) => Boolean(r && r.rating >= 1))
+      .map((r) => ({
+        key: `rev-${r.id}`,
+        source: 'storefront' as const,
+        reviewId: r.id,
+        orderId: r.orderId,
+        customerName: r.customerName || (isEn ? 'Guest' : 'ភ្ញៀវហាង'),
+        rating: Number(r.rating || 0),
+        comment: r.comment || '',
+        tags: Array.isArray(r.tags) ? r.tags : [],
+        submittedAt: Number(r.submittedAt || 0),
+        dateLabel: r.submittedAt
+          ? new Date(r.submittedAt).toLocaleString(isEn ? 'en-US' : 'km-KH', {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+          : '',
+        itemsSummary: '',
+      }));
+    return [...storeEntries, ...orderEntries].sort((a, b) => b.submittedAt - a.submittedAt);
+  }, [orders, shopReviews, isEn]);
+
   const averageRating = useMemo(() => {
-    if (!feedbackOrders.length) return 0;
-    const sum = feedbackOrders.reduce((s, o) => s + Number(o.feedback?.rating || 0), 0);
-    return sum / feedbackOrders.length;
-  }, [feedbackOrders]);
+    if (!feedbackEntries.length) return 0;
+    const sum = feedbackEntries.reduce((s, r) => s + r.rating, 0);
+    return sum / feedbackEntries.length;
+  }, [feedbackEntries]);
 
   const existingCategories = useMemo(
     () => Array.from(new Set(menuItems.map((m) => m.category).filter(Boolean))),
@@ -1044,7 +1276,9 @@ export function AdminDashboard({
   const generateQRs = async (explicitCount?: number) => {
     if (generatingQRs) return;
     const count = Math.min(100, Math.max(1, Number(explicitCount ?? qrTableCount) || 10));
-    const base = qrBaseUrl.trim().split('?')[0].split('#')[0] || 'https://emerald-brew.cafe';
+    const base =
+      qrBaseUrl.trim().split('?')[0].split('#')[0] ||
+      (typeof window !== 'undefined' ? window.location.origin : '');
     setGeneratingQRs(true);
     try {
       const next: Record<number, string> = {};
@@ -1688,7 +1922,7 @@ export function AdminDashboard({
   })();
 
   const baseShareUrl =
-    typeof window !== 'undefined' ? window.location.href.split('?')[0] : 'https://emerald-brew.cafe';
+    typeof window !== 'undefined' ? window.location.href.split('?')[0] : '';
 
   return (
     <div className="max-w-6xl mx-auto p-3 sm:p-4 md:p-6 pb-24 space-y-4 sm:space-y-5 overflow-x-clip">
@@ -1698,28 +1932,41 @@ export function AdminDashboard({
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>{isEn ? 'Shop Admin' : 'គ្រប់គ្រងហាង'}</span>
           </span>
-          <button
-            type="button"
-            onClick={() => onUpdateShopSettings({ ...shopSettings, isOpen: shopSettings.isOpen === false })}
-            className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold shrink-0 flex items-center gap-1.5 ${
-              shopSettings.isOpen !== false ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
-            }`}
-          >
-            <span
-              className={`w-2 h-2 rounded-full ${
-                shopSettings.isOpen !== false ? 'bg-emerald-200 animate-pulse' : 'bg-red-200'
-              }`}
-            />
-            <span>
-              {shopSettings.isOpen !== false
-                ? isEn
-                  ? 'Shop Open'
-                  : 'ហាងបើកលក់'
-                : isEn
-                  ? 'Shop Closed'
-                  : 'ហាងកំពុងបិទ'}
-            </span>
-          </button>
+          {(() => {
+            const sched = getShopScheduleStatus(shopSettings);
+            return (
+              <button
+                type="button"
+                onClick={() => onUpdateShopSettings({ ...shopSettings, isOpen: shopSettings.isOpen === false })}
+                className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold shrink-0 flex items-center gap-1.5 ${
+                  sched.isOpen ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
+                }`}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    sched.isOpen ? 'bg-emerald-200 animate-pulse' : 'bg-red-200'
+                  }`}
+                />
+                <span>
+                  {sched.isOpen
+                    ? sched.autoActive
+                      ? isEn
+                        ? `Open (${sched.openTime}–${sched.closeTime})`
+                        : `បើកលក់ (${sched.openTime}–${sched.closeTime})`
+                      : isEn
+                        ? 'Shop Open'
+                        : 'ហាងបើកលក់'
+                    : sched.reason === 'manual_closed'
+                      ? isEn
+                        ? 'Shop Closed'
+                        : 'ហាងកំពុងបិទ'
+                      : isEn
+                        ? `Auto Closed (${sched.openTime}–${sched.closeTime})`
+                        : `បិទតាមម៉ោង (${sched.openTime}–${sched.closeTime})`}
+                </span>
+              </button>
+            );
+          })()}
         </div>
         <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
           <button
@@ -1958,7 +2205,7 @@ export function AdminDashboard({
             ],
             [
               'feedback',
-              `${isEn ? 'Feedback' : 'មតិភ្ញៀវ'}${feedbackOrders.length > 0 ? ` (${feedbackOrders.length})` : ''}`,
+              `${isEn ? 'Feedback' : 'មតិភ្ញៀវ'}${feedbackEntries.length > 0 ? ` (${feedbackEntries.length})` : ''}`,
               <Star key="i-f" className="w-3.5 h-3.5" />,
             ],
             [
@@ -2354,10 +2601,22 @@ export function AdminDashboard({
                   </button>
                 ))}
               </div>
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={handleExportOrdersCsv}
+                  onClick={() => setShowSalesReport((v) => !v)}
+                  className={`text-xs px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1 border transition-colors ${
+                    showSalesReport
+                      ? 'bg-[#0D4A3E] text-white border-[#0D4A3E]'
+                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Sales Report' : 'របាយការណ៍លក់'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportOrdersCsv(reportOrders)}
                   className="text-xs text-[#0D4A3E] bg-[#E8F2EF] hover:bg-[#d5ebe4] px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1"
                 >
                   <Download className="w-3.5 h-3.5" />
@@ -2373,6 +2632,110 @@ export function AdminDashboard({
                 </button>
               </div>
             </div>
+
+            {showSalesReport && (
+              <div className="bg-white border border-slate-200 rounded-2xl p-3.5 sm:p-4 space-y-3 shadow-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl">
+                    {(
+                      [
+                        ['today', isEn ? 'Today' : 'ថ្ងៃនេះ'],
+                        ['7d', isEn ? '7 Days' : '7 ថ្ងៃ'],
+                        ['30d', isEn ? '30 Days' : '30 ថ្ងៃ'],
+                        ['all', isEn ? 'All Time' : 'ទាំងអស់'],
+                      ] as const
+                    ).map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setReportRange(id)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors ${
+                          reportRange === id
+                            ? 'bg-white text-[#0D4A3E] shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleExportOrdersCsv(reportOrders)}
+                      className="bg-[#0D4A3E] hover:bg-[#09352C] text-white text-[11px] font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>{isEn ? 'Export Orders CSV' : 'Export វិក្កយបត្រ CSV'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExportItemsCsv}
+                      className="bg-[#E8F2EF] hover:bg-[#d5ebe4] text-[#0D4A3E] text-[11px] font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>{isEn ? 'Export Best Sellers' : 'Export មុខទំនិញលក់ដាច់'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                  <div className="bg-slate-50 rounded-xl p-2.5">
+                    <p className="text-[10px] text-slate-500">{isEn ? 'Orders / Items' : 'វិក្កយបត្រ / កែវ'}</p>
+                    <p className="font-bold font-mono-num text-slate-900 mt-0.5">
+                      {salesReportSummary.count} · {salesReportSummary.totalCups}
+                    </p>
+                  </div>
+                  <div className="bg-[#E8F2EF]/60 rounded-xl p-2.5">
+                    <p className="text-[10px] text-[#0D4A3E]">{isEn ? 'Gross Revenue' : 'ចំណូលសរុប'}</p>
+                    <p className="font-bold font-mono-num text-[#0D4A3E] mt-0.5">
+                      ${salesReportSummary.revenue.toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="bg-slate-50 rounded-xl p-2.5">
+                    <p className="text-[10px] text-slate-500">{isEn ? 'Verified Paid' : 'ទូទាត់រួច'}</p>
+                    <p className="font-bold font-mono-num text-emerald-700 mt-0.5">
+                      ${salesReportSummary.paidRevenue.toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="bg-slate-50 rounded-xl p-2.5">
+                    <p className="text-[10px] text-slate-500">{isEn ? 'Avg Ticket / Disc.' : 'មធ្យម/វិក្កយបត្រ'}</p>
+                    <p className="font-bold font-mono-num text-slate-900 mt-0.5">
+                      ${salesReportSummary.avgTicket.toFixed(2)}
+                      {salesReportSummary.discountTotal > 0 && (
+                        <span className="text-[10px] text-slate-500 font-normal">
+                          {' '}
+                          (-${salesReportSummary.discountTotal.toFixed(2)})
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                {salesReportSummary.topItems.length > 0 && (
+                  <div className="pt-1 border-t border-slate-100 space-y-1.5">
+                    <p className="text-[11px] font-bold text-slate-700">
+                      {isEn ? 'Top Selling Items:' : 'មុខទំនិញលក់ដាច់ជាងគេ៖'}
+                    </p>
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
+                      {salesReportSummary.topItems.slice(0, 6).map((item, idx) => (
+                        <div
+                          key={item.name}
+                          className="bg-slate-50 rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px]"
+                        >
+                          <span className="truncate font-semibold text-slate-800">
+                            {idx + 1}. {item.name}
+                          </span>
+                          <span className="font-mono-num font-bold text-[#0D4A3E] shrink-0">
+                            {item.qty}x · ${item.sales.toFixed(2)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -2837,13 +3200,13 @@ export function AdminDashboard({
               <div>
                 <h3 className="font-bold text-sm text-[#0D4A3E]">
                   {isEn
-                    ? `Customer Ratings & Reviews (${feedbackOrders.length})`
-                    : `ការវាយតម្លៃ & មតិយោបល់ភ្ញៀវ (${feedbackOrders.length})`}
+                    ? `Customer Ratings & Reviews (${feedbackEntries.length})`
+                    : `ការវាយតម្លៃ & មតិយោបល់ភ្ញៀវ (${feedbackEntries.length})`}
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
                   {isEn
-                    ? 'Collected from orders marked as Completed'
-                    : 'ប្រមូលបានពីការកម្ម៉ង់ដែលបានបញ្ចប់ (Completed)'}
+                    ? 'From storefront reviews, receipts, and completed orders'
+                    : 'ប្រមូលបានពីការវាយតម្លៃលើ Website, វិក្កយបត្រ និងការកម្ម៉ង់'}
                 </p>
               </div>
             </div>
@@ -2852,12 +3215,12 @@ export function AdminDashboard({
                 {isEn ? 'Average Score' : 'ពិន្ទុមធ្យម (Average)'}
               </p>
               <p className="text-lg font-bold font-mono-num text-[#0D4A3E]">
-                ★ {feedbackOrders.length ? averageRating.toFixed(1) : '0.0'} / 5.0
+                ★ {feedbackEntries.length ? averageRating.toFixed(1) : '0.0'} / 5.0
               </p>
             </div>
           </div>
 
-          {!feedbackOrders.length ? (
+          {!feedbackEntries.length ? (
             <div className="bg-white p-12 rounded-2xl border border-slate-200 text-center space-y-2">
               <MessageSquare className="w-8 h-8 text-slate-300 mx-auto" />
               <p className="text-sm font-semibold text-slate-500">
@@ -2865,37 +3228,27 @@ export function AdminDashboard({
               </p>
               <p className="text-xs text-slate-400">
                 {isEn
-                  ? 'Once an order is marked Completed, customers can submit star ratings and comments from their Profile.'
-                  : 'ពេលការកម្ម៉ង់ត្រូវបានដាក់ជា «បានបញ្ចប់ (Completed)» ភ្ញៀវអាចផ្ញើផ្កាយ និងមតិក្នុងប្រវត្តិគណនីរបស់ពួកគេ។'}
+                  ? 'Customers can rate directly from the website Reviews section, their receipt, or Profile.'
+                  : 'ភ្ញៀវអាចផ្ញើផ្កាយ និងមតិយោបល់ដោយផ្ទាល់នៅលើផ្ទាំង Website, លើវិក្កយបត្រ ឬក្នុងប្រវត្តិគណនី។'}
               </p>
             </div>
           ) : (
             <div className="grid md:grid-cols-2 gap-3.5">
-              {feedbackOrders.map((o) => {
-                const fb = o.feedback!;
-                const dateLabel = fb.submittedAt
-                  ? new Date(fb.submittedAt).toLocaleString(isEn ? 'en-US' : 'km-KH', {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })
-                  : o.timestamp;
-                return (
-                  <div
-                    key={`fb-${o.id}`}
-                    className="bg-white p-4 rounded-2xl border border-slate-200 space-y-2.5 shadow-sm"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="font-bold text-sm text-slate-900 truncate">
-                          {fb.customerName || o.customer?.name || (isEn ? 'Customer' : 'ភ្ញៀវ')}
-                        </p>
-                        <p className="text-[11px] text-slate-500 font-mono-num">
-                          {o.id} · {dateLabel}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-0.5 bg-amber-50 px-2 py-1 rounded-lg border border-amber-200/70 shrink-0">
+              {feedbackEntries.map((fb) => (
+                <div
+                  key={fb.key}
+                  className="bg-white p-4 rounded-2xl border border-slate-200 space-y-2.5 shadow-sm"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-bold text-sm text-slate-900 truncate">{fb.customerName}</p>
+                      <p className="text-[11px] text-slate-500 font-mono-num">
+                        {fb.orderId ? `${fb.orderId} · ` : isEn ? 'Shop Review · ' : 'វាយតម្លៃហាង · '}
+                        {fb.dateLabel}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-0.5 bg-amber-50 px-2 py-1 rounded-lg border border-amber-200/70">
                         {[1, 2, 3, 4, 5].map((s) => (
                           <Star
                             key={s}
@@ -2905,25 +3258,46 @@ export function AdminDashboard({
                           />
                         ))}
                       </div>
+                      {fb.source === 'storefront' && fb.reviewId && onDeleteReview && (
+                        <button
+                          type="button"
+                          onClick={() => void onDeleteReview(fb.reviewId!)}
+                          title={isEn ? 'Delete review' : 'លុបការវាយតម្លៃ'}
+                          className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-600"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
-                    {fb.comment ? (
-                      <p className="text-xs text-slate-700 bg-slate-50 p-3 rounded-xl leading-relaxed">
-                        “{fb.comment}”
-                      </p>
-                    ) : (
-                      <p className="text-xs text-slate-400 italic">
-                        {isEn
-                          ? `No written comment (${fb.rating}/5 stars)`
-                          : `គ្មានមតិជាអក្សរ (ផ្តល់ពិន្ទុផ្កាយ ${fb.rating}/5)`}
-                      </p>
-                    )}
+                  </div>
+                  {fb.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 text-[11px] font-semibold text-[#0D4A3E]">
+                      {fb.tags.map((tg, i) => (
+                        <span key={i} className="bg-[#E8F2EF] px-2 py-0.5 rounded-md">
+                          {tg}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {fb.comment ? (
+                    <p className="text-xs text-slate-700 bg-slate-50 p-3 rounded-xl leading-relaxed">
+                      “{fb.comment}”
+                    </p>
+                  ) : (
+                    <p className="text-xs text-slate-400 italic">
+                      {isEn
+                        ? `No written comment (${fb.rating}/5 stars)`
+                        : `គ្មានមតិជាអក្សរ (ផ្តល់ពិន្ទុផ្កាយ ${fb.rating}/5)`}
+                    </p>
+                  )}
+                  {fb.itemsSummary && (
                     <p className="text-[11px] text-slate-500 truncate">
                       {isEn ? 'Items: ' : 'ទំនិញ៖ '}
-                      {o.items.map((it) => `${it.qty}x ${it.name}`).join(', ')}
+                      {fb.itemsSummary}
                     </p>
-                  </div>
-                );
-              })}
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </motion.div>
@@ -4136,11 +4510,23 @@ export function AdminDashboard({
           transition={{ duration: 0.2 }}
           className="bg-white p-4 rounded-2xl border border-slate-200"
         >
-          <h3 className="font-bold text-sm mb-3 text-[#0D4A3E]">
-            {isEn
-              ? `Registered Members (${displayedMembers.length})`
-              : `បញ្ជីភ្ញៀវចុះឈ្មោះផ្លូវការ (${displayedMembers.length})`}
-          </h3>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 className="font-bold text-sm text-[#0D4A3E]">
+              {isEn
+                ? `Registered Members (${displayedMembers.length})`
+                : `បញ្ជីភ្ញៀវចុះឈ្មោះផ្លូវការ (${displayedMembers.length})`}
+            </h3>
+            {displayedMembers.length > 0 && (
+              <button
+                type="button"
+                onClick={handleExportMembersCsv}
+                className="text-xs text-[#0D4A3E] bg-[#E8F2EF] hover:bg-[#d5ebe4] px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{isEn ? 'Export Members CSV' : 'ទាញយកបញ្ជីសមាជិក CSV'}</span>
+              </button>
+            )}
+          </div>
           {!displayedMembers.length ? (
             <p className="text-slate-400 text-sm text-center py-8">
               {isEn ? 'No registered members yet' : 'មិនទាន់មានសមាជិក'}
@@ -4163,16 +4549,41 @@ export function AdminDashboard({
                       {m.telegramVerified ? '✓ TG Verified' : ''}
                     </p>
                   </div>
-                  {(m.telegramUsername || m.tg) && (
-                    <a
-                      href={`https://t.me/${encodeURIComponent((m.telegramUsername || m.tg || '').replace('@', ''))}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="bg-sky-600 text-white px-3 py-1.5 rounded-xl text-xs font-bold"
-                    >
-                      {isEn ? 'Chat Telegram' : 'ឆាត Telegram'}
-                    </a>
-                  )}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl p-1">
+                      <button
+                        type="button"
+                        disabled={adjustingMemberId === String(m.id) || (m.points || 0) <= 0}
+                        onClick={() => handleAdjustMemberPoints(m.id, -1)}
+                        className="w-6 h-6 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 text-slate-700 font-bold text-xs flex items-center justify-center border border-slate-200"
+                        title={isEn ? 'Remove 1 point' : 'ដក 1 ★'}
+                      >
+                        -1
+                      </button>
+                      <span className="text-[11px] font-mono-num font-bold px-1.5 text-amber-700">
+                        {m.points || 0} ★
+                      </span>
+                      <button
+                        type="button"
+                        disabled={adjustingMemberId === String(m.id)}
+                        onClick={() => handleAdjustMemberPoints(m.id, 1)}
+                        className="w-6 h-6 rounded-lg bg-white hover:bg-emerald-50 disabled:opacity-40 text-[#0D4A3E] font-bold text-xs flex items-center justify-center border border-slate-200"
+                        title={isEn ? 'Add 1 point' : 'ថែម 1 ★'}
+                      >
+                        +1
+                      </button>
+                    </div>
+                    {(m.telegramUsername || m.tg) && (
+                      <a
+                        href={`https://t.me/${encodeURIComponent((m.telegramUsername || m.tg || '').replace('@', ''))}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="bg-sky-600 text-white px-3 py-1.5 rounded-xl text-xs font-bold"
+                      >
+                        {isEn ? 'Chat Telegram' : 'ឆាត Telegram'}
+                      </a>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -4668,12 +5079,176 @@ export function AdminDashboard({
                 />
               </div>
             </div>
+
+            {/* Loyalty Points Program Settings */}
+            <div className="bg-[#F4F8F6] border border-[#0D4A3E]/15 p-3 rounded-xl space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-[#0D4A3E] flex items-center gap-1.5">
+                  <Gift className="w-4 h-4 text-amber-500 shrink-0" />
+                  <span>
+                    {isEn
+                      ? 'Member Loyalty Points (Buy N, Get Reward)'
+                      : 'ប្រព័ន្ធសន្សំពិន្ទុសមាជិក (ទិញគ្រប់កែវ ប្តូរកាហ្វេហ្វ្រី)'}
+                  </span>
+                </span>
+                <label className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draft.loyaltyEnabled !== false}
+                    onChange={(e) => setDraft({ ...draft, loyaltyEnabled: e.target.checked })}
+                    className="rounded text-[#0D4A3E]"
+                  />
+                  <span>{draft.loyaltyEnabled !== false ? (isEn ? 'Active' : 'បើកដំណើរការ') : (isEn ? 'Off' : 'បិទ')}</span>
+                </label>
+              </div>
+              {draft.loyaltyEnabled !== false && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-600 block">
+                      {isEn ? 'Points Required (★)' : 'ចំនួនពិន្ទុត្រូវការ (★)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={draft.loyaltyRewardPoints ?? 10}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          loyaltyRewardPoints: Math.min(100, Math.max(1, Number(e.target.value) || 10)),
+                        })
+                      }
+                      className="w-full mt-1 px-2.5 py-1.5 border border-slate-200 bg-white rounded-xl text-xs font-bold font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-600 block">
+                      {isEn ? 'Reward Discount ($)' : 'ទឹកប្រាក់ប្តូររង្វាន់ ($)'}
+                    </label>
+                    <input
+                      type="number"
+                      step="0.25"
+                      min={0.25}
+                      max={50}
+                      value={draft.loyaltyRewardAmountUsd ?? 2.5}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          loyaltyRewardAmountUsd: Math.min(50, Math.max(0.25, Number(e.target.value) || 2.5)),
+                        })
+                      }
+                      className="w-full mt-1 px-2.5 py-1.5 border border-slate-200 bg-white rounded-xl text-xs font-bold font-mono-num"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
             <h3 className="font-bold text-sm text-[#0D4A3E] border-b border-slate-100 pb-2">
               {isEn ? '3. Shop Location, Tables & Delivery Fees' : '៣. ទីតាំងហាង, ចំនួនតុ & តម្លៃដឹកជញ្ជូន'}
             </h3>
+            <div className="bg-[#F4F8F6] border border-[#0D4A3E]/15 p-3 rounded-xl space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-[#0D4A3E] flex items-center gap-1.5">
+                  <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>
+                    {isEn
+                      ? 'Auto Open & Close Schedule (Cambodia Time)'
+                      : 'ម៉ោងបើក-បិទហាងស្វ័យប្រវត្តិ (ម៉ោងកម្ពុជា UTC+7)'}
+                  </span>
+                </span>
+                <label className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(draft.autoScheduleEnabled)}
+                    onChange={(e) => setDraft({ ...draft, autoScheduleEnabled: e.target.checked })}
+                    className="rounded text-[#0D4A3E]"
+                  />
+                  <span>{draft.autoScheduleEnabled ? (isEn ? 'Enabled' : 'បើកស្វ័យប្រវត្តិ') : (isEn ? 'Manual' : 'បើក-បិទដោយដៃ')}</span>
+                </label>
+              </div>
+              {draft.autoScheduleEnabled && (
+                <div className="space-y-2 pt-1">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block">
+                        {isEn ? 'Open Time' : 'ម៉ោងបើកលក់'}
+                      </label>
+                      <input
+                        type="time"
+                        value={draft.openTime || '07:00'}
+                        onChange={(e) => setDraft({ ...draft, openTime: e.target.value || '07:00' })}
+                        className="w-full mt-1 px-2.5 py-1.5 border border-slate-200 bg-white rounded-xl text-xs font-bold font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block">
+                        {isEn ? 'Close Time' : 'ម៉ោងបិទហាង'}
+                      </label>
+                      <input
+                        type="time"
+                        value={draft.closeTime || '20:30'}
+                        onChange={(e) => setDraft({ ...draft, closeTime: e.target.value || '20:30' })}
+                        className="w-full mt-1 px-2.5 py-1.5 border border-slate-200 bg-white rounded-xl text-xs font-bold font-mono-num"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-semibold text-slate-600 mb-1">
+                      {isEn ? 'Weekly Days Off (tap to close all day):' : 'ថ្ងៃឈប់សម្រាកប្រចាំសប្តាហ៍ (ចុចបើសិនជាបិទពេញមួយថ្ងៃ)៖'}
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      {(isEn
+                        ? [
+                            [0, 'Sun'],
+                            [1, 'Mon'],
+                            [2, 'Tue'],
+                            [3, 'Wed'],
+                            [4, 'Thu'],
+                            [5, 'Fri'],
+                            [6, 'Sat'],
+                          ]
+                        : [
+                            [0, 'អាទិត្យ'],
+                            [1, 'ច័ន្ទ'],
+                            [2, 'អង្គារ'],
+                            [3, 'ពុធ'],
+                            [4, 'ព្រហ'],
+                            [5, 'សុក្រ'],
+                            [6, 'សៅរ៍'],
+                          ]
+                      ).map(([dIdx, dLabel]) => {
+                        const dayNum = Number(dIdx);
+                        const closedList = Array.isArray(draft.closedDays) ? draft.closedDays : [];
+                        const isClosedDay = closedList.includes(dayNum);
+                        return (
+                          <button
+                            key={dayNum}
+                            type="button"
+                            onClick={() => {
+                              const next = isClosedDay
+                                ? closedList.filter((x) => x !== dayNum)
+                                : [...closedList, dayNum];
+                              setDraft({ ...draft, closedDays: next });
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                              isClosedDay
+                                ? 'bg-red-600 text-white border-red-600'
+                                : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            {dLabel}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="bg-[#F4F8F6] border border-[#0D4A3E]/15 p-3 rounded-xl flex items-center justify-between gap-2">
               <div>
                 <label className="text-xs font-bold text-[#0D4A3E] block">

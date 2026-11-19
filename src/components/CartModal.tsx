@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Clock,
   Download,
+  Gift,
   Lock,
   MapPin,
   Minus,
@@ -28,6 +29,7 @@ import {
   compressImageFile,
   computeDeliveryFee,
   fetchWithTimeout,
+  getShopScheduleStatus,
   handleImgFallback,
   resolveAssetUrl,
   safeDel,
@@ -64,6 +66,9 @@ interface CartModalProps {
   initialTableNum: number;
   isTableLocked?: boolean;
   maxTableCount?: number;
+  isShopOpenEffective?: boolean;
+  shopClosedMessage?: string;
+  onOpenAuth?: () => void;
   onChangeTableNum?: (n: number) => void;
   onClose: () => void;
   onChangeOrderType: (t: OrderType) => void;
@@ -73,6 +78,8 @@ interface CartModalProps {
     sendTg: boolean;
     payment: PaymentMethod;
     promoDisc: number;
+    loyaltyPointsUsed?: number;
+    loyaltyDisc?: number;
     fee: number;
     subtotal: number;
     grandTotal: number;
@@ -142,6 +149,9 @@ export function CartModal({
   initialTableNum,
   isTableLocked = false,
   maxTableCount = 10,
+  isShopOpenEffective,
+  shopClosedMessage,
+  onOpenAuth,
   onChangeTableNum,
   onClose,
   onChangeOrderType,
@@ -162,6 +172,7 @@ export function CartModal({
 
   const [promoInput, setPromoInput] = useState(() => savedCheckout?.promoInput || '');
   const [appliedPromoPct, setAppliedPromoPct] = useState(() => Number(savedCheckout?.appliedPromoPct) || 0);
+  const [useLoyaltyReward, setUseLoyaltyReward] = useState(false);
   const [payment, setPayment] = useState<PaymentMethod>(() =>
     savedCheckout?.payment === 'KHQR / ABA' ? 'KHQR / ABA' : 'Cash'
   );
@@ -263,11 +274,37 @@ export function CartModal({
     [isTableLocked, maxTableCount, onChangeTableNum]
   );
 
+  const loyaltyEnabled = shopSettings.loyaltyEnabled !== false;
+  const loyaltyRewardPts = Math.max(1, Math.round(Number(shopSettings.loyaltyRewardPoints) || 10));
+  const loyaltyRewardUsd = Math.max(0.25, Number(shopSettings.loyaltyRewardAmountUsd) || 2.5);
+  const canRedeemLoyalty = Boolean(
+    loyaltyEnabled && currentMember && (Number(currentMember.points) || 0) >= loyaltyRewardPts
+  );
+
+  useEffect(() => {
+    if (!canRedeemLoyalty && useLoyaltyReward) {
+      setUseLoyaltyReward(false);
+    }
+  }, [canRedeemLoyalty, useLoyaltyReward]);
+
+  const scheduleStatus = useMemo(() => getShopScheduleStatus(shopSettings), [shopSettings]);
+  const effectiveShopOpen =
+    typeof isShopOpenEffective === 'boolean' ? isShopOpenEffective : scheduleStatus.isOpen;
+
   const subtotal = cart.reduce((s, i) => s + i.unitPrice * i.qty, 0);
   const promoDisc = subtotal * (appliedPromoPct / 100);
-  const computedFee = computeDeliveryFee(shopSettings, distanceKm, Math.max(0, subtotal - promoDisc));
+  const loyaltyDisc =
+    useLoyaltyReward && canRedeemLoyalty
+      ? Number(Math.min(loyaltyRewardUsd, Math.max(0, subtotal - promoDisc)).toFixed(2))
+      : 0;
+  const loyaltyPointsUsed = loyaltyDisc > 0 ? loyaltyRewardPts : 0;
+  const computedFee = computeDeliveryFee(
+    shopSettings,
+    distanceKm,
+    Math.max(0, subtotal - promoDisc - loyaltyDisc)
+  );
   const fee = orderType === 'delivery' ? computedFee : 0;
-  const grandTotal = Math.max(0, subtotal - promoDisc + fee);
+  const grandTotal = Math.max(0, subtotal - promoDisc - loyaltyDisc + fee);
 
   const dynamicKhqr = useMemo(
     () =>
@@ -311,6 +348,7 @@ export function CartModal({
   useEffect(() => {
     if (cart.length === 0) {
       safeDel(CHECKOUT_STORAGE_KEY);
+      setUseLoyaltyReward(false);
       resetPaymentSession();
       setBillMeta({ billNumber: makeBillNonce(), timestampMs: Date.now() });
     }
@@ -741,8 +779,11 @@ export function CartModal({
       onToast(isEn ? 'Cart is empty!' : 'កន្ត្រកទំនិញទទេ!');
       return;
     }
-    if (shopSettings.isOpen === false) {
-      onToast(isEn ? 'Sorry! The shop is temporarily closed.' : 'សូមអភ័យទោស! ហាងកំពុងបិទបណ្តោះអាសន្ន។');
+    if (!effectiveShopOpen) {
+      onToast(
+        shopClosedMessage ||
+          (isEn ? 'Sorry! The shop is currently closed.' : 'សូមអភ័យទោស! ហាងកំពុងបិទបណ្តោះអាសន្ន។')
+      );
       return;
     }
 
@@ -771,6 +812,7 @@ export function CartModal({
         sendTg,
         payment,
         promoDisc,
+        ...(loyaltyPointsUsed > 0 ? { loyaltyPointsUsed, loyaltyDisc } : {}),
         fee: effectiveOrderType === 'delivery' ? fee : 0,
         subtotal,
         grandTotal,
@@ -803,6 +845,7 @@ export function CartModal({
         safeDel(CHECKOUT_STORAGE_KEY);
         setAppliedPromoPct(0);
         setPromoInput('');
+        setUseLoyaltyReward(false);
         resetPaymentSession();
         setBillMeta({ billNumber: makeBillNonce(), timestampMs: Date.now() });
       }
@@ -889,21 +932,136 @@ export function CartModal({
               ))}
             </div>
 
-            <div className="mt-3 flex gap-1.5">
-              <input
-                type="text"
-                value={promoInput}
-                onChange={(e) => setPromoInput(e.target.value)}
-                placeholder={isEn ? 'Promo Code' : 'លេខកូដបញ្ចុះតម្លៃ (Promo Code)'}
-                className="flex-1 border border-slate-200 rounded-xl px-3 py-2 text-base sm:text-xs uppercase focus:outline-none focus:border-[#0D4A3E]"
-              />
-              <button
-                type="button"
-                onClick={handleApplyPromo}
-                className="bg-slate-900 text-white px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap"
-              >
-                {isEn ? 'Apply' : 'ប្រើកូដ'}
-              </button>
+            <div className="mt-3 space-y-1.5">
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={promoInput}
+                  onChange={(e) => setPromoInput(e.target.value)}
+                  placeholder={isEn ? 'Promo Code' : 'លេខកូដបញ្ចុះតម្លៃ (Promo Code)'}
+                  className="flex-1 border border-slate-200 rounded-xl px-3 py-2 text-base sm:text-xs uppercase focus:outline-none focus:border-[#0D4A3E]"
+                />
+                <button
+                  type="button"
+                  onClick={handleApplyPromo}
+                  className="bg-slate-900 text-white px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap"
+                >
+                  {isEn ? 'Apply' : 'ប្រើកូដ'}
+                </button>
+              </div>
+              {shopSettings.promoCode && shopSettings.promoPercent > 0 && (
+                <div className="flex items-center justify-between gap-2 text-[11px]">
+                  {appliedPromoPct > 0 ? (
+                    <span className="text-emerald-700 font-bold flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {isEn
+                          ? `Code ${shopSettings.promoCode} applied (-${appliedPromoPct}%)`
+                          : `បានប្រើកូដ ${shopSettings.promoCode} (-${appliedPromoPct}%)`}
+                      </span>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPromoInput(shopSettings.promoCode);
+                        setAppliedPromoPct(shopSettings.promoPercent);
+                        onToast(
+                          isEn
+                            ? `Promo applied: ${shopSettings.promoPercent}% off!`
+                            : `បញ្ចុះតម្លៃ ${shopSettings.promoPercent}% ជោគជ័យ!`
+                        );
+                      }}
+                      className="text-[#0D4A3E] hover:text-[#09352C] font-bold underline underline-offset-2 flex items-center gap-1"
+                    >
+                      <Sparkles className="w-3 h-3 shrink-0" />
+                      <span>
+                        {isEn
+                          ? `Tap to apply ${shopSettings.promoCode} (-${shopSettings.promoPercent}%)`
+                          : `ចុចប្រើកូដ ${shopSettings.promoCode} (-${shopSettings.promoPercent}%) ភ្លាមៗ`}
+                      </span>
+                    </button>
+                  )}
+                  {appliedPromoPct > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAppliedPromoPct(0);
+                        setPromoInput('');
+                      }}
+                      className="text-slate-400 hover:text-red-600 font-semibold"
+                    >
+                      {isEn ? 'Remove' : 'ដកចេញ'}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {loyaltyEnabled && (
+                <div className="pt-1">
+                  {currentMember ? (
+                    canRedeemLoyalty ? (
+                      <button
+                        type="button"
+                        onClick={() => setUseLoyaltyReward((v) => !v)}
+                        className={`w-full border rounded-xl px-3 py-2 text-xs font-bold flex items-center justify-between gap-2 transition-colors ${
+                          useLoyaltyReward
+                            ? 'bg-emerald-50 border-emerald-500 text-emerald-900'
+                            : 'bg-amber-50 border-amber-300 text-amber-950 hover:bg-amber-100'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <Gift className="w-4 h-4 text-amber-600 shrink-0" />
+                          <span className="truncate">
+                            {useLoyaltyReward
+                              ? isEn
+                                ? `Redeemed ${loyaltyRewardPts} ★ (-$${loyaltyDisc.toFixed(2)})`
+                                : `បានប្រើ ${loyaltyRewardPts} ★ (-$${loyaltyDisc.toFixed(2)})`
+                              : isEn
+                                ? `Redeem ${loyaltyRewardPts} ★ for $${loyaltyRewardUsd.toFixed(2)} off`
+                                : `ប្តូរ ${loyaltyRewardPts} ★ យកបញ្ចុះតម្លៃ $${loyaltyRewardUsd.toFixed(2)}`}
+                          </span>
+                        </span>
+                        <span className="text-[11px] font-mono-num shrink-0">
+                          {useLoyaltyReward ? (isEn ? 'Applied ✓' : 'បានប្រើ ✓') : `${currentMember.points || 0} ★`}
+                        </span>
+                      </button>
+                    ) : (
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 flex items-center justify-between gap-2 text-[11px] text-slate-600">
+                        <span className="flex items-center gap-1.5 truncate">
+                          <Gift className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                          <span className="truncate">
+                            {isEn
+                              ? `Points: ${currentMember.points || 0}/${loyaltyRewardPts} ★ (+${cart.reduce((s, i) => s + i.qty, 0)} ★ this order)`
+                              : `ពិន្ទុ៖ ${currentMember.points || 0}/${loyaltyRewardPts} ★ (ទទួលបន្ថែម +${cart.reduce((s, i) => s + i.qty, 0)} ★)`}
+                          </span>
+                        </span>
+                        <span className="font-mono-num font-bold text-[#0D4A3E] shrink-0">
+                          {Math.min(100, Math.round(((currentMember.points || 0) / loyaltyRewardPts) * 100))}%
+                        </span>
+                      </div>
+                    )
+                  ) : (
+                    onOpenAuth && (
+                      <button
+                        type="button"
+                        onClick={onOpenAuth}
+                        className="w-full text-left bg-[#F4F8F6] hover:bg-[#E8F2EF] border border-emerald-900/10 rounded-xl px-3 py-2 text-[11px] font-semibold text-[#0D4A3E] flex items-center justify-between gap-2 transition-colors"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <Gift className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                          <span className="truncate">
+                            {isEn
+                              ? `Sign in to earn & redeem ${loyaltyRewardPts} ★ ($${loyaltyRewardUsd.toFixed(2)} reward)`
+                              : `ចូលគណនីដើម្បីសន្សំពិន្ទុ (${loyaltyRewardPts} ★ = បញ្ចុះ $${loyaltyRewardUsd.toFixed(2)})`}
+                          </span>
+                        </span>
+                        <span className="underline shrink-0">{isEn ? 'Sign in' : 'ចូលគណនី'}</span>
+                      </button>
+                    )
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="mt-3 pt-3 border-t border-slate-100 grid grid-cols-2 gap-2">
@@ -1585,6 +1743,16 @@ export function CartModal({
                   <span className="font-mono-num">-${promoDisc.toFixed(2)}</span>
                 </div>
               )}
+              {loyaltyDisc > 0 && (
+                <div className="flex justify-between text-emerald-700 font-bold">
+                  <span>
+                    {isEn
+                      ? `Loyalty Reward (${loyaltyPointsUsed} ★):`
+                      : `ប្តូរពិន្ទុសមាជិក (${loyaltyPointsUsed} ★)៖`}
+                  </span>
+                  <span className="font-mono-num">-${loyaltyDisc.toFixed(2)}</span>
+                </div>
+              )}
               {orderType === 'delivery' && (
                 <div className="flex justify-between">
                   <span>{isEn ? 'Delivery Fee:' : 'ថ្លៃដឹកជញ្ជូន៖'}</span>
@@ -1605,18 +1773,19 @@ export function CartModal({
               </div>
             </div>
 
-            {shopSettings.isOpen === false && (
+            {!effectiveShopOpen && (
               <p className="mt-2.5 text-[11px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2 flex items-center gap-1.5">
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-red-600" />
                 <span>
-                  {isEn
-                    ? 'The shop is currently closed — checkout will reopen once the shop opens.'
-                    : 'ហាងកំពុងបិទបណ្តោះអាសន្ន — មិនទាន់អាចបញ្ជាក់ការកម្ម៉ង់បានទេ។'}
+                  {shopClosedMessage ||
+                    (isEn
+                      ? 'The shop is currently closed — checkout will reopen once the shop opens.'
+                      : 'ហាងកំពុងបិទបណ្តោះអាសន្ន — មិនទាន់អាចបញ្ជាក់ការកម្ម៉ង់បានទេ។')}
                 </span>
               </p>
             )}
 
-            {isKhqrLocked && shopSettings.isOpen !== false && (
+            {isKhqrLocked && effectiveShopOpen && (
               <p className="mt-2.5 text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center gap-1.5">
                 <Lock className="w-3.5 h-3.5 shrink-0 text-amber-700" />
                 <span>
@@ -1630,13 +1799,13 @@ export function CartModal({
             <div className="mt-3 space-y-2">
               <button
                 type="button"
-                disabled={submitting || isKhqrLocked || shopSettings.isOpen === false}
+                disabled={submitting || isKhqrLocked || !effectiveShopOpen}
                 onClick={() => handleSubmit(false)}
                 className="w-full bg-[#0D4A3E] hover:bg-[#09352C] disabled:bg-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed text-white font-bold py-3 rounded-2xl text-sm transition-colors active:scale-[0.98] flex items-center justify-center gap-1.5"
               >
                 {isKhqrLocked && <Lock className="w-3.5 h-3.5" />}
                 <span>
-                  {shopSettings.isOpen === false
+                  {!effectiveShopOpen
                     ? isEn
                       ? 'Shop Closed'
                       : 'ហាងកំពុងបិទ'
@@ -1651,7 +1820,7 @@ export function CartModal({
               </button>
               <button
                 type="button"
-                disabled={submitting || isKhqrLocked || shopSettings.isOpen === false}
+                disabled={submitting || isKhqrLocked || !effectiveShopOpen}
                 onClick={() => handleSubmit(true)}
                 className="w-full bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-colors active:scale-[0.98]"
               >

@@ -49,8 +49,8 @@ export const DEFAULT_MENU: MenuItem[] = [
   {
     id: 1,
     type: 'drink',
-    name: 'ឡាតេទឹកកក Emerald',
-    nameEn: 'Iced Latte Emerald',
+    name: 'ឡាតេទឹកកកពិសេស (Iced Latte)',
+    nameEn: 'Signature Iced Latte',
     price: 2.5,
     discount: 0,
     category: 'Coffee',
@@ -136,14 +136,14 @@ export const DEFAULT_CATEGORY_PRESETS: CategoryPreset[] = [
 ];
 
 export const DEFAULT_SETTINGS: ShopSettings = {
-  brandTitle: 'EMERALD BREW CAFE',
+  brandTitle: 'SUAN COFFEE',
   shopName: 'កាហ្វេពិសេស និងអាហារស្រស់ៗប្រចាំថ្ងៃ',
   logoImg: CAFE_ASSETS.logoEmblem,
   bannerImg: CAFE_ASSETS.heroBanner,
   khqrImg: '',
   khqrBakongId: '',
   khqrPayload: '',
-  khqrMerchantName: 'EMERALD BREW CAFE',
+  khqrMerchantName: 'SUAN COFFEE',
   khqrCurrency: 'USD',
   khqrKhrRate: 4100,
   bankInfo: '',
@@ -170,6 +170,13 @@ export const DEFAULT_SETTINGS: ShopSettings = {
   unpaidVoiceAlertText: '',
   unpaidAutoAlertEnabled: false,
   unpaidAlertMinutes: 10,
+  autoScheduleEnabled: false,
+  openTime: '07:00',
+  closeTime: '20:30',
+  closedDays: [],
+  loyaltyEnabled: true,
+  loyaltyRewardPoints: 10,
+  loyaltyRewardAmountUsd: 2.5,
 };
 
 const memoryFallback: Record<string, unknown> = {};
@@ -369,6 +376,27 @@ export function normalizeShopSettings(raw: unknown, fallback: ShopSettings = DEF
       typeof merged.unpaidVoiceAlertText === 'string' ? merged.unpaidVoiceAlertText.slice(0, 260) : '',
     unpaidAutoAlertEnabled: Boolean(merged.unpaidAutoAlertEnabled),
     unpaidAlertMinutes: Math.min(60, Math.max(1, Math.round(Number(merged.unpaidAlertMinutes) || 10))),
+    autoScheduleEnabled: Boolean(merged.autoScheduleEnabled),
+    openTime:
+      typeof merged.openTime === 'string' && /^\d{2}:\d{2}$/.test(merged.openTime.trim())
+        ? merged.openTime.trim()
+        : '07:00',
+    closeTime:
+      typeof merged.closeTime === 'string' && /^\d{2}:\d{2}$/.test(merged.closeTime.trim())
+        ? merged.closeTime.trim()
+        : '20:30',
+    closedDays: Array.isArray(merged.closedDays)
+      ? Array.from(
+          new Set(
+            merged.closedDays
+              .map((d) => Number(d))
+              .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+          )
+        )
+      : [],
+    loyaltyEnabled: merged.loyaltyEnabled !== false,
+    loyaltyRewardPoints: Math.min(100, Math.max(1, Math.round(Number(merged.loyaltyRewardPoints) || 10))),
+    loyaltyRewardAmountUsd: Math.min(50, Math.max(0.25, Number(merged.loyaltyRewardAmountUsd) || 2.5)),
   };
 }
 
@@ -451,6 +479,8 @@ export function normalizeOrders(raw: unknown): Order[] {
         paymentSlipImg: typeof o.paymentSlipImg === 'string' ? o.paymentSlipImg : undefined,
         subtotal: Number(o.subtotal) || 0,
         promoDisc: Number(o.promoDisc) || 0,
+        ...(Number(o.loyaltyPointsUsed) > 0 ? { loyaltyPointsUsed: Math.round(Number(o.loyaltyPointsUsed)) } : {}),
+        ...(Number(o.loyaltyDisc) > 0 ? { loyaltyDisc: Number(o.loyaltyDisc) } : {}),
         fee: Number(o.fee) || 0,
         grandTotal: Number(o.grandTotal) || 0,
         customer: {
@@ -484,6 +514,90 @@ export function getDiscountedPrice(item: Pick<MenuItem, 'price' | 'discount'>): 
   const p = Number(item.price) || 0;
   const d = parseFloat(String(item.discount)) || 0;
   return p * (1 - d / 100);
+}
+
+export function getPhnomPenhClock(now: Date = new Date()): { weekday: number; minutes: number } {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Phnom_Penh',
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+    const wdStr = parts.find((p) => p.type === 'weekday')?.value || '';
+    const wdMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    const hh = parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10) % 24;
+    const mm = parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10) % 60;
+    return {
+      weekday: wdMap[wdStr] ?? now.getDay(),
+      minutes: hh * 60 + mm,
+    };
+  } catch {
+    // UTC+7 fallback
+    const utcMs = now.getTime() + 7 * 60 * 60 * 1000;
+    const d = new Date(utcMs);
+    return {
+      weekday: d.getUTCDay(),
+      minutes: d.getUTCHours() * 60 + d.getUTCMinutes(),
+    };
+  }
+}
+
+export function getShopScheduleStatus(
+  settings: Pick<ShopSettings, 'isOpen' | 'autoScheduleEnabled' | 'openTime' | 'closeTime' | 'closedDays'>,
+  now: Date = new Date()
+): {
+  isOpen: boolean;
+  reason: 'manual_closed' | 'day_off' | 'outside_hours' | 'open';
+  openTime: string;
+  closeTime: string;
+  autoActive: boolean;
+} {
+  const openTime =
+    typeof settings.openTime === 'string' && /^\d{2}:\d{2}$/.test(settings.openTime)
+      ? settings.openTime
+      : '07:00';
+  const closeTime =
+    typeof settings.closeTime === 'string' && /^\d{2}:\d{2}$/.test(settings.closeTime)
+      ? settings.closeTime
+      : '20:30';
+  const autoActive = Boolean(settings.autoScheduleEnabled);
+
+  if (settings.isOpen === false) {
+    return { isOpen: false, reason: 'manual_closed', openTime, closeTime, autoActive };
+  }
+  if (!autoActive) {
+    return { isOpen: true, reason: 'open', openTime, closeTime, autoActive: false };
+  }
+
+  const { weekday, minutes } = getPhnomPenhClock(now);
+  const closedDays = Array.isArray(settings.closedDays) ? settings.closedDays : [];
+  if (closedDays.includes(weekday)) {
+    return { isOpen: false, reason: 'day_off', openTime, closeTime, autoActive: true };
+  }
+
+  const [oH, oM] = openTime.split(':').map((n) => parseInt(n, 10) || 0);
+  const [cH, cM] = closeTime.split(':').map((n) => parseInt(n, 10) || 0);
+  const openMin = oH * 60 + oM;
+  const closeMin = cH * 60 + cM;
+
+  if (openMin === closeMin) {
+    return { isOpen: true, reason: 'open', openTime, closeTime, autoActive: true };
+  }
+
+  const withinHours =
+    openMin < closeMin
+      ? minutes >= openMin && minutes < closeMin
+      : minutes >= openMin || minutes < closeMin;
+
+  return {
+    isOpen: withinHours,
+    reason: withinHours ? 'open' : 'outside_hours',
+    openTime,
+    closeTime,
+    autoActive: true,
+  };
 }
 
 export function getDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {

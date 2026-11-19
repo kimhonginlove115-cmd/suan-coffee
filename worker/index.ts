@@ -1,4 +1,4 @@
-// Cloudflare Workers Full-Stack Backend for Emerald Brew Cafe
+// Cloudflare Workers Full-Stack Backend for SUAN COFFEE
 // Uses 100% Web Standards (crypto.subtle, fetch, KVNamespace) — zero Node.js built-ins required.
 
 import { md5Hex } from '../src/utils/md5';
@@ -64,10 +64,21 @@ interface AdminSecrets {
   smsWebhookApiKey: string;
 }
 
+interface ShopReviewRecord {
+  id: string;
+  rating: number;
+  comment: string;
+  customerName: string;
+  orderId?: string;
+  tags?: string[];
+  submittedAt: number;
+}
+
 interface PersistedDatabase {
   sessionSecret: string;
   members: MemberRecord[];
   orders: Record<string, unknown>[];
+  reviews?: ShopReviewRecord[];
   menuItems: Record<string, unknown>[] | null;
   toppings: Record<string, unknown>[] | null;
   shopSettings: Record<string, unknown> | null;
@@ -414,6 +425,7 @@ async function loadDb(env: Env): Promise<PersistedDatabase> {
     sessionSecret: envSecret || fallbackEphemeralSecret || randomHex(32),
     members: [],
     orders: [],
+    reviews: [],
     menuItems: null,
     toppings: null,
     shopSettings: null,
@@ -448,6 +460,7 @@ async function loadDb(env: Env): Promise<PersistedDatabase> {
         },
         members: Array.isArray(parsed.members) ? parsed.members : [],
         orders: Array.isArray(parsed.orders) ? parsed.orders : [],
+        reviews: Array.isArray(parsed.reviews) ? parsed.reviews : [],
         usedPaymentRefs: Array.isArray(parsed.usedPaymentRefs) ? parsed.usedPaymentRefs : [],
       };
     }
@@ -1663,7 +1676,7 @@ function upsertMember(
 
   const rec: MemberRecord = {
     id: `MBR-${randomHex(6).toUpperCase()}`,
-    name: params.name || 'អតិថិជន Emerald Brew',
+    name: params.name || 'អតិថិជន',
     phone: params.phoneVerified && params.phone ? params.phone : '',
     phoneVerified: Boolean(params.phoneVerified && params.phone),
     telegramUsername: params.telegramUsername || '',
@@ -1788,8 +1801,88 @@ async function editTelegramReplyText(
 function getShopBrandTitle(db: PersistedDatabase): string {
   return (
     (db.shopSettings && typeof db.shopSettings.brandTitle === 'string' && db.shopSettings.brandTitle.trim()) ||
-    'Emerald Brew Cafe'
+    'SUAN COFFEE'
   );
+}
+
+function escapeHtmlAttr(val: unknown): string {
+  return String(val ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function injectShopMetaHtml(html: string, db: PersistedDatabase, requestUrl: string): string {
+  const brand = getShopBrandTitle(db);
+  const rawDesc =
+    (db.shopSettings && typeof db.shopSettings.shopName === 'string' && db.shopSettings.shopName.trim()) ||
+    'កម្ម៉ង់កាហ្វេពិសេស និងអាហារស្រស់ៗ Online ងាយស្រួល រហ័ស បង់តាម KHQR និងតាមដានការដឹកជញ្ជូនផ្ទាល់។';
+  const desc = `${rawDesc} · ${brand}`;
+  let origin = '';
+  let pageUrl = requestUrl || '';
+  try {
+    const u = new URL(requestUrl);
+    origin = u.origin;
+    pageUrl = u.toString();
+  } catch {
+    // ignore
+  }
+  const ogImg = `${origin}/api/shop/og-image?v=${encodeURIComponent(brand.slice(0, 24))}`;
+  const bEsc = escapeHtmlAttr(brand);
+  const dEsc = escapeHtmlAttr(desc);
+  const iEsc = escapeHtmlAttr(ogImg);
+  const uEsc = escapeHtmlAttr(pageUrl);
+
+  const schemaJson = JSON.stringify({
+    '@context': 'https://schema.org',
+    '@type': 'CafeOrCoffeeShop',
+    name: brand,
+    description: desc,
+    ...(pageUrl ? { url: pageUrl } : {}),
+    ...(ogImg ? { image: ogImg } : {}),
+  }).replace(/</g, '\\u003c');
+
+  let out = html
+    .replace(/<title>[\s\S]*?<\/title>/i, `<title>${bEsc}</title>`)
+    .replace(
+      /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="description" content="${dEsc}" />`
+    )
+    .replace(
+      /<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:title" content="${bEsc}" />`
+    )
+    .replace(
+      /<meta\s+property="og:site_name"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:site_name" content="${bEsc}" />`
+    )
+    .replace(
+      /<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:description" content="${dEsc}" />`
+    )
+    .replace(
+      /<meta\s+property="og:image"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:image" content="${iEsc}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:title" content="${bEsc}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:description" content="${dEsc}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:image"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:image" content="${iEsc}" />`
+    );
+
+  if (pageUrl && !/property="og:url"/i.test(out)) {
+    out = out.replace('</head>', `  <meta property="og:url" content="${uEsc}" />\n  </head>`);
+  }
+  out = out.replace('</head>', `  <script type="application/ld+json">${schemaJson}</script>\n  </head>`);
+  return out;
 }
 
 function escapeTgHtml(val: unknown): string {
@@ -1908,6 +2001,8 @@ function buildOrderTelegramMessageText(
   const grandTotalNum = Number(order.grandTotal || 0);
   const subtotalNum = Number(order.subtotal ?? grandTotalNum);
   const promoDiscNum = Number(order.promoDisc || 0);
+  const loyaltyDiscNum = Number(order.loyaltyDisc || 0);
+  const loyaltyPtsUsed = Math.round(Number(order.loyaltyPointsUsed || 0));
   const feeNum = Number(order.fee || 0);
   const khrTotal = Math.round(grandTotalNum * khrRate);
 
@@ -1967,6 +2062,9 @@ function buildOrderTelegramMessageText(
   const summaryLines = [
     `💵 សរុបទំនិញ៖ $${subtotalNum.toFixed(2)}`,
     promoDiscNum > 0 ? `🎟️ បញ្ចុះតម្លៃ Promo៖ -$${promoDiscNum.toFixed(2)}` : '',
+    loyaltyDiscNum > 0
+      ? `🎁 ប្តូរពិន្ទុ (${loyaltyPtsUsed || 10} ★)៖ -$${loyaltyDiscNum.toFixed(2)}`
+      : '',
     order.type === 'delivery' ? `🛵 ថ្លៃដឹកជញ្ជូន៖ $${feeNum.toFixed(2)}` : '',
     `💰 <b>សរុបរួម៖ $${grandTotalNum.toFixed(2)}</b> (~ ${khrTotal.toLocaleString('en-US')} ៛)`,
   ].filter(Boolean);
@@ -2729,7 +2827,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
           target: phone,
           gatewayRequestId: gwData.result?.request_id,
           channel: 'telegram_gateway',
-          name: name || 'អតិថិជន Emerald Brew',
+          name: name || 'អតិថិជន',
           telegramUsername: tgUsername || undefined,
           expiresAt: Date.now() + 300_000,
           attempts: 0,
@@ -2747,7 +2845,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
         const params = new URLSearchParams({
           To: phone,
           From: tw.from,
-          Body: `Emerald Brew Cafe: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp} (សុពលភាព ៥ នាទី)`,
+          Body: `${getShopBrandTitle(db)}: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp} (សុពលភាព ៥ នាទី)`,
         });
         const twRes = await fetchWithTimeout(
           `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(tw.sid)}/Messages.json`,
@@ -2769,7 +2867,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
           salt,
           target: phone,
           channel: 'twilio',
-          name: name || 'អតិថិជន Emerald Brew',
+          name: name || 'អតិថិជន',
           telegramUsername: tgUsername || undefined,
           expiresAt: Date.now() + 300_000,
           attempts: 0,
@@ -2794,7 +2892,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
           body: JSON.stringify({
             to: phone,
             code: otp,
-            message: `Emerald Brew Cafe: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp}`,
+            message: `${getShopBrandTitle(db)}: លេខកូដផ្ទៀងផ្ទាត់របស់អ្នកគឺ ${otp}`,
           }),
         },
         8000
@@ -2807,7 +2905,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
         salt,
         target: phone,
         channel: 'sms_webhook',
-        name: name || 'អតិថិជន Emerald Brew',
+        name: name || 'អតិថិជន',
         telegramUsername: tgUsername || undefined,
         expiresAt: Date.now() + 300_000,
         attempts: 0,
@@ -3310,7 +3408,7 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       typeof body.slipImg === 'string' && body.slipImg.startsWith('data:image/')
         ? body.slipImg.slice(0, 750_000)
         : '';
-    const custName = sanitizeText(body.customerName, 60) || sess.customerName || 'ភ្ញៀវ Emerald Brew';
+    const custName = sanitizeText(body.customerName, 60) || sess.customerName || 'ភ្ញៀវ';
     const custPhone = sanitizeText(body.customerPhone, 25) || sess.customerPhone || '-';
     const orderSummary = sanitizeText(body.orderSummary, 180);
 
@@ -4163,7 +4261,53 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     }
   }
 
-  // 10. Shop & Orders
+  // 10. Dynamic OpenGraph Shop Image + Shop & Orders
+  if (path === '/api/shop/og-image' && method === 'GET') {
+    const candidates = [db.shopSettings?.bannerImg, db.shopSettings?.logoImg];
+    for (const raw of candidates) {
+      if (typeof raw !== 'string' || !raw.trim()) continue;
+      const val = raw.trim();
+      const m = val.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+      if (m) {
+        try {
+          const bin = atob(m[2]);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          return new Response(bytes, {
+            status: 200,
+            headers: {
+              'Content-Type': m[1],
+              'Cache-Control': 'public, max-age=300',
+            },
+          });
+        } catch {
+          // fallback below
+        }
+      }
+      if (val.startsWith('https://') || val.startsWith('http://')) {
+        return Response.redirect(val, 302);
+      }
+      if (val.startsWith('/')) {
+        return Response.redirect(`${url.origin}${val}`, 302);
+      }
+    }
+    const brand = escapeHtmlAttr(getShopBrandTitle(db).slice(0, 28));
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#09352C"/><stop offset="100%" stop-color="#0D4A3E"/></linearGradient></defs>
+      <rect width="1200" height="630" fill="url(#g)"/>
+      <circle cx="1020" cy="120" r="220" fill="#FBBF24" opacity="0.12"/>
+      <text x="600" y="305" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="72" font-weight="700">${brand}</text>
+      <text x="600" y="375" text-anchor="middle" fill="#FDE68A" font-family="sans-serif" font-size="30" font-weight="600">Specialty Coffee &amp; Online Ordering</text>
+    </svg>`;
+    return new Response(svg, {
+      status: 200,
+      headers: {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Cache-Control': 'public, max-age=300',
+      },
+    });
+  }
+
   if (path === '/api/shop' && method === 'GET') {
     return jsonResponse({
       ok: true,
@@ -4214,6 +4358,60 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     const callerIsAdmin = (await verifySessionToken(env, db.sessionSecret, extractBearer(req)))?.role === 'admin';
 
     if (isNew) {
+      if (!callerIsAdmin && db.shopSettings && typeof db.shopSettings === 'object') {
+        const s = db.shopSettings as Record<string, unknown>;
+        if (s.isOpen === false) {
+          return jsonResponse({ ok: false, error: 'សូមអភ័យទោស! ហាងកំពុងបិទបណ្តោះអាសន្ន។' }, 400);
+        }
+        if (s.autoScheduleEnabled) {
+          let weekday = 0;
+          let minutes = 0;
+          try {
+            const parts = new Intl.DateTimeFormat('en-US', {
+              timeZone: 'Asia/Phnom_Penh',
+              weekday: 'short',
+              hour: '2-digit',
+              minute: '2-digit',
+              hour12: false,
+            }).formatToParts(new Date());
+            const wdMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+            weekday = wdMap[parts.find((p) => p.type === 'weekday')?.value || ''] ?? 0;
+            const hh = parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10) % 24;
+            const mm = parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10) % 60;
+            minutes = hh * 60 + mm;
+          } catch {
+            const d = new Date(Date.now() + 7 * 3600 * 1000);
+            weekday = d.getUTCDay();
+            minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+          }
+          const closedDays = Array.isArray(s.closedDays) ? s.closedDays.map(Number) : [];
+          const openTime = typeof s.openTime === 'string' && /^\d{2}:\d{2}$/.test(s.openTime) ? s.openTime : '07:00';
+          const closeTime = typeof s.closeTime === 'string' && /^\d{2}:\d{2}$/.test(s.closeTime) ? s.closeTime : '20:30';
+          if (closedDays.includes(weekday)) {
+            return jsonResponse({ ok: false, error: 'សូមអភ័យទោស! ថ្ងៃនេះជាថ្ងៃឈប់សម្រាកប្រចាំសប្តាហ៍របស់ហាង។' }, 400);
+          }
+          const [oH, oM] = openTime.split(':').map((n) => parseInt(n, 10) || 0);
+          const [cH, cM] = closeTime.split(':').map((n) => parseInt(n, 10) || 0);
+          const openMin = oH * 60 + oM;
+          const closeMin = cH * 60 + cM;
+          const withinHours =
+            openMin === closeMin
+              ? true
+              : openMin < closeMin
+                ? minutes >= openMin && minutes < closeMin
+                : minutes >= openMin || minutes < closeMin;
+          if (!withinHours) {
+            return jsonResponse(
+              {
+                ok: false,
+                error: `សូមអភ័យទោស! ហាងបើកទទួលការកម្ម៉ង់ចាប់ពីម៉ោង ${openTime} ដល់ ${closeTime}។`,
+              },
+              400
+            );
+          }
+        }
+      }
+
       const rawCust =
         order.customer && typeof order.customer === 'object'
           ? { ...(order.customer as Record<string, unknown>) }
@@ -4262,6 +4460,33 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
         rawCust.phoneVerified = false;
       }
       order.customer = rawCust;
+
+      const requestedLoyaltyPts = Math.round(Number(rawOrder.loyaltyPointsUsed || 0));
+      if (requestedLoyaltyPts > 0) {
+        const s = (db.shopSettings || {}) as Record<string, unknown>;
+        const loyaltyEnabled = s.loyaltyEnabled !== false;
+        const reqPts = Math.min(100, Math.max(1, Math.round(Number(s.loyaltyRewardPoints) || 10)));
+        const rewardUsd = Math.min(50, Math.max(0.25, Number(s.loyaltyRewardAmountUsd) || 2.5));
+        if (!loyaltyEnabled || !authMemberSession || (authMemberSession.member.points || 0) < reqPts) {
+          return jsonResponse(
+            {
+              ok: false,
+              error: 'ពិន្ទុសមាជិកមិនគ្រប់គ្រាន់ ឬត្រូវការចូលគណនីជាមុនសិនដើម្បីប្តូរពិន្ទុ!',
+            },
+            400
+          );
+        }
+        const sub = Math.max(0, Number(order.subtotal || 0));
+        const promoD = Math.max(0, Number(order.promoDisc || 0));
+        const feeN = order.type === 'delivery' ? Math.max(0, Number(order.fee || 0)) : 0;
+        const actualLoyaltyDisc = Number(Math.min(rewardUsd, Math.max(0, sub - promoD)).toFixed(2));
+        order.loyaltyPointsUsed = reqPts;
+        order.loyaltyDisc = actualLoyaltyDisc;
+        order.grandTotal = Number(Math.max(0, sub - promoD - actualLoyaltyDisc + feeN).toFixed(2));
+      } else {
+        delete order.loyaltyPointsUsed;
+        delete order.loyaltyDisc;
+      }
     } else if (existingOrder && !callerIsAdmin) {
       const prevCust =
         existingOrder.customer && typeof existingOrder.customer === 'object'
@@ -4351,6 +4576,10 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       const cust = (order.customer || {}) as Record<string, unknown>;
       const items = Array.isArray(order.items) ? (order.items as Array<Record<string, unknown>>) : [];
       const earnedPoints = items.reduce((sum, it) => sum + Math.max(1, Number(it.qty) || 1), 0);
+      const usedLoyaltyPts = Math.round(Number(order.loyaltyPointsUsed || 0));
+      if (usedLoyaltyPts > 0 && authMemberSession) {
+        authMemberSession.member.points = Math.max(0, (authMemberSession.member.points || 0) - usedLoyaltyPts);
+      }
       if (earnedPoints > 0) {
         let matched: MemberRecord | undefined = authMemberSession?.member;
         if (!matched && order.payment === 'KHQR / ABA' && order.paymentVerified) {
@@ -4562,8 +4791,8 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
       return jsonResponse({ ok: false, error: 'រកមិនឃើញការកម្ម៉ង់នេះទេ' }, 404);
     }
     const existing = db.orders[idx];
-    if (existing.status !== 'Completed') {
-      return jsonResponse({ ok: false, error: 'អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលបានបញ្ចប់ប៉ុណ្ណោះ' }, 400);
+    if (existing.status !== 'Completed' && existing.paymentVerified !== true) {
+      return jsonResponse({ ok: false, error: 'អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលបានបញ្ចប់ ឬទូទាត់ប្រាក់រួចប៉ុណ្ណោះ' }, 400);
     }
 
     const body = await readJsonBody(req);
@@ -4571,9 +4800,9 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
       return jsonResponse({ ok: false, error: 'សូមជ្រើសរើសផ្កាយពី ១ ដល់ ៥' }, 400);
     }
-    const comment = String(body.comment || '').trim().slice(0, 500);
+    const comment = sanitizeText(body.comment, 500);
     const cust = (existing.customer || {}) as Record<string, unknown>;
-    const customerName = String(body.customerName || cust.name || '').trim() || undefined;
+    const customerName = sanitizeText(body.customerName || cust.name, 60) || undefined;
 
     const updated = {
       ...existing,
@@ -4586,7 +4815,121 @@ async function handleApiRequest(req: Request, env: Env): Promise<Response> {
     };
     db.orders[idx] = updated;
     await saveDb(env, db);
+
+    const botToken = getEffectiveBotToken(env, db);
+    const chatId = getEffectiveChatId(env, db);
+    if (botToken && chatId) {
+      const stars = '⭐'.repeat(rating);
+      const tgText = [
+        `<b>${escapeTgHtml(getShopBrandTitle(db))} · ការវាយតម្លៃថ្មី</b>`,
+        `🧾 វិក្កយបត្រ៖ <code>${escapeTgHtml(orderId)}</code>`,
+        `👤 អតិថិជន៖ ${escapeTgHtml(customerName || 'ភ្ញៀវហាង')}`,
+        `${stars} (<b>${rating}/5</b>)`,
+        comment ? `💬 "${escapeTgHtml(comment)}"` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      await sendTelegramBotMessage(botToken, chatId, tgText).catch(() => {});
+    }
+
     return jsonResponse({ ok: true, order: updated });
+  }
+
+  if (path === '/api/reviews' && method === 'GET') {
+    const list = Array.isArray(db.reviews) ? [...db.reviews] : [];
+    list.sort((a, b) => Number(b.submittedAt || 0) - Number(a.submittedAt || 0));
+    return jsonResponse({ ok: true, reviews: list });
+  }
+
+  if (path === '/api/reviews' && method === 'POST') {
+    const ip = getClientIp(req);
+    const rl = await checkRateLimit(env, `shop_review_${ip}`, 10, 600);
+    if (!rl.allowed) {
+      return jsonResponse({ ok: false, error: 'សូមរង់ចាំបន្តិចមុននឹងផ្ញើការវាយតម្លៃម្តងទៀត' }, 429);
+    }
+    const body = await readJsonBody(req);
+    const rating = Math.round(Number(body.rating));
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      return jsonResponse({ ok: false, error: 'សូមជ្រើសរើសផ្កាយពី ១ ដល់ ៥' }, 400);
+    }
+    const comment = sanitizeText(body.comment, 500);
+    const authMember = await getAuthenticatedMember(req, env, db);
+    const customerName =
+      sanitizeText(body.customerName, 60) ||
+      (authMember?.member?.name ? sanitizeText(authMember.member.name, 60) : '') ||
+      'ភ្ញៀវហាង';
+    const tags = Array.isArray(body.tags)
+      ? body.tags
+          .map((t: unknown) => sanitizeText(t, 40))
+          .filter(Boolean)
+          .slice(0, 6)
+      : [];
+    const orderId = sanitizeText(body.orderId, 40) || undefined;
+
+    const review: ShopReviewRecord = {
+      id: `REV-${Date.now()}-${randomHex(3).toUpperCase()}`,
+      rating,
+      comment,
+      customerName,
+      ...(orderId ? { orderId } : {}),
+      ...(tags.length ? { tags } : {}),
+      submittedAt: Date.now(),
+    };
+
+    if (!Array.isArray(db.reviews)) db.reviews = [];
+    db.reviews.unshift(review);
+    if (db.reviews.length > 200) db.reviews = db.reviews.slice(0, 200);
+    await saveDb(env, db);
+
+    const botToken = getEffectiveBotToken(env, db);
+    const chatId = getEffectiveChatId(env, db);
+    if (botToken && chatId) {
+      const stars = '⭐'.repeat(rating);
+      const tgText = [
+        `<b>${escapeTgHtml(getShopBrandTitle(db))} · ការវាយតម្លៃហាងថ្មី</b>`,
+        `👤 អតិថិជន៖ ${escapeTgHtml(customerName)}`,
+        `${stars} (<b>${rating}/5</b>)`,
+        tags.length ? `🏷️ ${escapeTgHtml(tags.join(' · '))}` : '',
+        comment ? `💬 "${escapeTgHtml(comment)}"` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      await sendTelegramBotMessage(botToken, chatId, tgText).catch(() => {});
+    }
+
+    return jsonResponse({ ok: true, review });
+  }
+
+  if (path.startsWith('/api/reviews/') && method === 'DELETE') {
+    if (!(await requireAdmin(req, env, db))) {
+      return jsonResponse({ ok: false, error: 'ទាមទារការអនុញ្ញាតពីម្ចាស់ហាង' }, 401);
+    }
+    const revId = decodeURIComponent(path.slice('/api/reviews/'.length)).trim();
+    if (!Array.isArray(db.reviews)) db.reviews = [];
+    db.reviews = db.reviews.filter((r) => r.id !== revId);
+    await saveDb(env, db);
+    return jsonResponse({ ok: true });
+  }
+
+  if (path.startsWith('/api/admin/members/') && path.endsWith('/points') && method === 'POST') {
+    if (!(await requireAdmin(req, env, db))) {
+      return jsonResponse({ ok: false, error: 'ទាមទារការអនុញ្ញាតពីម្ចាស់ហាង' }, 401);
+    }
+    const idParam = decodeURIComponent(
+      path.slice('/api/admin/members/'.length, path.length - '/points'.length)
+    ).trim();
+    const member = db.members.find((m) => String(m.id) === idParam);
+    if (!member) {
+      return jsonResponse({ ok: false, error: 'រកមិនឃើញគណនីសមាជិកទេ' }, 404);
+    }
+    const body = await readJsonBody(req);
+    const delta = Math.round(Number(body.delta || 0));
+    if (!Number.isFinite(delta) || delta === 0 || Math.abs(delta) > 500) {
+      return jsonResponse({ ok: false, error: 'ចំនួនពិន្ទុមិនត្រឹមត្រូវ' }, 400);
+    }
+    member.points = Math.max(0, (member.points || 0) + delta);
+    await saveDb(env, db);
+    return jsonResponse({ ok: true, member: toPublicMember(member) });
   }
 
   if (path.startsWith('/api/orders/') && method === 'DELETE') {
@@ -4696,6 +5039,21 @@ export default {
         return jsonResponse({ ok: false, error: 'ប្រព័ន្ធមានបញ្ហាបណ្តោះអាសន្ន សូមព្យាយាមម្តងទៀត' }, 500);
       }
     }
-    return env.ASSETS.fetch(request);
+    const assetRes = await env.ASSETS.fetch(request);
+    const contentType = assetRes.headers.get('content-type') || '';
+    if (request.method === 'GET' && contentType.includes('text/html')) {
+      try {
+        const [rawHtml, db] = await Promise.all([assetRes.text(), loadDb(env)]);
+        const transformed = injectShopMetaHtml(rawHtml, db, request.url);
+        const headers = new Headers(assetRes.headers);
+        headers.set('Content-Type', 'text/html; charset=utf-8');
+        headers.set('Cache-Control', 'public, max-age=60');
+        headers.delete('Content-Length');
+        return new Response(transformed, { status: assetRes.status, headers });
+      } catch {
+        return assetRes;
+      }
+    }
+    return assetRes;
   },
 };

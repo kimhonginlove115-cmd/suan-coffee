@@ -5,10 +5,12 @@ import {
   ArrowRight,
   BellRing,
   Bike,
+  Check,
   ChevronDown,
   ChevronRight,
   Clock,
   Coffee,
+  Copy,
   Croissant,
   CupSoda,
   DollarSign,
@@ -17,13 +19,13 @@ import {
   Leaf,
   Lock,
   MapPin,
+  MessageSquare,
   Minus,
   Plus,
   ReceiptText,
   Search,
   ShoppingBag,
   SlidersHorizontal,
-  Sparkles,
   Star,
   Tag,
   User,
@@ -42,6 +44,7 @@ import type {
   OrderStatus,
   OrderType,
   PaymentMethod,
+  ShopReview,
   ShopSettings,
   Topping,
 } from './types';
@@ -55,6 +58,7 @@ import {
   getDiscountedPrice,
   getDistanceKm,
   getFirebaseBase,
+  getShopScheduleStatus,
   handleImgFallback,
   normalizeMenuItems,
   normalizeOrders,
@@ -73,6 +77,7 @@ import {
   getMenuCategoryLabel,
   getMenuDesc,
   getMenuName,
+  getOrderStatusText,
 } from './utils/i18n';
 import {
   buildUnpaidAlertMessage,
@@ -139,6 +144,10 @@ export default function App() {
   const [orders, setOrders] = useState<Order[]>(() =>
     normalizeOrders(safeGet<Order[]>('cafe_orders_v15', []))
   );
+  const [shopReviews, setShopReviews] = useState<ShopReview[]>(() => {
+    const stored = safeGet<ShopReview[]>('cafe_reviews_v15', []);
+    return Array.isArray(stored) ? stored : [];
+  });
   const [members, setMembers] = useState<Member[]>(() => {
     const stored = safeGet<Member[]>('cafe_members_v15', []);
     return Array.isArray(stored) ? stored : [];
@@ -234,6 +243,13 @@ export default function App() {
     return hasCart && safeGet<boolean>('cafe_cart_open_v15', false) === true;
   });
   const [isTrackerOpen, setIsTrackerOpen] = useState(false);
+  const [isReviewFormOpen, setIsReviewFormOpen] = useState(false);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewName, setReviewName] = useState('');
+  const [reviewComment, setReviewComment] = useState('');
+  const [reviewTags, setReviewTags] = useState<string[]>([]);
+  const [submittingReview, setSubmittingReview] = useState(false);
+  const [showAllReviews, setShowAllReviews] = useState(false);
   const [receiptState, setReceiptState] = useState<{ order: Order | null; tgUrl: string }>(() => {
     const savedId = safeSessionGet('cafe_last_receipt_id_v15');
     if (savedId) {
@@ -381,16 +397,40 @@ export default function App() {
   }, [toppings]);
   useEffect(() => {
     safeSet('cafe_settings_v15', shopSettings);
-    document.title = shopSettings.brandTitle || 'Emerald Brew Cafe';
+    const title = shopSettings.brandTitle?.trim() || 'SUAN COFFEE';
+    const desc = shopSettings.shopName?.trim()
+      ? `${shopSettings.shopName.trim()} · ${title}`
+      : `${title} — កម្ម៉ង់កាហ្វេ និងអាហារ Online តាម KHQR`;
+    document.title = title;
+    const setMeta = (selector: string, val: string) => {
+      const el = document.querySelector<HTMLMetaElement>(selector);
+      if (el) el.content = val;
+    };
+    setMeta('meta[name="description"]', desc);
+    setMeta('meta[property="og:title"]', title);
+    setMeta('meta[property="og:site_name"]', title);
+    setMeta('meta[property="og:description"]', desc);
+    setMeta('meta[name="twitter:title"]', title);
+    setMeta('meta[name="twitter:description"]', desc);
+    if (shopSettings.logoImg) {
+      const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+      if (icon) icon.href = resolveAssetUrl(shopSettings.logoImg, CAFE_ASSETS.logoEmblem);
+    }
   }, [shopSettings]);
   useEffect(() => {
     safeSet('cafe_orders_v15', orders);
   }, [orders]);
   useEffect(() => {
+    safeSet('cafe_reviews_v15', shopReviews);
+  }, [shopReviews]);
+  useEffect(() => {
     safeSet('cafe_members_v15', members);
   }, [members]);
   useEffect(() => {
     safeSet('cafe_current_member_v15', currentMember);
+    if (currentMember?.name) {
+      setReviewName((prev) => (prev.trim() ? prev : currentMember.name));
+    }
   }, [currentMember]);
 
   const handleRequireAdminReauth = useCallback(() => {
@@ -837,6 +877,42 @@ export default function App() {
     }
   }, [applyFetchedShop, shopSettings.firebaseUrl]);
 
+  const fetchReviewsFromSources = useCallback(async () => {
+    let loaded = false;
+    try {
+      const r = await fetchWithTimeout('/api/reviews', { cache: 'no-store' }, 8000);
+      if (r.ok) {
+        const data = (await r.json()) as { ok?: boolean; reviews?: ShopReview[] };
+        if (data.ok && Array.isArray(data.reviews)) {
+          setShopReviews(data.reviews);
+          loaded = true;
+        }
+      }
+    } catch {
+      // ignore network hiccup
+    }
+
+    if (!loaded) {
+      const b = getFirebaseBase(shopSettings.firebaseUrl);
+      if (b) {
+        try {
+          const fbRes = await fetchWithTimeout(`${b}/reviews.json`, { cache: 'no-store' }, 7000);
+          if (fbRes.ok) {
+            const raw = await fbRes.json();
+            if (raw && typeof raw === 'object') {
+              const list = (Array.isArray(raw) ? raw : Object.values(raw))
+                .filter((x): x is ShopReview => Boolean(x && typeof x === 'object' && 'rating' in x))
+                .sort((a, b2) => (b2.submittedAt || 0) - (a.submittedAt || 0));
+              setShopReviews(list);
+            }
+          }
+        } catch {
+          // ignore Firebase hiccup
+        }
+      }
+    }
+  }, [shopSettings.firebaseUrl]);
+
   // Load persisted shop data, check active session, and auto-verify Telegram Mini App
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -897,6 +973,7 @@ export default function App() {
     }
 
     fetchOrdersFromSources();
+    fetchReviewsFromSources();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -951,10 +1028,11 @@ export default function App() {
     const timer = setInterval(() => {
       if (document.visibilityState !== 'hidden') {
         fetchShopFromSources();
+        fetchReviewsFromSources();
       }
     }, 15000);
     return () => clearInterval(timer);
-  }, [viewMode, fetchShopFromSources]);
+  }, [viewMode, fetchShopFromSources, fetchReviewsFromSources]);
 
   const handleLogout = async () => {
     if (authToken) {
@@ -1012,6 +1090,32 @@ export default function App() {
     [orderType, shopSettings, distanceKm, cartSubtotal]
   );
 
+  const [nowTs, setNowTs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNowTs(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const shopScheduleStatus = useMemo(
+    () => getShopScheduleStatus(shopSettings, new Date(nowTs)),
+    [shopSettings, nowTs]
+  );
+
+  const shopClosedMessage = useMemo(() => {
+    if (shopScheduleStatus.isOpen) return '';
+    if (shopScheduleStatus.reason === 'day_off') {
+      return isEn
+        ? 'Shop is closed today (weekly day off). Please check back tomorrow!'
+        : 'ហាងឈប់សម្រាកប្រចាំសប្តាហ៍ថ្ងៃនេះ — សូមត្រឡប់មកវិញនៅថ្ងៃស្អែក!';
+    }
+    if (shopScheduleStatus.reason === 'outside_hours') {
+      return isEn
+        ? `Shop is closed right now. Open daily ${shopScheduleStatus.openTime} – ${shopScheduleStatus.closeTime}.`
+        : `ហាងកំពុងបិទតាមម៉ោងកំណត់ — បើកទទួលការកម្ម៉ង់ ${shopScheduleStatus.openTime} ដល់ ${shopScheduleStatus.closeTime}`;
+    }
+    return t.shopClosedBanner;
+  }, [shopScheduleStatus, isEn, t.shopClosedBanner]);
+
   const activeLiveOrder = useMemo(
     () =>
       orders.find(
@@ -1019,6 +1123,68 @@ export default function App() {
       ),
     [orders]
   );
+
+  const allCustomerReviews = useMemo(() => {
+    const merged: ShopReview[] = [];
+    const seenOrderIds = new Set<string>();
+    const seenIds = new Set<string>();
+
+    for (const r of shopReviews) {
+      if (!r || !r.id || seenIds.has(r.id)) continue;
+      seenIds.add(r.id);
+      if (r.orderId) seenOrderIds.add(r.orderId);
+      merged.push(r);
+    }
+
+    for (const o of orders) {
+      if (!o.feedback || seenOrderIds.has(o.id)) continue;
+      seenOrderIds.add(o.id);
+      merged.push({
+        id: `ORD-REV-${o.id}`,
+        rating: Math.min(5, Math.max(1, Math.round(Number(o.feedback.rating) || 5))),
+        comment: o.feedback.comment || '',
+        customerName: o.feedback.customerName || o.customer?.name || (isEn ? 'Customer' : 'អតិថិជន'),
+        orderId: o.id,
+        submittedAt: Number(o.feedback.submittedAt) || Number(o.createdAt) || Date.now(),
+      });
+    }
+
+    return merged.sort((a, b2) => (b2.submittedAt || 0) - (a.submittedAt || 0));
+  }, [shopReviews, orders, isEn]);
+
+  const averageShopRating = useMemo(() => {
+    if (!allCustomerReviews.length) return 0;
+    const total = allCustomerReviews.reduce((s, r) => s + Number(r.rating || 0), 0);
+    return total / allCustomerReviews.length;
+  }, [allCustomerReviews]);
+
+  const ratingBreakdown = useMemo(() => {
+    const counts = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 } as Record<1 | 2 | 3 | 4 | 5, number>;
+    for (const r of allCustomerReviews) {
+      const star = Math.min(5, Math.max(1, Math.round(Number(r.rating) || 5))) as 1 | 2 | 3 | 4 | 5;
+      counts[star] = (counts[star] || 0) + 1;
+    }
+    const total = allCustomerReviews.length || 1;
+    return ([5, 4, 3, 2, 1] as const).map((star) => ({
+      star,
+      count: counts[star],
+      percent: Math.round((counts[star] / total) * 100),
+    }));
+  }, [allCustomerReviews]);
+  const latestActiveOrder = useMemo(
+    () =>
+      orders.find(
+        (o) => myOrderIds.includes(o.id) && o.status !== 'Completed' && o.id !== activeLiveOrder?.id
+      ) || null,
+    [orders, myOrderIds, activeLiveOrder?.id]
+  );
+  const cartQtyByItemName = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const c of cart) {
+      map.set(c.name, (map.get(c.name) || 0) + (c.qty || 1));
+    }
+    return map;
+  }, [cart]);
   const liveTrackOrder = useMemo(
     () => orders.find((o) => o.id === liveTrackOrderId) || null,
     [orders, liveTrackOrderId]
@@ -1027,6 +1193,19 @@ export default function App() {
     () => orders.find((o) => o.id === activeDriverOrderId) || null,
     [orders, activeDriverOrderId]
   );
+
+  const handleCopyPromoCode = () => {
+    const code = shopSettings.promoCode?.trim();
+    if (!code) return;
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(code).catch(() => {});
+    }
+    showToast(
+      isEn
+        ? `Copied promo code ${code} (-${shopSettings.promoPercent}%)!`
+        : `បានចម្លងកូដបញ្ចុះតម្លៃ ${code} (-${shopSettings.promoPercent}%) រួចរាល់!`
+    );
+  };
 
   const handleAddToCart = (payload: {
     name: string;
@@ -1070,12 +1249,19 @@ export default function App() {
     sendTg: boolean;
     payment: PaymentMethod;
     promoDisc: number;
+    loyaltyPointsUsed?: number;
+    loyaltyDisc?: number;
     fee: number;
     subtotal: number;
     grandTotal: number;
     paymentVerification?: VerifiedPaymentState;
     customer: Order['customer'];
   }): Promise<boolean> => {
+    if (!shopScheduleStatus.isOpen) {
+      showToast(shopClosedMessage || t.shopClosedBanner);
+      return false;
+    }
+
     const pv = payload.paymentVerification;
     if (payload.payment === 'KHQR / ABA' && !pv?.proofToken) {
       showToast(
@@ -1092,6 +1278,9 @@ export default function App() {
       ...(isTableLocked ? { tableNum: tableNumberFromQR } : {}),
     };
 
+    const loyaltyPtsReq = Math.max(0, Math.round(Number(payload.loyaltyPointsUsed) || 0));
+    const loyaltyDiscReq = Math.max(0, Number(payload.loyaltyDisc) || 0);
+
     const orderForServer: Order = {
       id: `ORD-${String(Date.now()).slice(-4)}${Math.floor(10 + Math.random() * 89)}`,
       createdAt: Date.now(),
@@ -1101,6 +1290,9 @@ export default function App() {
       payment: payload.payment,
       subtotal: payload.subtotal,
       promoDisc: payload.promoDisc,
+      ...(loyaltyPtsReq > 0 && loyaltyDiscReq > 0
+        ? { loyaltyPointsUsed: loyaltyPtsReq, loyaltyDisc: loyaltyDiscReq }
+        : {}),
       fee: finalOrderType === 'delivery' ? payload.fee : 0,
       grandTotal: payload.grandTotal,
       customer: customerPayload,
@@ -1136,9 +1328,16 @@ export default function App() {
     delete cleanOrder.paymentProofToken;
 
     const earnedPoints = cart.reduce((s, i) => s + i.qty, 0);
+    const usedLoyaltyPts = Math.max(
+      0,
+      Math.round(Number(cleanOrder.loyaltyPointsUsed ?? payload.loyaltyPointsUsed) || 0)
+    );
     if (currentMember) {
       handleAuthenticated(
-        { ...currentMember, points: (currentMember.points || 0) + earnedPoints },
+        {
+          ...currentMember,
+          points: Math.max(0, (currentMember.points || 0) - usedLoyaltyPts) + earnedPoints,
+        },
         authToken
       );
     }
@@ -1165,12 +1364,16 @@ export default function App() {
               : ''
           }`;
     const uname = (shopSettings.tgUsername || '').replace('@', '').trim();
+    const loyaltyLine =
+      Number(cleanOrder.loyaltyDisc) > 0
+        ? `\n🎁 ប្តូរពិន្ទុ (${cleanOrder.loyaltyPointsUsed || 0} ★)៖ -$${Number(cleanOrder.loyaltyDisc).toFixed(2)}`
+        : '';
     const verifiedLine = cleanOrder.paymentVerified
       ? `\n✅ បានផ្ទៀងផ្ទាត់ KHQR${cleanOrder.paymentRef ? ` (Ref: ${cleanOrder.paymentRef})` : ''}`
       : '';
     const tgUrl = uname
       ? `https://t.me/${uname}?text=${encodeURIComponent(
-          `☕ កម្ម៉ង់ថ្មី ${cleanOrder.id}\n👤 ${cleanOrder.customer.name} (${cleanOrder.customer.phone || '-'})\n${locTxt}\n\n${itemsTxt}\n\n💵 សរុប៖ $${cleanOrder.grandTotal.toFixed(2)} (${cleanOrder.payment})${verifiedLine}`
+          `☕ កម្ម៉ង់ថ្មី ${cleanOrder.id}\n👤 ${cleanOrder.customer.name} (${cleanOrder.customer.phone || '-'})\n${locTxt}\n\n${itemsTxt}${loyaltyLine}\n\n💵 សរុប៖ $${cleanOrder.grandTotal.toFixed(2)} (${cleanOrder.payment})${verifiedLine}`
         )}`
       : '';
 
@@ -1360,12 +1563,13 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         const savedOrder = data?.order as Order | undefined;
+        const savedFeedback = savedOrder?.feedback || localFeedback;
         setOrders((prev) =>
           prev.map((o) => {
             if (o.id !== orderId) return o;
             const updated: Order = {
               ...o,
-              feedback: savedOrder?.feedback || localFeedback,
+              feedback: savedFeedback,
             };
             const fb = getFirebaseBase(shopSettings.firebaseUrl);
             if (fb) {
@@ -1378,12 +1582,22 @@ export default function App() {
             return updated;
           })
         );
-        showToast('✓ សូមអរគុណសម្រាប់ការវាយតម្លៃរបស់អ្នក!');
+        setReceiptState((prev) =>
+          prev.order?.id === orderId
+            ? { ...prev, order: { ...prev.order, feedback: savedFeedback } }
+            : prev
+        );
+        showToast(isEn ? '✓ Thank you for your rating!' : '✓ សូមអរគុណសម្រាប់ការវាយតម្លៃរបស់អ្នក!');
         return true;
       }
       const errData = await res.json().catch(() => null);
       if (res.status === 400) {
-        showToast(errData?.error || 'អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលបានបញ្ចប់ប៉ុណ្ណោះ');
+        showToast(
+          errData?.error ||
+            (isEn
+              ? 'Only paid or completed orders can be rated'
+              : 'អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលទូទាត់រួច ឬបានបញ្ចប់ប៉ុណ្ណោះ')
+        );
         return false;
       }
     } catch {
@@ -1391,16 +1605,121 @@ export default function App() {
     }
 
     const target = orders.find((o) => o.id === orderId);
-    if (!target || target.status !== 'Completed') {
-      showToast('អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលបានបញ្ចប់ប៉ុណ្ណោះ');
+    if (!target || (target.status !== 'Completed' && target.paymentVerified !== true)) {
+      showToast(
+        isEn
+          ? 'Only paid or completed orders can be rated'
+          : 'អាចវាយតម្លៃបានតែការកម្ម៉ង់ដែលទូទាត់រួច ឬបានបញ្ចប់ប៉ុណ្ណោះ'
+      );
       return false;
     }
 
     const updatedOrder: Order = { ...target, feedback: localFeedback };
     setOrders((prev) => prev.map((o) => (o.id === orderId ? updatedOrder : o)));
+    setReceiptState((prev) =>
+      prev.order?.id === orderId ? { ...prev, order: updatedOrder } : prev
+    );
     await syncOrderEverywhere(updatedOrder);
-    showToast('✓ សូមអរគុណសម្រាប់ការវាយតម្លៃរបស់អ្នក!');
+    showToast(isEn ? '✓ Thank you for your rating!' : '✓ សូមអរគុណសម្រាប់ការវាយតម្លៃរបស់អ្នក!');
     return true;
+  };
+
+  const handleSubmitShopReview = async (payload: {
+    rating: number;
+    comment: string;
+    customerName?: string;
+    tags?: string[];
+    orderId?: string;
+  }): Promise<boolean> => {
+    const cleanRating = Math.min(5, Math.max(1, Math.round(Number(payload.rating) || 5)));
+    const cleanComment = (payload.comment || '').trim().slice(0, 500);
+    const cleanName =
+      (payload.customerName || currentMember?.name || '').trim().slice(0, 60) ||
+      (isEn ? 'Guest Customer' : 'ភ្ញៀវ');
+    const cleanTags = Array.isArray(payload.tags) ? payload.tags.slice(0, 6) : [];
+    const fallbackReview: ShopReview = {
+      id: `REV-${Date.now().toString(36).toUpperCase()}`,
+      rating: cleanRating,
+      comment: cleanComment,
+      customerName: cleanName,
+      tags: cleanTags.length ? cleanTags : undefined,
+      orderId: payload.orderId,
+      submittedAt: Date.now(),
+    };
+
+    try {
+      const res = await fetchWithTimeout(
+        '/api/reviews',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rating: cleanRating,
+            comment: cleanComment,
+            customerName: cleanName,
+            tags: cleanTags,
+            orderId: payload.orderId,
+          }),
+        },
+        8000
+      );
+      if (res.ok) {
+        const data = (await res.json()) as { ok?: boolean; review?: ShopReview };
+        const saved = data.review || fallbackReview;
+        setShopReviews((prev) => [saved, ...prev.filter((r) => r.id !== saved.id)]);
+        const fb = getFirebaseBase(shopSettings.firebaseUrl);
+        if (fb) {
+          fetch(`${fb}/reviews/${encodeURIComponent(saved.id)}.json`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(saved),
+          }).catch(() => {});
+        }
+        showToast(isEn ? '✓ Thank you for reviewing us!' : '✓ សូមអរគុណសម្រាប់ការវាយតម្លៃហាងរបស់យើង!');
+        return true;
+      }
+    } catch {
+      // Fallback to local + Firebase sync if server unreachable
+    }
+
+    setShopReviews((prev) => [fallbackReview, ...prev]);
+    const fb = getFirebaseBase(shopSettings.firebaseUrl);
+    if (fb) {
+      fetch(`${fb}/reviews/${encodeURIComponent(fallbackReview.id)}.json`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fallbackReview),
+      }).catch(() => {});
+    }
+    showToast(isEn ? '✓ Review saved!' : '✓ បានផ្ញើការវាយតម្លៃរួចរាល់!');
+    return true;
+  };
+
+  const handleDeleteShopReview = async (reviewId: string) => {
+    setShopReviews((prev) => prev.filter((r) => r.id !== reviewId));
+    const fb = getFirebaseBase(shopSettings.firebaseUrl);
+    if (fb) {
+      fetch(`${fb}/reviews/${encodeURIComponent(reviewId)}.json`, { method: 'DELETE' }).catch(
+        () => {}
+      );
+    }
+    try {
+      const res = await fetchWithTimeout(
+        `/api/reviews/${encodeURIComponent(reviewId)}`,
+        {
+          method: 'DELETE',
+          headers: adminToken ? { Authorization: `Bearer ${adminToken}` } : undefined,
+        },
+        8000
+      );
+      if (res.status === 401) {
+        handleRequireAdminReauth();
+        return;
+      }
+      showToast(isEn ? 'Review deleted' : 'បានលុបការវាយតម្លៃរួចរាល់');
+    } catch {
+      showToast(isEn ? 'Review removed locally' : 'បានលុបការវាយតម្លៃ');
+    }
   };
 
   const handleUpdateDriverCoords = (orderId: string, coords: Coords, status?: OrderStatus) => {
@@ -1654,6 +1973,7 @@ export default function App() {
           menuItems={menuItems}
           toppings={toppings}
           orders={orders}
+          shopReviews={shopReviews}
           members={members}
           shopSettings={shopSettings}
           onExit={() => {
@@ -1696,6 +2016,7 @@ export default function App() {
           onSendUnpaidVoiceAlert={handleSendUnpaidVoiceAlert}
           onSendOrderToTelegram={handleSendOrderToTelegram}
           onDeleteOrder={handleDeleteOrder}
+          onDeleteReview={handleDeleteShopReview}
           onClearCompletedOrders={async () => {
             const completed = orders.filter((o) => o.status === 'Completed');
             const remaining = orders.filter((o) => o.status !== 'Completed');
@@ -1758,6 +2079,13 @@ export default function App() {
                     className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0"
                   >
                     {t.menuNav}
+                  </a>
+                  <a
+                    href="#reviews-section"
+                    className="nav-link-underline hover:text-[#0D4A3E] transition-colors whitespace-nowrap shrink-0 flex items-center gap-1"
+                  >
+                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-500" />
+                    <span>{isEn ? 'Reviews' : 'វាយតម្លៃ'}</span>
                   </a>
                   <button
                     type="button"
@@ -1872,14 +2200,14 @@ export default function App() {
 
             <main id="top" className="max-w-7xl mx-auto px-3 sm:px-6 pt-3 sm:pt-6 space-y-5 sm:space-y-8">
               <AnimatePresence>
-                {shopSettings.isOpen === false && (
+                {!shopScheduleStatus.isOpen && (
                   <motion.div
                     initial={shouldReduceMotion ? false : { opacity: 0, y: -8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={shouldReduceMotion ? undefined : { opacity: 0, y: -8 }}
                     className="bg-red-600 text-white px-4 py-3 rounded-2xl text-xs font-bold text-center"
                   >
-                    {t.shopClosedBanner}
+                    {shopClosedMessage || t.shopClosedBanner}
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -1928,6 +2256,29 @@ export default function App() {
                 </motion.button>
               )}
 
+              {latestActiveOrder && (
+                <motion.button
+                  type="button"
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  onClick={() => setReceiptState({ order: latestActiveOrder, tgUrl: '' })}
+                  className="w-full bg-white hover:bg-slate-50 border border-[#0D4A3E]/20 text-slate-900 px-3.5 py-2.5 rounded-2xl text-xs flex items-center justify-between gap-2 shadow-xs transition-colors"
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    <ReceiptText className="w-4 h-4 text-[#0D4A3E] shrink-0" />
+                    <span className="truncate font-semibold">
+                      <span className="font-mono-num text-[#0D4A3E] font-bold">{latestActiveOrder.id}</span>
+                      {' · '}
+                      {getOrderStatusText(latestActiveOrder.status, lang)}
+                    </span>
+                  </span>
+                  <span className="text-[11px] font-bold text-[#0D4A3E] shrink-0 inline-flex items-center gap-1">
+                    <span>{isEn ? 'View Bill' : 'មើលវិក្កយបត្រ'}</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </span>
+                </motion.button>
+              )}
+
               <section className="grid lg:grid-cols-12 gap-4 sm:gap-6 items-stretch">
                 <motion.div
                   initial={shouldReduceMotion ? false : { opacity: 0, y: 14 }}
@@ -1946,20 +2297,47 @@ export default function App() {
 
                   <div className="relative z-10 flex items-center justify-between gap-3 sm:grid sm:grid-cols-12 sm:gap-6">
                     <div className="sm:col-span-8 space-y-2 sm:space-y-3 min-w-0">
-                      <motion.p
-                        initial={shouldReduceMotion ? false : { opacity: 0, x: -8 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ duration: 0.35, delay: 0.08 }}
-                        className="text-[11px] sm:text-xs font-medium text-emerald-200 truncate flex items-center gap-1.5"
-                      >
-                        <Clock className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-                        <span className="truncate">
-                          {shopSettings.isOpen !== false ? t.openFastDelivery : t.closedTemp}
-                          {shopSettings.promoCode && shopSettings.promoPercent > 0
-                            ? ` · ${t.promoCodePrefix} ${shopSettings.promoCode} (-${shopSettings.promoPercent}%)`
-                            : ''}
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] sm:text-xs font-medium text-emerald-200">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                          <span>
+                            {shopScheduleStatus.isOpen
+                              ? shopScheduleStatus.autoActive
+                                ? `${isEn ? 'Open until' : 'បើកដល់ម៉ោង'} ${shopScheduleStatus.closeTime}`
+                                : t.openFastDelivery
+                              : shopScheduleStatus.autoActive
+                                ? isEn
+                                  ? `Closed (${shopScheduleStatus.openTime}–${shopScheduleStatus.closeTime})`
+                                  : `បិទ (${shopScheduleStatus.openTime}–${shopScheduleStatus.closeTime})`
+                                : t.closedTemp}
+                          </span>
                         </span>
-                      </motion.p>
+                        <a
+                          href="#reviews-section"
+                          className="inline-flex items-center gap-1 text-amber-200 hover:text-amber-100 transition-colors"
+                        >
+                          <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" />
+                          <span className="font-mono-num font-bold">
+                            {allCustomerReviews.length > 0
+                              ? `${averageShopRating.toFixed(1)} (${allCustomerReviews.length})`
+                              : isEn
+                                ? 'Rate Us'
+                                : 'វាយតម្លៃហាង'}
+                          </span>
+                        </a>
+                        {shopSettings.promoCode && shopSettings.promoPercent > 0 && (
+                          <button
+                            type="button"
+                            onClick={handleCopyPromoCode}
+                            className="inline-flex items-center gap-1 bg-amber-400/20 hover:bg-amber-400/30 border border-amber-300/35 text-amber-200 px-2 py-0.5 rounded-lg font-mono-num text-[11px] font-bold transition-colors"
+                          >
+                            <Copy className="w-3 h-3" />
+                            <span>
+                              {shopSettings.promoCode} (-{shopSettings.promoPercent}%)
+                            </span>
+                          </button>
+                        )}
+                      </div>
                       <motion.h1
                         initial={shouldReduceMotion ? false : { opacity: 0, y: 8 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -2175,6 +2553,86 @@ export default function App() {
                 </motion.section>
               )}
 
+              {/* Mobile Quick Order Mode & Table Bar (Effortless 1-Tap Switch before Cart) */}
+              <section className="lg:hidden bg-white border border-slate-200/90 rounded-2xl p-2.5 space-y-2 shadow-xs">
+                <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-xl">
+                  {(
+                    [
+                      { id: 'delivery' as const, label: t.deliveryTab, Icon: Bike },
+                      { id: 'dinein' as const, label: t.dineInTab, Icon: Armchair },
+                    ] as const
+                  ).map(({ id, label, Icon }) => {
+                    const active = orderType === id;
+                    const lockedOut = isTableLocked && id === 'delivery';
+                    return (
+                      <button
+                        key={`mob-mode-${id}`}
+                        type="button"
+                        onClick={() => handleRequestOrderTypeChange(id)}
+                        className={`py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                          lockedOut
+                            ? 'text-slate-400 cursor-not-allowed opacity-70'
+                            : active
+                              ? 'bg-white text-[#0D4A3E] shadow-xs'
+                              : 'text-slate-500'
+                        }`}
+                      >
+                        {lockedOut ? <Lock className="w-3.5 h-3.5" /> : <Icon className="w-3.5 h-3.5" />}
+                        <span>{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {orderType === 'dinein' ? (
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+                      {isTableLocked && <Lock className="w-3 h-3 text-amber-600" />}
+                      <span>{t.tableNumLabel}:</span>
+                    </span>
+                    {isTableLocked ? (
+                      <span className="font-mono-num text-xs font-bold text-[#0D4A3E] bg-[#E8F2EF] px-2.5 py-1 rounded-lg">
+                        #{activeTableNum} ({isEn ? 'QR Locked' : 'ចាក់សោ QR'})
+                      </span>
+                    ) : (
+                      <div className="flex items-center gap-1 overflow-x-auto hide-scrollbar max-w-[70%]">
+                        {Array.from({ length: Math.min(maxTableCount, 20) }, (_, idx) => idx + 1).map((tNo) => (
+                          <button
+                            key={`mob-t-${tNo}`}
+                            type="button"
+                            onClick={() => setSelectedTableNum(tNo)}
+                            className={`min-w-[30px] h-7 px-2 rounded-lg text-[11px] font-bold font-mono-num shrink-0 transition-colors ${
+                              selectedTableNum === tNo
+                                ? 'bg-[#0D4A3E] text-white'
+                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                            }`}
+                          >
+                            {tNo}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setLocationPickerState({ open: true, purpose: 'customer' })}
+                    className="w-full flex items-center justify-between gap-2 px-2 py-1 text-left rounded-xl hover:bg-slate-50 transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5 text-[11px] text-slate-600 min-w-0">
+                      <MapPin className="w-3.5 h-3.5 text-[#0D4A3E] shrink-0" />
+                      <span className="truncate font-semibold text-slate-800">{pickedAddressName}</span>
+                    </span>
+                    <span className="text-[11px] font-bold font-mono-num text-[#0D4A3E] shrink-0">
+                      {estimatedDeliveryFee === 0
+                        ? isEn
+                          ? 'Free'
+                          : 'ដឹកហ្វ្រី'
+                        : `$${estimatedDeliveryFee.toFixed(2)}`}
+                    </span>
+                  </button>
+                )}
+              </section>
+
               <section id="menu-section" className="lg:grid lg:grid-cols-12 lg:gap-6 lg:items-start pt-1">
                 <div className="lg:col-span-8 xl:col-span-9 space-y-4">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -2237,6 +2695,9 @@ export default function App() {
                           const displayDesc = getMenuDesc(item, lang);
                           const catLabel = getMenuCategoryLabel(item.category, lang, item.categoryEn);
                           const inStock = isItemInStock(item);
+                          const inCartQty =
+                            (cartQtyByItemName.get(item.name) || 0) +
+                            (item.nameEn && item.nameEn !== item.name ? cartQtyByItemName.get(item.nameEn) || 0 : 0);
                           return (
                             <motion.article
                               key={item.id}
@@ -2244,9 +2705,9 @@ export default function App() {
                               initial={shouldReduceMotion ? false : { opacity: 0, y: 14, scale: 0.97 }}
                               animate={{ opacity: 1, y: 0, scale: 1 }}
                               exit={shouldReduceMotion ? undefined : { opacity: 0, scale: 0.95 }}
-                              transition={{ duration: 0.26, delay: Math.min(idx * 0.03, 0.22) }}
-                              whileHover={shouldReduceMotion || !inStock ? undefined : { y: -5 }}
-                              whileTap={shouldReduceMotion || !inStock ? undefined : { scale: 0.97 }}
+                              transition={{ duration: 0.24, delay: Math.min(idx * 0.025, 0.2) }}
+                              whileHover={shouldReduceMotion || !inStock ? undefined : { y: -3 }}
+                              whileTap={shouldReduceMotion || !inStock ? undefined : { scale: 0.98 }}
                               onClick={() => {
                                 if (inStock) {
                                   setCustomizingItem(item);
@@ -2258,7 +2719,7 @@ export default function App() {
                                   );
                                 }
                               }}
-                              className={`group bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-shadow hover:shadow-lg hover:border-[#0D4A3E]/25 ${
+                              className={`group bg-white rounded-2xl p-2.5 sm:p-3.5 border border-slate-200/90 flex flex-col justify-between transition-all hover:shadow-md hover:border-[#0D4A3E]/30 ${
                                 inStock ? 'cursor-pointer' : 'opacity-65'
                               }`}
                             >
@@ -2280,32 +2741,25 @@ export default function App() {
                                   )}
                                   {hasDisc && (
                                     <span className="absolute top-2 left-2 bg-amber-400 text-slate-900 font-bold font-mono-num text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
-                                      <Sparkles className="w-3 h-3" />
                                       -{item.discount}%
                                     </span>
                                   )}
                                   {item.featured && !hasDisc && inStock && (
-                                    <span className="absolute top-2 left-2 bg-[#0D4A3E]/90 text-amber-300 font-bold text-[10px] px-2 py-0.5 rounded-lg shadow-sm inline-flex items-center gap-1">
-                                      <Star className="w-2.5 h-2.5 fill-amber-300" />
-                                      <span>{isEn ? 'Pick' : 'ពិសេស'}</span>
-                                    </span>
-                                  )}
-                                  {inStock && typeof item.stockQty === 'number' && item.stockQty > 0 && item.stockQty <= 5 && (
-                                    <span className="absolute bottom-2 right-2 bg-slate-900/80 text-amber-300 font-bold font-mono-num text-[10px] px-2 py-0.5 rounded-lg">
-                                      {isEn ? `${item.stockQty} left` : `នៅសល់ ${item.stockQty}`}
+                                    <span className="absolute top-2 left-2 bg-[#0D4A3E]/90 text-amber-300 font-bold text-[10px] px-2 py-0.5 rounded-lg shadow-sm">
+                                      {isEn ? 'Popular' : 'ពេញនិយម'}
                                     </span>
                                   )}
                                 </div>
-                                <p className="text-[10px] sm:text-[11px] text-slate-500 truncate flex items-center gap-1">
-                                  {item.type === 'food' ? (
-                                    <UtensilsCrossed className="w-3 h-3 text-amber-600 shrink-0" />
-                                  ) : (
-                                    <Coffee className="w-3 h-3 text-[#0D4A3E] shrink-0" />
+                                <p className="text-[11px] text-slate-500 truncate flex items-center gap-1.5">
+                                  <span className="truncate">{catLabel}</span>
+                                  {inStock && typeof item.stockQty === 'number' && item.stockQty > 0 && item.stockQty <= 5 && (
+                                    <span className="text-amber-700 font-semibold font-mono-num shrink-0">
+                                      · {isEn ? `${item.stockQty} left` : `នៅសល់ ${item.stockQty}`}
+                                    </span>
                                   )}
-                                  <span className="truncate">
-                                    {catLabel}
-                                    {!inStock ? ` · ${t.outOfStock}` : ''}
-                                  </span>
+                                  {!inStock && (
+                                    <span className="text-red-600 font-semibold shrink-0">· {t.outOfStock}</span>
+                                  )}
                                 </p>
                                 <h3 className="font-semibold text-xs sm:text-base text-slate-900 mt-0.5 line-clamp-1">
                                   {displayName}
@@ -2330,16 +2784,21 @@ export default function App() {
                                 </div>
                                 <motion.button
                                   type="button"
-                                  whileTap={shouldReduceMotion ? undefined : { scale: 0.88 }}
+                                  whileTap={shouldReduceMotion ? undefined : { scale: 0.9 }}
                                   disabled={!inStock}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     setCustomizingItem(item);
                                   }}
                                   aria-label={`${isEn ? 'Order' : 'កម្ម៉ង់'} ${displayName}`}
-                                  className="min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl bg-[#0D4A3E] hover:bg-[#09352C] text-white flex items-center justify-center disabled:bg-slate-300 transition-all shadow-sm group-hover:scale-105"
+                                  className={`min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-xl text-white flex items-center justify-center disabled:bg-slate-300 transition-all shadow-xs ${
+                                    inCartQty > 0
+                                      ? 'bg-amber-500 hover:bg-amber-600 text-slate-950 px-2.5 gap-1 font-mono-num text-xs font-bold'
+                                      : 'bg-[#0D4A3E] hover:bg-[#09352C]'
+                                  }`}
                                 >
-                                  <Plus className="w-4 h-4 transition-transform duration-200 group-hover:rotate-90" />
+                                  <Plus className="w-4 h-4 shrink-0" />
+                                  {inCartQty > 0 && <span>{inCartQty}</span>}
                                 </motion.button>
                               </div>
                             </motion.article>
@@ -2618,6 +3077,329 @@ export default function App() {
                   </div>
                 </aside>
               </section>
+
+              {/* Customer Ratings & Reviews Section */}
+              <section id="reviews-section" className="pt-2">
+                <div className="bg-white border border-slate-200/90 rounded-2xl sm:rounded-3xl p-4 sm:p-7 space-y-5 shadow-xs">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6">
+                      <div className="flex items-center gap-3.5">
+                        <div className="bg-[#E8F2EF] text-[#0D4A3E] rounded-2xl px-4 py-3 text-center shrink-0">
+                          <p className="text-2xl sm:text-3xl font-bold font-mono-num leading-none">
+                            {allCustomerReviews.length > 0 ? averageShopRating.toFixed(1) : '5.0'}
+                          </p>
+                          <div className="flex items-center justify-center gap-0.5 mt-1.5">
+                            {[1, 2, 3, 4, 5].map((s) => (
+                              <Star
+                                key={s}
+                                className={`w-3.5 h-3.5 ${
+                                  s <= Math.round(allCustomerReviews.length > 0 ? averageShopRating : 5)
+                                    ? 'fill-amber-400 text-amber-400'
+                                    : 'text-slate-300'
+                                }`}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <h2 className="font-bold text-slate-900 text-base sm:text-xl">
+                            {isEn ? 'Customer Ratings & Reviews' : 'ការវាយតម្លៃ & មតិអតិថិជន'}
+                          </h2>
+                          <p className="text-xs text-slate-500 font-mono-num">
+                            {allCustomerReviews.length > 0
+                              ? isEn
+                                ? `Based on ${allCustomerReviews.length} customer reviews`
+                                : `ផ្អែកលើការវាយតម្លៃសរុប ${allCustomerReviews.length} នាក់`
+                              : isEn
+                                ? 'Be the first to share your experience!'
+                                : 'សូមចូលរួមវាយតម្លៃបទពិសោធន៍របស់អ្នកជាមួយហាងយើង!'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {allCustomerReviews.length > 0 && (
+                        <div className="hidden sm:grid grid-cols-1 gap-1 min-w-[180px]">
+                          {ratingBreakdown.map((row) => (
+                            <div key={row.star} className="flex items-center gap-2 text-[11px] font-mono-num">
+                              <span className="w-6 text-slate-600 font-semibold text-right">{row.star}★</span>
+                              <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-amber-400 rounded-full transition-all"
+                                  style={{ width: `${row.percent}%` }}
+                                />
+                              </div>
+                              <span className="w-6 text-slate-400 text-right">{row.count}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsReviewFormOpen((v) => !v)}
+                      className="bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold text-xs px-4 py-3 rounded-xl inline-flex items-center justify-center gap-2 transition-colors shrink-0 shadow-xs"
+                    >
+                      <MessageSquare className="w-4 h-4 text-amber-300" />
+                      <span>
+                        {isReviewFormOpen
+                          ? isEn
+                            ? 'Close Form'
+                            : 'បិទទម្រង់វាយតម្លៃ'
+                          : isEn
+                            ? 'Write a Review'
+                            : 'សរសេរការវាយតម្លៃ'}
+                      </span>
+                    </button>
+                  </div>
+
+                  <AnimatePresence initial={false}>
+                    {isReviewFormOpen && (
+                      <motion.form
+                        initial={shouldReduceMotion ? false : { opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={shouldReduceMotion ? undefined : { opacity: 0, height: 0 }}
+                        onSubmit={async (e) => {
+                          e.preventDefault();
+                          if (submittingReview) return;
+                          setSubmittingReview(true);
+                          try {
+                            const ok = await handleSubmitShopReview({
+                              rating: reviewRating,
+                              comment: reviewComment,
+                              customerName: reviewName,
+                              tags: reviewTags,
+                            });
+                            if (ok) {
+                              setReviewComment('');
+                              setReviewTags([]);
+                              setReviewRating(5);
+                              setIsReviewFormOpen(false);
+                            }
+                          } finally {
+                            setSubmittingReview(false);
+                          }
+                        }}
+                        className="bg-[#F6F8F7] border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4 overflow-hidden"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-bold text-slate-900">
+                              {isEn ? 'How was your experience?' : 'តើអ្នកពេញចិត្តកម្រិតណាដែរ?'}
+                            </p>
+                            <p className="text-[11px] text-slate-500 mt-0.5">
+                              {reviewRating === 5
+                                ? isEn
+                                  ? 'Excellent!'
+                                  : 'ល្អឥតខ្ចោះ! (5/5)'
+                                : reviewRating === 4
+                                  ? isEn
+                                    ? 'Very Good'
+                                    : 'ល្អណាស់ (4/5)'
+                                  : reviewRating === 3
+                                    ? isEn
+                                      ? 'Good'
+                                      : 'ល្អ (3/5)'
+                                    : reviewRating === 2
+                                      ? isEn
+                                        ? 'Fair'
+                                        : 'មធ្យម (2/5)'
+                                      : isEn
+                                        ? 'Needs Improvement'
+                                        : 'គួរកែលម្អ (1/5)'}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <button
+                                key={star}
+                                type="button"
+                                onClick={() => setReviewRating(star)}
+                                aria-label={`${star} stars`}
+                                className="p-1.5 rounded-lg hover:bg-white transition-transform hover:scale-110"
+                              >
+                                <Star
+                                  className={`w-6 h-6 ${
+                                    star <= reviewRating
+                                      ? 'fill-amber-400 text-amber-400'
+                                      : 'text-slate-300'
+                                  }`}
+                                />
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <p className="text-[11px] font-semibold text-slate-600">
+                            {isEn ? 'Quick Highlights (Optional):' : 'ចំណុចដែលអ្នកពេញចិត្ត (ចុចរើសបាន)៖'}
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {(isEn
+                              ? ['Great Coffee', 'Fast Service', 'Friendly Staff', 'Clean & Cozy']
+                              : ['កាហ្វេឆ្ងាញ់', 'សេវាកម្មរហ័ស', 'បុគ្គលិករួសរាយ', 'ហាងស្អាត']
+                            ).map((tagLabel) => {
+                              const active = reviewTags.includes(tagLabel);
+                              return (
+                                <button
+                                  key={tagLabel}
+                                  type="button"
+                                  onClick={() =>
+                                    setReviewTags((prev) =>
+                                      prev.includes(tagLabel)
+                                        ? prev.filter((x) => x !== tagLabel)
+                                        : [...prev, tagLabel]
+                                    )
+                                  }
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold inline-flex items-center gap-1 border transition-colors ${
+                                    active
+                                      ? 'bg-[#0D4A3E] text-white border-[#0D4A3E]'
+                                      : 'bg-white text-slate-600 border-slate-200 hover:border-[#0D4A3E]/40'
+                                  }`}
+                                >
+                                  {active && <Check className="w-3 h-3" />}
+                                  <span>{tagLabel}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div className="grid sm:grid-cols-3 gap-3">
+                          <input
+                            type="text"
+                            maxLength={60}
+                            value={reviewName}
+                            onChange={(e) => setReviewName(e.target.value)}
+                            placeholder={isEn ? 'Your name (optional)' : 'ឈ្មោះរបស់អ្នក (មិនបាច់ដាក់ក៏បាន)'}
+                            className="bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 text-base sm:text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0D4A3E]"
+                          />
+                          <input
+                            type="text"
+                            maxLength={500}
+                            value={reviewComment}
+                            onChange={(e) => setReviewComment(e.target.value)}
+                            placeholder={
+                              isEn
+                                ? 'Share a short comment about drinks or service...'
+                                : 'សរសេរមតិយោបល់អំពីរសជាតិ ឬសេវាកម្ម...'
+                            }
+                            className="sm:col-span-2 bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 text-base sm:text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0D4A3E]"
+                          />
+                        </div>
+
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsReviewFormOpen(false)}
+                            className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-200/70 transition-colors"
+                          >
+                            {isEn ? 'Cancel' : 'បោះបង់'}
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={submittingReview}
+                            className="bg-[#0D4A3E] hover:bg-[#09352C] text-white font-bold px-5 py-2 rounded-xl text-xs disabled:opacity-50 transition-colors"
+                          >
+                            {submittingReview
+                              ? isEn
+                                ? 'Submitting...'
+                                : 'កំពុងផ្ញើ...'
+                              : isEn
+                                ? 'Submit Review'
+                                : 'ផ្ញើការវាយតម្លៃ'}
+                          </button>
+                        </div>
+                      </motion.form>
+                    )}
+                  </AnimatePresence>
+
+                  {allCustomerReviews.length === 0 ? (
+                    <div className="py-8 text-center text-xs text-slate-400 space-y-1">
+                      <p>
+                        {isEn
+                          ? 'No customer reviews yet. Tap "Write a Review" above to share your thoughts!'
+                          : 'មិនទាន់មានការវាយតម្លៃនៅឡើយទេ — ចុចប៊ូតុង «សរសេរការវាយតម្លៃ» ខាងលើដើម្បីផ្តល់ពិន្ទុដំបូង!'}
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                        {(showAllReviews ? allCustomerReviews : allCustomerReviews.slice(0, 6)).map(
+                          (rev) => (
+                            <article
+                              key={rev.id}
+                              className="bg-[#F9FBFA] border border-slate-200/80 rounded-2xl p-4 flex flex-col justify-between gap-2.5"
+                            >
+                              <div className="space-y-2">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <p className="font-bold text-xs text-slate-900 truncate">
+                                      {rev.customerName || (isEn ? 'Customer' : 'អតិថិជន')}
+                                    </p>
+                                    <p className="text-[11px] text-slate-400 font-mono-num">
+                                      {new Date(rev.submittedAt).toLocaleDateString()}
+                                      {rev.orderId
+                                        ? ` · ${isEn ? 'Verified Order' : 'អតិថិជនបានកម្ម៉ង់'}`
+                                        : ''}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-0.5 shrink-0">
+                                    {[1, 2, 3, 4, 5].map((s) => (
+                                      <Star
+                                        key={s}
+                                        className={`w-3.5 h-3.5 ${
+                                          s <= rev.rating
+                                            ? 'fill-amber-400 text-amber-400'
+                                            : 'text-slate-200'
+                                        }`}
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+
+                                {rev.tags && rev.tags.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {rev.tags.map((tg) => (
+                                      <span
+                                        key={tg}
+                                        className="bg-white border border-slate-200 text-slate-600 text-[10px] font-semibold px-2 py-0.5 rounded-md"
+                                      >
+                                        {tg}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {rev.comment && (
+                                  <p className="text-xs text-slate-700 leading-relaxed">{rev.comment}</p>
+                                )}
+                              </div>
+                            </article>
+                          )
+                        )}
+                      </div>
+                      {allCustomerReviews.length > 6 && (
+                        <div className="text-center pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setShowAllReviews((v) => !v)}
+                            className="text-xs font-bold text-[#0D4A3E] hover:underline"
+                          >
+                            {showAllReviews
+                              ? isEn
+                                ? 'Show Fewer Reviews'
+                                : 'បង្ហាញតិចជាងនេះ'
+                              : isEn
+                                ? `View All ${allCustomerReviews.length} Reviews`
+                                : `មើលការវាយតម្លៃទាំង ${allCustomerReviews.length}`}
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </section>
             </main>
           </div>
 
@@ -2763,6 +3545,12 @@ export default function App() {
         initialTableNum={activeTableNum}
         isTableLocked={isTableLocked}
         maxTableCount={maxTableCount}
+        isShopOpenEffective={shopScheduleStatus.isOpen}
+        shopClosedMessage={shopClosedMessage}
+        onOpenAuth={() => {
+          setIsCartOpen(false);
+          setIsAuthOpen(true);
+        }}
         onChangeTableNum={(n) => {
           if (!isTableLocked) {
             setSelectedTableNum(Math.min(maxTableCount, Math.max(1, n)));
@@ -2784,6 +3572,7 @@ export default function App() {
         order={receiptState.order}
         tgUrl={receiptState.tgUrl}
         shopSettings={shopSettings}
+        onSubmitFeedback={handleSubmitOrderFeedback}
         onToast={showToast}
         onClose={() => {
           safeSessionDel('cafe_last_receipt_id_v15');
